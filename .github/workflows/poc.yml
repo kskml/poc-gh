@@ -1,0 +1,100 @@
+name: CI Pipeline
+
+on:
+  pull_request:
+    types: [opened, synchronize, edited, closed]
+
+jobs:
+  pipeline:
+    if: startsWith(github.head_ref, 'feature/') || startsWith(github.head_ref, 'bugfix/') || startsWith(github.head_ref, 'hotfix/')
+    runs-on: ubuntu-latest
+    permissions:
+      checks: read
+      contents: read   # To read repository contents, including commit data
+      pull-requests: read   # Allow reading pull request details
+    env:
+      API_URL: ${{ vars.API_URL }}
+      COMMIT_ID: ${{ github.event.pull_request.head.sha }}
+      PR_ID: ${{ github.event.pull_request.id }}
+      REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      API_AUTH_TOKEN: ${{ secrets.HYPERCUBE_APIKEY }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Build
+        run: |
+          sleep 15
+          echo "✅ Build passed"
+      - name: Test
+        run: |
+          sleep 15
+          echo "✅ All tests passed"
+      - name: Release
+        run: |
+          echo "🔍 Fetching all check runs for commits in PR #${{ github.event.pull_request.number }}"
+
+          # Fetch all commits in the PR
+          COMMITS=$(curl -s \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/commits")
+
+          # Create a temporary file to collect all check runs
+          echo "[]" > all_check_runs.json
+
+          # Loop through each commit and fetch the check runs
+          for COMMIT in $(echo "$COMMITS" | jq -r '.[].sha'); do
+
+            CHECK_RUNS=$(curl -s \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/${{ github.repository }}/commits/$COMMIT/check-runs" \
+              | jq '[.check_runs[] | select(.name != "pipeline")]') 
+
+            # Merge into the list
+            jq -s '.[0] + .[1]' all_check_runs.json <(echo "$CHECK_RUNS") > tmp.json
+            mv tmp.json all_check_runs.json
+          done
+
+          # Deduplicate by check run ID and save final list
+          jq 'unique_by(.id)' all_check_runs.json > unique_check_runs.json
+
+          # Print number of unique check runs
+          echo "🔢 Number of unique check runs (excluding 'pipeline'): $(jq length unique_check_runs.json)"
+          # Print each unique check run ID
+          echo "🆔 Unique Check Run IDs:"
+          jq -r '.[] | "ID: \(.id), Conclusion: \(.conclusion), Status: \(.status)"' unique_check_runs.json
+          # Check for success + completed and fail if any found
+          if jq -e '.[] | select(.conclusion != "success")' unique_check_runs.json > /dev/null; then
+            echo "❌ Check run failing. Pipeline failed."
+            exit 1
+          else
+            echo "✅ All checks passed !"
+          fi
+
+          echo "📡 📡 Calling external API with PR ID $PR_ID and commit $COMMIT_ID"
+
+          sleep 10
+          PAYLOAD=$(jq -n \
+            --arg status "APPLICABLE" \
+            --arg message "Build successful" \
+            --arg commit "$COMMIT_ID" \
+            --arg pr_id "$PR_ID" \
+            --arg repo "$REPO" \
+            --arg pr_number "$PR_NUMBER" \
+            '{status: $status, message: $message, commit: $commit, pr_id: $pr_id, repository: $repo, pr_number: $pr_number}')
+          echo "📦 Payload:"
+          echo "$PAYLOAD"
+          HTTP_STATUS=$(curl -s -o response.txt -w "%{http_code}" -X POST \
+            "$API_URL/webhook/pr/artifact/APPLICABLE" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: $API_AUTH_TOKEN" \
+            -d "$PAYLOAD")
+          echo "🔁 Response:"
+          cat response.txt
+          echo "  🌐 HTTP Status: $HTTP_STATUS"
+          if [ "$HTTP_STATUS" -ne 200 ]; then
+            echo "❌ Webhook call failed with status $HTTP_STATUS. Pipeline failed."
+            exit 1
+          else
+            echo "✅ Webhook call succeeded"
+          fi

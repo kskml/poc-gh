@@ -13,31 +13,41 @@ This approach is the most effective because it balances the need for comprehensi
 
 Why it's best:
 
-Context Preservation: By analyzing related files together (e.g., a service, its model, and its corresponding documentation), the LLM can accurately identify discrepancies.
+Context Preservation: 
+By analyzing related files together (e.g., a service, its model, and its corresponding documentation), the LLM can accurately identify discrepancies.
 Scalability: It works for projects of any size by breaking them down into manageable, logical units.
 Efficiency: It avoids the overhead of a full RAG system while still being significantly more intelligent than naive chunking.
-3. The Algorithm Explained
+
+The Algorithm Explained
 The process follows a clear, multi-step pipeline:
 
-Repository Checkout: The GitHub Action checks out both the source code repository and the documentation repository into separate directories.
-Structure Extraction: The Python script walks the code repository to build a mental model of its structure. It identifies:
+Repository Checkout: 
+The GitHub Action checks out both the source code repository and the documentation repository into separate directories.
+
+Structure Extraction: 
+The Python script walks the code repository to build a mental model of its structure. It identifies:
 All directories and files.
 For Python files, it uses the ast module to parse import statements, creating a dependency graph (e.g., auth_service.py imports user_model.py).
+
 Semantic Grouping:
 Files are initially grouped by their parent directory.
 The algorithm then refines these groups by merging them if files in one group import files from another. For example, if src/controllers/ files import src/models/ files, these two directories might be merged into a single analysis group.
+
 Intelligent Chunking:
 For each semantic group, the algorithm calculates the total token count.
 If the group is too large, it creates chunks.
 Large File Handling: If a single file is too large (e.g., a 5,000-line file), it's split intelligently. For Python, it's split at function and class boundaries. For other files, it's split by lines, ensuring no single part exceeds the limit.
 Small File Aggregation: Smaller files are combined into chunks until the token limit is reached, maximizing context in each API call.
+
 LLM Analysis (Azure OpenAI):
 Each chunk is sent to Azure OpenAI with a carefully engineered prompt.
 The prompt defines what constitutes a "gap" (e.g., missing documentation, outdated documentation, undocumented features) and asks for a structured JSON response.
 The JSON includes the gap type, severity (critical, high, medium, low), the file path, a description, and a suggested change.
+
 Result Synthesis:
 The script collects all the JSON results from every chunk.
 It merges them, removes duplicate recommendations, and sorts all identified gaps by severity.
+
 Report Generation:
 The synthesized results are formatted into a clean, human-readable Markdown report.
 The GitHub Action then creates a new issue in the repository, posting this report for the development team to review.

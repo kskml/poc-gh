@@ -1,0 +1,31 @@
+sequenceDiagram
+    participant Developer
+    participant GitHub
+    participant CI/CD Pipeline
+    participant Config File
+    participant Confluence API
+    participant AI/LLM Service
+    participant Jira API
+
+    Developer->>GitHub: 1. Pushes code & creates Pull Request
+    Developer->>GitHub: 2. Merges PR to 'main' branch
+    GitHub-->>CI/CD Pipeline: 3. Triggers 'Arch-Check' Workflow on merge
+
+    CI/CD Pipeline->>GitHub: 4a. Fetches Pull Request diff
+    CI/CD Pipeline->>Config File: 4b. Reads mapping (code path -> Confluence labels)
+    CI/CD Pipeline->>Confluence API: 5. Fetches relevant pages using labels
+    Confluence API-->>CI/CD Pipeline: Returns page content (Markdown/Storage Format)
+
+    CI/CD Pipeline->>AI/LLM Service: 6. Sends Prompt with PR Diff & Confluence Content
+    Note over CI/CD Pipeline,AI/LLM Service: Prompt: "Analyze the following code diff against the provided architecture documentation. Identify any new components, patterns, or significant changes that are not reflected in the documentation. For each gap, provide a title and a proposed Markdown update. Return the result as a structured JSON object."
+    
+    AI/LLM Service-->>CI/CD Pipeline: 7. Returns structured JSON with gaps and proposed markdown
+    
+    alt Gaps Found?
+        CI/CD Pipeline->>Jira API: 8a. Parses JSON and creates a Parent Jira Ticket
+        CI/CD Pipeline->>Jira API: 8b. Creates Sub-tasks for each identified gap
+        Jira API-->>CI/CD Pipeline: Confirms ticket creation
+        CI/CD Pipeline-->>Developer: 9. Notifies (e.g., Slack comment) with Jira ticket link
+    else No Gaps Found
+        CI/CD Pipeline-->>Developer: 9. Notifies of successful check (no action needed)
+    end

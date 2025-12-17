@@ -1,61 +1,56 @@
-Phase 1: Configuration and CI/CD Trigger
-Task 1: Develop Configuration Schema
-Description: Design and create a configuration file (e.g., arch-docs.yml) within the repository. This file will act as the "brain" of the system, mapping code locations to their relevant documentation.
-Details:
-The configuration should define rules. A good approach is a list of mappings.
-Each mapping should contain:
-code_path_pattern: A regex or glob pattern to match changed files (e.g., src/services/payment/*).
-confluence_labels: A list of labels used to find the relevant documentation pages (e.g., ['payment-service', 'api-spec']).
-confluence_space_key: The Confluence space where the pages reside (e.g., ARCH).
-This file must be version-controlled with the codebase so it evolves with the project structure.
-Task 2: Implement CI/CD Workflow Trigger
-Description: Create the main CI/CD job file (e.g., .github/workflows/arch-doc-check.yml for GitHub Actions). This workflow will be the entry point for the entire process.
-Details:
-Trigger: Configure the workflow to run on the push event to the target branch (e.g., main or develop).
-Permissions: Grant the workflow read access to repository contents and pull-requests to fetch the diff.
-Environment: Set up the necessary environment, including checking out the repository code.
-Phase 2: Data Collection
-Task 3: Implement Pull Request Diff Collector
-Description: Develop a script or module that, when run in the CI context, can identify the merged Pull Request and extract the code diff.
-Details:
-The script should use the GitHub API to find the PR associated with the merge commit.
-It should then fetch the diff for that PR. The GitHub CLI (gh) is excellent for this, or a direct API call can be made using the provided GITHUB_TOKEN.
-Output: The final output of this module should be a single string or a structured object containing the full diff of the merged PR.
-Task 4: Implement Confluence Content Fetcher
-Description: Create a module responsible for querying the Confluence API and retrieving the content of relevant architecture pages.
-Details:
-Input: This module will take a list of labels and a space key as input, as defined in the configuration file from Task 1.
-API Interaction: It will use the Confluence Search API (/rest/api/search) with a CQL (Confluence Query Language) query like label = "service-a" AND label = "architecture" AND space = "ARCH".
-Content Retrieval: For each page found, it will use the Confluence Content API (/rest/api/content/{id}) with the expand=body.storage parameter to get the full page content.
-Format Conversion: The storage format is a type of XHTML. This module should convert the fetched content into a clean, readable Markdown format, as this is easier for LLMs to process. Libraries exist for this conversion (e.g., html2md).
-Output: A single string containing the concatenated Markdown content of all relevant pages.
-Phase 3: AI Analysis
-Task 5: Develop AI Prompt Engineering and Integration Module
-Description: This is the core analysis task. It involves crafting a precise prompt for the AI model and building the logic to send the data and receive a structured response.
-Details:
-Prompt Design: Create a detailed prompt that instructs the AI on its role, the context, the input data, and the desired output format. The prompt should be specific, for example:
-"You are an expert software architect. Your task is to analyze a code diff against a set of architecture documentation. Identify any new components, modified APIs, changed data schemas, or significant architectural decisions that are present in the code but missing from the documentation. For each gap, provide a descriptive title and a proposed Markdown text for the documentation update. Return your findings in a structured JSON array, where each object has the keys gap_title and proposed_markdown."
-API Interaction: The module will take the PR diff (from Task 3) and the Confluence content (from Task 4) and send them to a chosen LLM API (e.g., OpenAI's API for GPT-4, Anthropic's API for Claude 3).
-Error Handling: Implement robust error handling for API failures, rate limits, or unparseable AI responses.
-Output: The module should parse the AI's response and return a clean, structured JSON object that matches the schema defined in the prompt.
-Phase 4: Jira Integration
-Task 6: Implement Jira Ticket Creation Module
-Description: Develop a module that takes the structured JSON output from the AI and uses it to create a parent ticket and corresponding sub-tasks in Jira.
-Details:
-Authentication: Securely use the JIRA_API_TOKEN and username from the pre-requisites.
-Parent Ticket Creation:
-If the AI's JSON output is not empty, the module first creates a parent "Story" ticket.
-It will use the Jira Create Issue API (/rest/api/3/issue).
-The summary and description will be populated using a template that includes PR details (number, title, URL, author).
-Sub-task Creation:
-The module will then iterate through each gap in the JSON array.
-For each gap, it will create a "Sub-task" linked to the parent ticket.
-The sub-task's summary will be the gap_title, and its description will contain the proposed_markdown from the AI, formatted for clarity.
-Markdown to ADF Conversion: The Jira API v3 uses Atlassian Document Format (ADF) for rich text. This module must convert the Markdown from the AI into ADF JSON before sending it in the request body. Several open-source libraries can handle this conversion.
-Output: The URL of the created Jira parent ticket.
-Task 7: Implement Notification and Logging
-Description: Add the final step to the CI/CD workflow to provide feedback to the development team.
-Details:
-Success Notification: If no gaps are found, the workflow should log a success message or post a brief, positive comment on the merged PR (e.g., "✅ Architecture documentation check passed. No gaps detected.").
-Action Notification: If gaps are found and a Jira ticket is created, the workflow should post a comment on the merged PR with a link to the new Jira ticket, tagging the PR author.
-Failure Notification: If any step in the process fails (API error, AI model issue), the CI job should fail visibly, and a notification should be sent to a dedicated Slack channel or engineering alias for immediate attention.
+Workflow Triggers
+The automated architecture documentation workflow can be initiated by several different events. The choice of trigger depends on the team's development process, the desired level of control, and the integration maturity between GitHub and Jira.
+
+Below are the three primary trigger mechanisms we can implement.
+
+1. Trigger on GitHub Push Event
+This is the most straightforward and common CI/CD trigger. The workflow is configured to run automatically on every push to a specific branch, such as main or develop.
+
+{info:title=How it Works}
+The CI/CD platform (e.g., GitHub Actions, GitLab CI) is configured with a trigger that listens for a push event on the target branch. Once the push is detected, the workflow begins its process of fetching the diff, analyzing it, and creating a Jira ticket if necessary.
+{info}
+
+Pros
+Simplicity: Easy to configure and understand. It's a standard feature of all modern CI/CD systems.
+Guaranteed Execution: Every merge to the branch is checked, ensuring no architectural change is missed.
+Fast Feedback: The analysis runs immediately after the code is merged, providing the quickest possible feedback.
+Cons
+Resource Intensive: The workflow will run on every merge, even for minor changes (e.g., typo fixes, dependency updates) that do not affect the architecture. This can consume CI/CD minutes and API calls unnecessarily.
+Lacks Business Context: The workflow is unaware of the state of the corresponding Jira ticket. It might create a documentation task for a feature that has been deprioritized or cancelled in Jira.
+2. Trigger on GitHub Push Event with Jira Ticket Status Check
+This is a more advanced, conditional trigger. The workflow still initiates on a GitHub push, but it performs an initial check to verify the status of the associated Jira ticket before proceeding with the full analysis.
+
+{info:title=How it Works}
+
+The CI/CD workflow is triggered by a push event to the target branch.
+The script first extracts the Jira ticket ID from the latest commit message or PR title.
+It makes an API call to Jira to fetch the status of that ticket (e.g., "In Progress", "Done", "Blocked").
+The workflow only proceeds with the Confluence/AI analysis if the ticket status matches a predefined list of acceptable states (e.g., "Done" or "Ready for QA").
+{info}
+Pros
+Resource Efficient: Prevents the workflow from running on trivial or irrelevant changes, saving CI/CD resources and API quota.
+Business Alignment: Ensures documentation is only requested for work that has reached a significant milestone, aligning the technical process with the project management process.
+Reduced Noise: Fewer unnecessary Jira tickets are created, reducing noise for the architecture team.
+Cons
+Increased Complexity: The CI/CD script becomes more complex, as it needs to handle API calls to Jira, error handling for missing tickets, and conditional logic.
+Dependency on Jira: The workflow's execution is now dependent on the availability and responsiveness of the Jira API. A Jira outage could delay or break the process.
+Assumes Good Hygiene: Relies on developers consistently including the correct Jira ticket ID in their commit messages or PR titles.
+3. Trigger Only on Jira Ticket Status Transition
+This is the most sophisticated trigger, moving the initiation point entirely from GitHub to Jira. The workflow is decoupled from the code push event and is instead triggered by a change in Jira.
+
+{info:title=How it Works}
+
+A Jira Webhook is configured to fire when a ticket transitions to a specific status (e.g., from "In Progress" to "Done").
+This webhook sends a payload to an intermediary service, such as an AWS Lambda function, a serverless Azure Function, or a Jenkins job.
+This service receives the Jira ticket ID from the webhook payload.
+It then uses the Jira API to find the associated GitHub repository and Pull Request(s).
+Finally, it programmatically triggers the documentation analysis workflow, passing the necessary context (repo, PR, etc.) to it.
+{info}
+Pros
+Ultimate Business Alignment: The documentation process is triggered directly by a business decision (the completion of a task), making it the most context-aware approach.
+Decoupled: The architecture analysis is completely separate from the CI/CD pipeline, which can simplify the main build and deployment process.
+Highly Efficient: The analysis runs only when explicitly needed, eliminating all wasted executions.
+Cons
+Highest Complexity: This is the most difficult to set up and maintain. It requires building and maintaining a separate intermediary service to handle webhooks and trigger the workflow.
+More Points of Failure: The chain involves Jira, the Jira Webhook system, the intermediary service, and the final workflow, increasing the number of potential failure points.
+Requires Advanced Integration: Needs robust integration between Jira and GitHub to reliably find the correct PR for a given Jira ticket, which can be challenging if the link is not consistently maintained.

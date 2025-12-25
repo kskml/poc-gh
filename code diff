@@ -54,3 +54,25 @@ Cons
 Highest Complexity: This is the most difficult to set up and maintain. It requires building and maintaining a separate intermediary service to handle webhooks and trigger the workflow.
 More Points of Failure: The chain involves Jira, the Jira Webhook system, the intermediary service, and the final workflow, increasing the number of potential failure points.
 Requires Advanced Integration: Needs robust integration between Jira and GitHub to reliably find the correct PR for a given Jira ticket, which can be challenging if the link is not consistently maintained.
+
+4.Trigger on Manual GitHub Release
+This approach decouples the workflow from individual code pushes and instead ties it to a significant milestone: the creation of a new release. This provides developers with full control over when the architecture documentation is reviewed.
+
+{info:title=How it Works}
+
+A developer creates a new Git tag (e.g., v1.2.0) and pushes it to GitHub, creating a new Release from the GitHub UI or via the command line.
+The CI/CD workflow is configured with a trigger that listens specifically for the creation of a new release event.
+When triggered, the script first identifies the new tag (e.g., v1.2.0) and then programmatically finds the previous tag (e.g., v1.1.0).
+It then generates a code diff encompassing all changes between these two tags (git diff v1.1.0...v1.2.0).
+The rest of the workflow proceeds as usual: it fetches relevant Confluence pages, analyzes the comprehensive diff with the AI, and creates a single Jira ticket summarizing all documentation gaps for the entire release.
+{info}
+Pros
+Full Developer Control: The team decides exactly when to run the documentation review, aligning it with their release cadence.
+Highly Resource Efficient: The workflow runs only once per release cycle, dramatically reducing CI/CD minutes, API calls, and noise compared to running on every merge.
+Release-Centric Review: Provides a holistic, high-level review of all architectural changes introduced in a release, which is ideal for updating major documentation versions.
+Reduced Noise: Creates a single, comprehensive Jira ticket per release, consolidating all documentation tasks into one manageable unit.
+Cons
+Significant Documentation Lag: Gaps are not identified until a release is tagged, which could be weeks or months after the code was merged. This allows architectural drift to go unchecked for long periods.
+Relies on Manual Discipline: The entire process depends on a developer remembering to create the release tag. If this step is missed, the workflow is bypassed entirely.
+Large Diff Complexity: The diff between two releases can be substantial. A very large diff may be difficult for the AI model to process accurately, potentially leading to less precise analysis or missing subtle but important changes.
+Delayed Feedback: Architectural issues are not caught early in the development cycle. By the time the ticket is created, the problematic code may already be in production, making it harder and more costly to fix.

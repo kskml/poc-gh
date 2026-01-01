@@ -1,78 +1,131 @@
-Workflow Triggers
-The automated architecture documentation workflow can be initiated by several different events. The choice of trigger depends on the team's development process, the desired level of control, and the integration maturity between GitHub and Jira.
-
-Below are the three primary trigger mechanisms we can implement.
-
-1. Trigger on GitHub Push Event
-This is the most straightforward and common CI/CD trigger. The workflow is configured to run automatically on every push to a specific branch, such as main or develop.
-
-{info:title=How it Works}
-The CI/CD platform (e.g., GitHub Actions, GitLab CI) is configured with a trigger that listens for a push event on the target branch. Once the push is detected, the workflow begins its process of fetching the diff, analyzing it, and creating a Jira ticket if necessary.
+Confluence Integration: Identifying and Fetching Documentation
+{info:title=Purpose}
+This page outlines the technical implementation for fetching content from Confluence. The workflow intelligently identifies the most relevant architecture documentation pages based on the code changes in a Pull Request and retrieves their content for AI analysis.
 {info}
 
-Pros
-Simplicity: Easy to configure and understand. It's a standard feature of all modern CI/CD systems.
-Guaranteed Execution: Every merge to the branch is checked, ensuring no architectural change is missed.
-Fast Feedback: The analysis runs immediately after the code is merged, providing the quickest possible feedback.
-Cons
-Resource Intensive: The workflow will run on every merge, even for minor changes (e.g., typo fixes, dependency updates) that do not affect the architecture. This can consume CI/CD minutes and API calls unnecessarily.
-Lacks Business Context: The workflow is unaware of the state of the corresponding Jira ticket. It might create a documentation task for a feature that has been deprioritized or cancelled in Jira.
-2. Trigger on GitHub Push Event with Jira Ticket Status Check
-This is a more advanced, conditional trigger. The workflow still initiates on a GitHub push, but it performs an initial check to verify the status of the associated Jira ticket before proceeding with the full analysis.
+1. Workflow Overview
+The CI/CD pipeline executes a multi-step process to gather the necessary documentation context from Confluence.
 
-{info:title=How it Works}
+Identify Relevant Pages: The job analyzes the changed files in the PR and uses a configuration file to determine which Confluence pages are relevant. This is done via a robust label-based search, not a brittle page path.
+Search for Pages: It uses the collected labels to query the Confluence Search API, which returns a list of matching page IDs.
+Fetch Page Content: For each page ID found, it makes a call to the Confluence Content API to get the full content in a structured format.
+Format for AI: The fetched content is converted from Confluence's internal format to clean Markdown, making it easy for the AI model to process.
+2. Step-by-Step Execution and API Details
+Step 1: Identify the Right Confluence Pages (The "Smart Path" Method)
+A common mistake is to try and map code to a static Confluence page URL (e.g., .../pages/12345/payment-arch). This is brittle because page IDs and URLs can change. Our method is more robust.
 
-The CI/CD workflow is triggered by a push event to the target branch.
-The script first extracts the Jira ticket ID from the latest commit message or PR title.
-It makes an API call to Jira to fetch the status of that ticket (e.g., "In Progress", "Done", "Blocked").
-The workflow only proceeds with the Confluence/AI analysis if the ticket status matches a predefined list of acceptable states (e.g., "Done" or "Ready for QA").
-{info}
-Pros
-Resource Efficient: Prevents the workflow from running on trivial or irrelevant changes, saving CI/CD resources and API quota.
-Business Alignment: Ensures documentation is only requested for work that has reached a significant milestone, aligning the technical process with the project management process.
-Reduced Noise: Fewer unnecessary Jira tickets are created, reducing noise for the architecture team.
-Cons
-Increased Complexity: The CI/CD script becomes more complex, as it needs to handle API calls to Jira, error handling for missing tickets, and conditional logic.
-Dependency on Jira: The workflow's execution is now dependent on the availability and responsiveness of the Jira API. A Jira outage could delay or break the process.
-Assumes Good Hygiene: Relies on developers consistently including the correct Jira ticket ID in their commit messages or PR titles.
-3. Trigger Only on Jira Ticket Status Transition
-This is the most sophisticated trigger, moving the initiation point entirely from GitHub to Jira. The workflow is decoupled from the code push event and is instead triggered by a change in Jira.
+Purpose: To determine which Confluence pages are relevant to the code changes without relying on fixed URLs.
+Method: Label-Based Discovery
+The CI/CD script gets the list of all files that were changed in the merged Pull Request.
+It reads a configuration file (arch-docs.yml) from the repository root. This file acts as a map, linking code patterns to Confluence labels.
+The script iterates through the changed files. For each file, it checks the mappings in the config file. If a file path matches a code_path_pattern, the script collects the corresponding confluence_labels and confluence_space_key.
+Example arch-docs.yml:
+{code:lang=yaml}
 
-{info:title=How it Works}
+Mapping from code patterns to Confluence documentation
+mappings:
 
-A Jira Webhook is configured to fire when a ticket transitions to a specific status (e.g., from "In Progress" to "Done").
-This webhook sends a payload to an intermediary service, such as an AWS Lambda function, a serverless Azure Function, or a Jenkins job.
-This service receives the Jira ticket ID from the webhook payload.
-It then uses the Jira API to find the associated GitHub repository and Pull Request(s).
-Finally, it programmatically triggers the documentation analysis workflow, passing the necessary context (repo, PR, etc.) to it.
-{info}
-Pros
-Ultimate Business Alignment: The documentation process is triggered directly by a business decision (the completion of a task), making it the most context-aware approach.
-Decoupled: The architecture analysis is completely separate from the CI/CD pipeline, which can simplify the main build and deployment process.
-Highly Efficient: The analysis runs only when explicitly needed, eliminating all wasted executions.
-Cons
-Highest Complexity: This is the most difficult to set up and maintain. It requires building and maintaining a separate intermediary service to handle webhooks and trigger the workflow.
-More Points of Failure: The chain involves Jira, the Jira Webhook system, the intermediary service, and the final workflow, increasing the number of potential failure points.
-Requires Advanced Integration: Needs robust integration between Jira and GitHub to reliably find the correct PR for a given Jira ticket, which can be challenging if the link is not consistently maintained.
+code_path_pattern: "src/services/payment/*"
+confluence_labels: ["payment-service", "architecture"]
+confluence_space_key: "ARCH"
+code_path_pattern: "libs/shared/*"
+confluence_labels: ["shared-library", "architecture"]
+confluence_space_key: "ARCH"
+{code}
+API 1: Search for Relevant Pages
+Once the script has a list of labels and a space key, it uses the Search API to find the pages.
 
-4.Trigger on Manual GitHub Release
-This approach decouples the workflow from individual code pushes and instead ties it to a significant milestone: the creation of a new release. This provides developers with full control over when the architecture documentation is reviewed.
+Method & Endpoint: GET /rest/api/search
+Purpose: To query Confluence and find all pages that match the given labels within a specific space.
+Sample Request:
+{code:lang=http}
+GET /rest/api/search?cql=space=%22ARCH%22%20and%20label%20in%20(%22payment-service%22,%22architecture%22)&expand=version HTTP/1.1
+Host: your-domain.atlassian.net
+Authorization: Basic <base64_encoded_email_and_token>
+Content-Type: application/json
+{code}
 
-{info:title=How it Works}
+Parameter Breakdown (Query Parameters)
+| Parameter | Description | Sample Value |
+| :--- | :--- | :--- |
+| `cql` | **Confluence Query Language (CQL)**. This is the core of the search. The value must be URL-encoded. | `space = "ARCH" and label in ("payment-service","architecture")` |
+| `expand` | A comma-separated list of properties to expand in the response. We request `version` to ensure we get the latest version of the page. | `version` |
 
-A developer creates a new Git tag (e.g., v1.2.0) and pushes it to GitHub, creating a new Release from the GitHub UI or via the command line.
-The CI/CD workflow is configured with a trigger that listens specifically for the creation of a new release event.
-When triggered, the script first identifies the new tag (e.g., v1.2.0) and then programmatically finds the previous tag (e.g., v1.1.0).
-It then generates a code diff encompassing all changes between these two tags (git diff v1.1.0...v1.2.0).
-The rest of the workflow proceeds as usual: it fetches relevant Confluence pages, analyzes the comprehensive diff with the AI, and creates a single Jira ticket summarizing all documentation gaps for the entire release.
-{info}
-Pros
-Full Developer Control: The team decides exactly when to run the documentation review, aligning it with their release cadence.
-Highly Resource Efficient: The workflow runs only once per release cycle, dramatically reducing CI/CD minutes, API calls, and noise compared to running on every merge.
-Release-Centric Review: Provides a holistic, high-level review of all architectural changes introduced in a release, which is ideal for updating major documentation versions.
-Reduced Noise: Creates a single, comprehensive Jira ticket per release, consolidating all documentation tasks into one manageable unit.
-Cons
-Significant Documentation Lag: Gaps are not identified until a release is tagged, which could be weeks or months after the code was merged. This allows architectural drift to go unchecked for long periods.
-Relies on Manual Discipline: The entire process depends on a developer remembering to create the release tag. If this step is missed, the workflow is bypassed entirely.
-Large Diff Complexity: The diff between two releases can be substantial. A very large diff may be difficult for the AI model to process accurately, potentially leading to less precise analysis or missing subtle but important changes.
-Delayed Feedback: Architectural issues are not caught early in the development cycle. By the time the ticket is created, the problematic code may already be in production, making it harder and more costly to fix.
+Sample Response
+{code:lang=json}
+{
+"results": [
+{
+"id": "12345",
+"type": "page",
+"status": "current",
+"title": "Payment Service Architecture",
+"extensions": { "position": 0 },
+"_links": {
+"webui": "/spaces/ARCH/pages/12345/Payment+Service+Architecture"
+},
+"version": {
+"by": { "type": "known", "accountId": "..." },
+"when": "2023-10-27T10:00:00.000Z",
+"message": "Updated API endpoint details",
+"number": 15
+}
+}
+// ... more results if any
+],
+"start": 0,
+"limit": 25,
+"size": 1
+}
+{code}
+The CI/CD script parses this response to get the id of each relevant page (e.g., 12345).
+
+API 2: Fetch Page Content
+With the page IDs from the search results, the script now fetches the full content of each page.
+
+Method & Endpoint: GET /rest/api/content/{id}
+Purpose: To retrieve the full body content of a specific Confluence page in its native "storage format".
+Sample Request:
+{code:lang=http}
+GET /rest/api/content/12345?expand=body.storage HTTP/1.1
+Host: your-domain.atlassian.net
+Authorization: Basic <base64_encoded_email_and_token>
+Content-Type: application/json
+{code}
+
+Parameter Breakdown (Query Parameters)
+| Parameter | Description | Sample Value |
+| :--- | :--- | :--- |
+| `id` | (In URL) The unique ID of the page to fetch. | `12345` |
+| `expand` | Specifies which additional properties to include in the response. `body.storage` is critical as it returns the page content in a structured XHTML-like format. | `body.storage` |
+
+Sample Response
+{code:lang=json}
+{
+"id": "12345",
+"type": "page",
+"title": "Payment Service Architecture",
+"space": { "id": 20001, "key": "ARCH", "name": "Architecture" },
+"body": {
+"storage": {
+"value": "<h1>Payment Service Architecture</h1><p>The payment service is responsible for processing transactions.</p><ac:structured-macro ac:name="code" ac:schema-version="1"><ac:parameter ac:name="language">java</ac:parameter>ac:plain-text-body<![CDATA[public class OldPaymentProcessor { ... }]]></ac:plain-text-body></ac:structured-macro>",
+"representation": "storage",
+"embeddedContent": []
+}
+},
+"version": { "by": { ... }, "when": "2023-10-27T10:00:00.000Z", "number": 15 }
+}
+{code}
+The CI/CD script extracts the body.storage.value and converts it to clean Markdown before sending it to the AI.
+3. Summary of Confluence APIs
+| Action | API Endpoint | Purpose in Workflow | Key Parameters |
+| :--- | :--- | :--- | :--- |
+| **Search for Pages** | `GET /rest/api/search` | To find pages that match the labels derived from the code changes. | `cql`, `expand` |
+| **Fetch Page Content** | `GET /rest/api/content/{id}` | To get the full content of the pages identified in the search. | `expand=body.storage` |
+
+4. Authentication
+All requests to the Confluence API are authenticated using a Confluence API Token.
+
+Token Name: CONFLUENCE_API_TOKEN
+Storage: This token is securely stored as a secret in the CI/CD platform.
+Usage: The token is used with Basic Authentication, identical to the Jira API method.

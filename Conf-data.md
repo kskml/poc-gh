@@ -1,16 +1,19 @@
 The "Best Way" Approach & Architecture (Req 5)
 Before diving into the code, here is the recommended architectural approach and why it is the best practice for this scenario:
 
-Hybrid Parsing Strategy (HTML + Heuristics):
+1. Hybrid Parsing Strategy (HTML + Heuristics):
 Why: Confluence's native storage format is XML-based (ADF). While robust, it is complex to parse. The "View" or "Storage" format (XHTML) is easier to parse using standard HTML parsers like BeautifulSoup.
 Strategy: Fetch the content in expand=body.storage. Use BeautifulSoup to traverse the DOM tree. This allows you to accurately identify <h1>, <h2>, etc., and group all subsequent elements (paragraphs, lists, images) until the next heading is found.
-Multimodal LLM Usage (GPT-4o):
+
+2. Multimodal LLM Usage (GPT-4o):
 Why: You specifically asked to handle draw.io images. Text-based LLMs (like standard GPT-3.5) cannot "see" diagrams.
 Strategy: Use GPT-4o (via Azure OpenAI). It supports Vision capabilities. You can extract the image data (Base64 or URL) from the Confluence chunk and pass it directly to the LLM alongside the text. This allows the model to describe the flowchart or diagram in the summary.
-Sequential Chunk Processing with Context:
+
+3. Sequential Chunk Processing with Context:
 Why: Sending one massive page to an LLM often results in hallucinations or loss of detail due to token limits.
 Strategy: Break the page into sections based on headings. Summarize each section individually. If you need a final summary, you can then summarize the list of section summaries.
-Error Handling & Modular Design:
+
+4. Error Handling & Modular Design:
 Why: Network requests to Confluence and Azure OpenAI can fail.
 Strategy: Use distinct classes/functions for fetching, parsing, and inference. This makes the code testable and maintainable.
 

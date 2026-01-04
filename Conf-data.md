@@ -3,7 +3,7 @@ Before diving into the code, here is the recommended architectural approach and 
 
 1. Hybrid Parsing Strategy (HTML + Heuristics):
 Why: Confluence's native storage format is XML-based (ADF). While robust, it is complex to parse. The "View" or "Storage" format (XHTML) is easier to parse using standard HTML parsers like BeautifulSoup.
-Strategy: Fetch the content in expand=body.storage. Use BeautifulSoup to traverse the DOM tree. This allows you to accurately identify "<h1>, <h2>", etc., and group all subsequent elements (paragraphs, lists, images) until the next heading is found.
+Strategy: Fetch the content in expand=body.storage. Use BeautifulSoup to traverse the DOM tree. This allows you to accurately identify (<h1>, <h2>), etc., and group all subsequent elements (paragraphs, lists, images) until the next heading is found.
 
 2. Multimodal LLM Usage (GPT-4o):
 Why: You specifically asked to handle draw.io images. Text-based LLMs (like standard GPT-3.5) cannot "see" diagrams.

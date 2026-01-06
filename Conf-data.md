@@ -27,208 +27,193 @@ AZURE_OPENAI_API_KEY="your-azure-key"
 AZURE_OPENAI_DEPLOYMENT_NAME="gpt-4o" # Or your specific deployment name
 
 Impl:
+
 import os
-import base64
 import requests
+import re
+import base64
 from bs4 import BeautifulSoup
 from openai import AzureOpenAI
-from dotenv import load_dotenv
+from typing import List, Dict
 
-# Load environment variables
-load_dotenv()
+# --- GLOBAL CONFIGURATION ---
+CONFLUENCE_BASE_URL = "https://your-domain.atlassian.net/wiki"
+CONFLUENCE_EMAIL = "your-email@company.com"
+CONFLUENCE_API_TOKEN = "your-api-token"
 
-class ConfluenceSummarizer:
-    def __init__(self):
-        # Initialize Azure OpenAI Client
-        self.client = AzureOpenAI(
-            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-            api_version="2024-02-15-preview",
-            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
-        )
-        self.deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
+AZURE_OPENAI_ENDPOINT = "https://your-resource-name.openai.azure.com/"
+AZURE_OPENAI_KEY = "your-azure-openai-key"
+AZURE_OPENAI_API_VERSION = "2024-02-15-preview"
+AZURE_DEPLOYMENT_NAME = "gpt-4o"
+
+# Initialize Azure OpenAI Client globally
+client = AzureOpenAI(
+    api_key=AZURE_OPENAI_KEY,
+    api_version=AZURE_OPENAI_API_VERSION,
+    azure_endpoint=AZURE_OPENAI_ENDPOINT
+)
+
+# 1. READ CONFLUENCE PAGE CONTENT
+def get_page_content(page_id: str) -> str:
+    """
+    Fetches the Confluence page storage format (HTML) by Page ID.
+    """
+    url = f"{CONFLUENCE_BASE_URL}/rest/api/content/{page_id}?expand=body.storage"
+    auth = (CONFLUENCE_EMAIL, CONFLUENCE_API_TOKEN)
+    headers = {"Accept": "application/json"}
+    
+    try:
+        response = requests.get(url, headers=headers, auth=auth)
+        response.raise_for_status()
+        data = response.json()
+        return data['body']['storage']['value']
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching Confluence page: {e}")
+        return ""
+
+# HELPER: DRAW.IO EXTRACTION
+def extract_drawio_labels(drawio_xml: str) -> str:
+    """
+    Extracts text labels from raw Draw.io XML using Regex.
+    This allows us to 'understand' the diagram without rendering an image.
+    """
+    values = re.findall(r'value="([^"]*)"', drawio_xml)
+    unique_labels = list(set(values))
+    return " | ".join([v for v in unique_labels if v])
+
+# 2. CHUNK CONTENT BY HEADINGS
+def chunk_content_by_headings(html_content: str) -> List[Dict]:
+    """
+    Parses HTML and breaks content into chunks based on H1-H6 tags.
+    Also identifies Draw.io diagrams.
+    """
+    soup = BeautifulSoup(html_content, 'html.parser')
+    chunks = []
+    
+    # Initialize starting section
+    current_section = {
+        "heading": "Introduction / Summary",
+        "level": 0,
+        "content": [],
+        "type": "text"
+    }
+
+    # Iterate through relevant tags
+    for element in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'ul', 'ol', 'ac:structured-macro']):
         
-        # Confluence Config
-        self.conf_url = os.getenv("CONFLUENCE_BASE_URL")
-        self.auth = (os.getenv("CONFLUENCE_EMAIL"), os.getenv("CONFLUENCE_API_TOKEN"))
+        # Handle Draw.io Macro
+        if element.name == 'ac:structured-macro' and element.get('ac:name') == 'drawio':
+            if current_section['content']:
+                chunks.append(current_section)
+                current_section = {
+                    "heading": current_section["heading"], 
+                    "level": current_section["level"],
+                    "content": [], 
+                    "type": "text"
+                }
 
-    def get_page_content(self, page_id):
-        """
-        1. Read Confluence page content by Page id using rest api.
-        We request the 'storage' view of the body which gives us the HTML structure.
-        """
-        api_url = f"{self.conf_url}/rest/api/content/{page_id}?expand=body.storage"
-        
-        try:
-            response = requests.get(api_url, auth=self.auth)
-            response.raise_for_status()
-            data = response.json()
-            html_content = data['body']['storage']['value']
-            return html_content
-        except requests.exceptions.RequestException as e:
-            print(f"Error fetching page: {e}")
-            return None
-
-    def extract_images_from_soup(self, soup_element):
-        """
-        Helper to find draw.io images. 
-        Draw.io images are often <img> tags inside the content.
-        Returns a list of dicts containing type and data.
-        """
-        images = []
-        for img in soup_element.find_all("img"):
-            src = img.get('src', '')
-            # Handle Base64 embedded images
-            if src.startswith('data:image'):
-                images.append({
-                    "type": "base64",
-                    "data": src
-                })
-            # Handle Confluence Attached images (download links)
-            elif src.startswith('http'):
-                images.append({
-                    "type": "url",
-                    "data": src
-                })
-        return images
-
-    def chunk_content_by_headings(self, html_content):
-        """
-        2. Based on Confluence heading and subheading, create chunks for each section.
-        """
-        soup = BeautifulSoup(html_content, 'html.parser')
-        chunks = []
-        
-        # We look for all headings (h1 to h6)
-        # Note: Confluence uses specific classes, but parsing standard h1-h6 is usually robust enough
-        headings = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
-        
-        if not headings:
-            # If no headings, treat whole page as one chunk
-            return [{
-                "heading": "Summary (Full Page)",
-                "text": soup.get_text(strip=True),
-                "images": self.extract_images_from_soup(soup)
-            }]
-
-        for heading in headings:
-            # Initialize content collection for this section
-            section_content = []
-            section_images = []
-            
-            # Get all siblings until the next heading
-            current_node = heading.next_sibling
-            
-            while current_node:
-                # Stop if we hit another heading
-                if current_node.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
-                    break
+            # Extract Data
+            xml_body = element.find('ac:plain-text-body')
+            if xml_body and xml_body.string:
+                raw_xml = xml_body.string.strip()
+                diagram_text = extract_drawio_labels(raw_xml)
                 
-                # Collect text content
-                if current_node.name:
-                    section_content.append(current_node.get_text(separator=' ', strip=True))
-                    # 6. Consider draw.io images
-                    section_images.extend(self.extract_images_from_soup(current_node))
-                
-                current_node = current_node.next_sibling
-            
-            chunks.append({
-                "heading": heading.get_text(strip=True),
-                "text": " ".join(section_content),
-                "images": section_images
-            })
-            
-        return chunks
+                if diagram_text:
+                    chunks.append({
+                        "heading": current_section["heading"],
+                        "level": current_section["level"],
+                        "content": f"[Diagram containing labels: {diagram_text}]",
+                        "type": "drawio_text"
+                    })
+            continue
 
-    def prepare_image_content(self, image_list):
-        """
-        Prepares images for Azure OpenAI GPT-4o format.
-        """
-        content_items = []
-        for img in image_list:
-            if img['type'] == 'url':
-                # GPT-4o can access public URLs. 
-                # If Confluence requires auth, you would need to download, convert to base64, and pass below.
-                content_items.append({
-                    "type": "image_url",
-                    "image_url": {"url": img['data']}
-                })
-            elif img['type'] == 'base64':
-                content_items.append({
-                    "type": "image_url",
-                    "image_url": {"url": img['data']}
-                })
-        return content_items
-
-    def summarize_chunk(self, chunk):
-        """
-        3 & 4. Use Azure OpenAI LLM to Summarize each chunk including images.
-        """
-        text_prompt = f"""
-        You are an expert technical summarizer.
-        Section Title: {chunk['heading']}
-        Content: {chunk['text']}
-        
-        Task: 
-        1. Provide a concise summary of the text content.
-        2. If there are images (like draw.io diagrams) provided, analyze the visual content and describe what the diagram depicts (e.g., flowcharts, architecture).
-        """
-        
-        # Construct the message payload
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": text_prompt}
-                ]
+        # Handle Headings
+        if element.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+            # Save previous section if it has content
+            if current_section['content']:
+                chunks.append(current_section)
+            
+            # Start new section
+            level = int(element.name[1])
+            current_section = {
+                "heading": element.get_text(strip=True),
+                "level": level,
+                "content": [],
+                "type": "text"
             }
-        ]
         
-        # Add images if they exist
-        images = self.prepare_image_content(chunk['images'])
-        if images:
-            messages[0]['content'].extend(images)
-            
-        try:
-            response = self.client.chat.completions.create(
-                model=self.deployment_name,
-                messages=messages,
-                max_tokens=1000
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            return f"Error generating summary for '{chunk['heading']}': {str(e)}"
+        # Handle Paragraphs and Lists
+        elif element.name in ['p', 'ul', 'ol']:
+            text = element.get_text(strip=True)
+            if text:
+                current_section['content'].append(text)
 
-    def run(self, page_id):
-        print(f"--- Processing Page ID: {page_id} ---")
-        
-        # 1. Fetch Content
-        html = self.get_page_content(page_id)
-        if not html:
-            return
+    # Add the final section
+    if current_section['content']:
+        chunks.append(current_section)
 
-        # 2. Chunk Content
-        chunks = self.chunk_content_by_headings(html)
-        print(f"Found {len(chunks)} sections to summarize.\n")
+    return chunks
 
-        # 3 & 4. Summarize
-        for i, chunk in enumerate(chunks):
-            if not chunk['text'] and not chunk['images']:
-                continue
-                
-            print(f"Summarizing Section {i+1}: {chunk['heading']}")
-            summary = self.summarize_chunk(chunk)
-            
-            print("-" * 50)
-            print(summary)
-            print("-" * 50)
-            print("\n")
+# 3 & 4. SUMMARIZE CHUNKS USING AZURE OPENAI
+def summarize_chunk(chunk: Dict) -> str:
+    """
+    Sends a specific chunk to Azure OpenAI for summarization.
+    Adjusts prompt based on whether the chunk is a diagram.
+    """
+    content_text = " ".join(chunk['content'])
+    
+    # Truncate if too long to save tokens
+    if len(content_text) > 4000:
+        content_text = content_text[:4000] + "..."
 
-# --- Usage ---
+    # Define Prompts
+    if chunk['type'] == 'drawio_text':
+        system_prompt = "You are a technical analyst. Describe what a diagram likely represents based on its labels."
+        user_content = f"Section: {chunk['heading']}\nDiagram Labels: {content_text}"
+    else:
+        system_prompt = "You are a technical assistant. Summarize the text concisely."
+        user_content = f"Section: {chunk['heading']}\nContent: {content_text}"
+
+    try:
+        response = client.chat.completions.create(
+            model=AZURE_DEPLOYMENT_NAME,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content}
+            ],
+            max_tokens=150
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"Error summarizing section '{chunk['heading']}': {e}"
+
+# --- MAIN EXECUTION FLOW ---
+def main():
+    page_id = "12345678"  # Replace with actual Page ID
+    
+    print(f"--- Fetching Page ID: {page_id} ---")
+    html = get_page_content(page_id)
+    
+    if not html:
+        return
+
+    print("--- Chunking Content ---")
+    chunks = chunk_content_by_headings(html)
+    print(f"Found {len(chunks)} sections.\n")
+
+    print("--- Summarizing Sections ---")
+    summary_output = []
+    
+    for chunk in chunks:
+        print(f"Processing: {chunk['heading']}...")
+        summary = summarize_chunk(chunk)
+        summary_output.append(f"### {chunk['heading']}\n{summary}\n")
+
+    print("\n\n=== FINAL SUMMARY ===")
+    print("\n".join(summary_output))
+
 if __name__ == "__main__":
-    # Replace with a real Page ID
-    PAGE_ID = "12345678" 
-    app = ConfluenceSummarizer()
-    app.run(PAGE_ID)
+    main()
 
     Detailed Explanation of Key Components
 1. Handling Confluence Headings (Req 1 & 2)

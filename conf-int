@@ -4,43 +4,31 @@ import requests
 import json
 from bs4 import BeautifulSoup
 from openai import AzureOpenAI
-from dotenv import load_dotenv # Import dotenv
+from dotenv import load_dotenv
 from typing import List, Dict
+import tiktoken 
 
 # ==============================================================================
 # 1. CONFIGURATION LOADING
 # ==============================================================================
 
 def load_config():
-    """
-    Loads configuration from .env file and environment variables.
-    Validates required fields and casts types.
-    """
-    # Load variables from .env file into environment
     load_dotenv()
 
     config = {
-        # Confluence
         "confluence_url": os.getenv("CONFLUENCE_BASE_URL"),
         "email": os.getenv("CONFLUENCE_EMAIL"),
         "token": os.getenv("CONFLUENCE_API_TOKEN"),
         "page_id": os.getenv("PAGE_ID"),
-        
-        # Azure
         "azure_endpoint": os.getenv("AZURE_OPENAI_ENDPOINT"),
         "azure_key": os.getenv("AZURE_OPENAI_KEY"),
         "deployment": os.getenv("AZURE_DEPLOYMENT_NAME"),
-        
-        # Code
         "code_dir": os.getenv("CODE_DIRECTORY", "./source_code"),
-        
-        # Optimization
         "context_limit": int(os.getenv("CONTEXT_LIMIT", "100000")),
         "output_limit": int(os.getenv("OUTPUT_LIMIT", "4000")),
         "report_file": os.getenv("REPORT_FILENAME", "audit_report.md")
     }
 
-    # Validation
     required_keys = [
         "confluence_url", "email", "token", "page_id", 
         "azure_endpoint", "azure_key", "deployment"
@@ -54,21 +42,38 @@ def load_config():
     return config
 
 # ==============================================================================
-# 2. UTILITIES & CLIENT INIT
+# 2. UTILITIES & CLIENT INIT (TOKENTIKEN UPDATED)
 # ==============================================================================
+
+# UPDATED: Using o200k_base which is standard for GPT-4o and GPT-4o-mini
+try:
+    # Note: If using an older model (GPT-3.5/4-Turbo), use "cl100k_base"
+    # Using o200k_base here as it matches the GPT-4o/Mini architecture
+    tokenizer = tiktoken.get_encoding("o200k_base")
+except Exception as e:
+    print(f"Error loading tiktoken: {e}")
+    print("Please run: pip install tiktoken")
+    sys.exit(1)
 
 def get_azure_client(endpoint, key):
     return AzureOpenAI(api_key=key, api_version="2024-02-15-preview", azure_endpoint=endpoint)
 
 def estimate_tokens(text: str) -> int:
-    return int(len(text) / 3)
+    try:
+        return len(tokenizer.encode(text))
+    except Exception:
+        return int(len(text) / 3)
 
 def truncate_text_to_fit(text: str, max_tokens: int) -> str:
-    estimated = estimate_tokens(text)
-    if estimated <= max_tokens:
+    tokens = tokenizer.encode(text)
+    if len(tokens) <= max_tokens:
         return text
-    max_chars = int(max_tokens * 3)
-    return text[:max_chars] + "\n... [TRUNCATED TO FIT CONTEXT LIMIT]"
+    
+    truncated_tokens = tokens[:max_tokens]
+    try:
+        return tokenizer.decode(truncated_tokens) + "\n... [TRUNCATED]"
+    except Exception:
+        return text
 
 def create_smart_batches(items: List[Dict], limit_tokens: int) -> List[List[Dict]]:
     batches = []
@@ -147,11 +152,26 @@ def batch_audit_blocks(client, deployment, block_batch: List[Dict], doc_text: st
         blocks_content = truncate_text_to_fit(blocks_content, allowed_block_space)
         print(f"   [Warning] Batch truncated to fit context.")
 
+    # ==============================================================================
+    # UPDATED: STRICT AUDIT PROMPT
+    # ==============================================================================
     system_prompt = """
-    You are a Documentation Auditor.
-    Compare Code Blocks vs Documentation.
-    Return JSON with key "audits".
-    Each audit needs: "name", "action", "target_heading", "proposal".
+    You are a Strict Documentation Auditor. Your goal is to identify ANY gaps between code and documentation.
+    
+    1. Identify the Target Section:
+       - Scan the Documentation. Find the exact Heading (e.g., "API Endpoints", "User Management") that this code block relates to.
+       - Return this as "target_heading". If it's a completely new topic, return "NEW_SECTION_REQUIRED".
+    
+    2. Determine Action (Strict Mode):
+       - "UPDATE_EXISTING": The code exists in the documentation BUT details have changed.
+         Examples of change: New parameters added, parameter types changed, logic flow changed, deprecated features.
+         DO NOT SKIP MINOR CHANGES.
+       - "CREATE_NEW": The code block is a new function/class/API that is not mentioned in the documentation at all.
+       - "NO_ACTION": ONLY use this if the code block and the documentation text are perfectly identical in name and described behavior.
+    
+    3. Output Format:
+       Return JSON with key "audits".
+       Each audit needs: "name", "action", "target_heading", "proposal", "explanation".
     """
 
     try:
@@ -159,7 +179,7 @@ def batch_audit_blocks(client, deployment, block_batch: List[Dict], doc_text: st
             model=deployment,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"--- DOCS ---\n{doc_text}\n--- CODE ---\n{blocks_content}"}
+                {"role": "user", "content": f"--- DOCUMENTATION ---\n{doc_text}\n\n--- CODE BLOCKS ---\n{blocks_content}"}
             ],
             response_format={"type": "json_object"},
             max_tokens=max_output
@@ -212,7 +232,11 @@ def generate_markdown_report(results: List[Dict], stats: Dict) -> str:
                 lines.append(aud.get('proposal', ''))
             elif action == "UPDATE_EXISTING":
                 lines.append(f"#### ⚠️ Update Required: `{blk['name']}`")
-                lines.append(f"**Target Section:** `{aud.get('target_heading')}`")
+                # Display the target heading clearly
+                target = aud.get('target_heading', 'Unknown Section')
+                lines.append(f"**Target Section:** `{target}`")
+                lines.append(aud.get('explanation', ''))
+                lines.append("**Proposed Change:**")
                 lines.append(aud.get('proposal', ''))
             elif action == "NO_ACTION":
                 lines.append(f"#### ✅ Verified: `{blk['name']}`")
@@ -221,7 +245,7 @@ def generate_markdown_report(results: List[Dict], stats: Dict) -> str:
                 lines.append(f"#### ❌ Error: `{blk['name']}`")
                 lines.append(aud.get('explanation', 'Audit failed.'))
                 
-            lines.append("") # Spacing between items
+            lines.append("") 
             
     return "\n".join(lines)
 

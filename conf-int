@@ -1,0 +1,312 @@
+import argparse
+import os
+import sys
+import requests
+import json
+from bs4 import BeautifulSoup
+from openai import AzureOpenAI
+from typing import List, Dict
+
+# ==============================================================================
+# 1. ARGUMENT PARSING & CONFIGURATION
+# ==============================================================================
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Generic Code-to-Doc Auditor using Azure OpenAI")
+    
+    # Confluence Args
+    parser.add_argument("--confluence_url", required=True, help="e.g., https://domain.atlassian.net/wiki")
+    parser.add_argument("--email", required=True, help="Confluence email")
+    parser.add_argument("--token", required=True, help="Confluence API Token")
+    parser.add_argument("--page_id", required=True, help="Page ID to audit")
+    
+    # Azure Args
+    parser.add_argument("--azure_endpoint", required=True, help="Azure OpenAI Endpoint")
+    parser.add_argument("--azure_key", required=True, help="Azure OpenAI Key")
+    parser.add_argument("--deployment", required=True, help="Deployment name (e.g., gpt-4o)")
+    
+    # Code Args
+    parser.add_argument("--code_dir", required=True, help="Path to source code directory")
+    
+    # Optimization Args
+    parser.add_argument("--context_limit", type=int, default=100000, help="Input context limit (tokens)")
+    parser.add_argument("--output_limit", type=int, default=4000, help="Max output tokens")
+    parser.add_argument("--report_file", default="audit_report.md", help="Output markdown file")
+    
+    return parser.parse_args()
+
+# ==============================================================================
+# 2. UTILITIES & CLIENT INIT
+# ==============================================================================
+
+def get_azure_client(endpoint, key):
+    return AzureOpenAI(api_key=key, api_version="2024-02-15-preview", azure_endpoint=endpoint)
+
+def estimate_tokens(text: str) -> int:
+    return int(len(text) / 3)
+
+def truncate_text_to_fit(text: str, max_tokens: int) -> str:
+    estimated = estimate_tokens(text)
+    if estimated <= max_tokens:
+        return text
+    max_chars = int(max_tokens * 3)
+    return text[:max_chars] + "\n... [TRUNCATED TO FIT CONTEXT LIMIT]"
+
+def create_smart_batches(items: List[Dict], limit_tokens: int) -> List[List[Dict]]:
+    batches = []
+    current_batch = []
+    current_batch_size = 0
+    
+    for item in items:
+        item_size = estimate_tokens(item['content'])
+        if item_size > limit_tokens:
+            if current_batch:
+                batches.append(current_batch)
+                current_batch = []
+                current_batch_size = 0
+            
+            safe_item = item.copy()
+            safe_item['content'] = truncate_text_to_fit(item['content'], limit_tokens)
+            safe_item['truncated'] = True
+            batches.append([safe_item])
+            continue
+            
+        if current_batch_size + item_size > limit_tokens:
+            batches.append(current_batch)
+            current_batch = [item]
+            current_batch_size = item_size
+        else:
+            current_batch.append(item)
+            current_batch_size += item_size
+            
+    if current_batch:
+        batches.append(current_batch)
+        
+    return batches
+
+# ==============================================================================
+# 3. LLM OPERATIONS
+# ==============================================================================
+
+def batch_extract_blocks(client, deployment, file_batch: List[Dict], max_output: int) -> List[Dict]:
+    combined_content = ""
+    for item in file_batch:
+        combined_content += f"\n--- FILE: {item['filename']} ---\n{item['content']}\n"
+
+    system_prompt = """
+    You are a Universal Code Parser. Extract all Functions and Classes.
+    Return JSON with key "blocks".
+    Each block needs: "name", "type", "file", "content".
+    """
+
+    try:
+        response = client.chat.completions.create(
+            model=deployment,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": combined_content}
+            ],
+            response_format={"type": "json_object"},
+            max_tokens=max_output
+        )
+        return json.loads(response.choices[0].message.content).get("blocks", [])
+    except Exception as e:
+        print(f"   [Error] Extraction failed: {e}")
+        return []
+
+def batch_audit_blocks(client, deployment, block_batch: List[Dict], doc_text: str, 
+                       context_limit: int, max_output: int) -> List[Dict]:
+    blocks_content = ""
+    for i, b in enumerate(block_batch):
+        blocks_content += f"\n--- BLOCK {i+1}: {b['name']} ({b['file']}) ---\n{b['content']}\n"
+
+    doc_size = estimate_tokens(doc_text)
+    blocks_size = estimate_tokens(blocks_content)
+    
+    if doc_size + blocks_size > context_limit:
+        allowed_block_space = context_limit - doc_size - 1000
+        if allowed_block_space < 0: allowed_block_space = 1000
+        blocks_content = truncate_text_to_fit(blocks_content, allowed_block_space)
+        print(f"   [Warning] Batch truncated to fit context.")
+
+    system_prompt = """
+    You are a Documentation Auditor.
+    Compare Code Blocks vs Documentation.
+    Return JSON with key "audits".
+    Each audit needs: "name", "action", "target_heading", "proposal".
+    """
+
+    try:
+        response = client.chat.completions.create(
+            model=deployment,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"--- DOCS ---\n{doc_text}\n--- CODE ---\n{blocks_content}"}
+            ],
+            response_format={"type": "json_object"},
+            max_tokens=max_output
+        )
+        return json.loads(response.choices[0].message.content).get("audits", [])
+    except Exception as e:
+        print(f"   [Error] Audit failed: {e}")
+        return [{"name": b['name'], "action": "ERROR", "proposal": str(e)} for b in block_batch]
+
+# ==============================================================================
+# 4. MARKDOWN REPORT BUILDER
+# ==============================================================================
+
+def generate_markdown_report(results: List[Dict], stats: Dict) -> str:
+    lines = []
+    lines.append("# 📋 Code Audit Report")
+    lines.append(f"**Generated on:** {str(__import__('datetime').datetime.now())}")
+    lines.append("")
+    
+    # Summary Table
+    lines.append("## 📊 Summary")
+    lines.append("| Metric | Count |")
+    lines.append("|--------|-------|")
+    lines.append(f"| Total Blocks Audited | {stats['total']} |")
+    lines.append(f"| Updates Required | {stats['updates']} |")
+    lines.append(f"| New Features Detected | {stats['new']} |")
+    lines.append("")
+    
+    # Group results by file
+    from collections import defaultdict
+    by_file = defaultdict(list)
+    for item in results:
+        by_file[item['block']['file']].append(item)
+    
+    # Detailed Report
+    lines.append("## 🔍 Detailed Analysis")
+    lines.append("")
+    
+    for filename, items in by_file.items():
+        lines.append(f"### 📁 File: `{filename}`")
+        lines.append("")
+        
+        for item in items:
+            blk = item['block']
+            aud = item['audit']
+            action = aud.get('action')
+            
+            if action == "CREATE_NEW":
+                lines.append(f"#### 🆕 New Feature: `{blk['name']}`")
+                lines.append(aud.get('proposal', ''))
+            elif action == "UPDATE_EXISTING":
+                lines.append(f"#### ⚠️ Update Required: `{blk['name']}`")
+                lines.append(f"**Target Section:** `{aud.get('target_heading')}`")
+                lines.append(aud.get('proposal', ''))
+            elif action == "NO_ACTION":
+                lines.append(f"#### ✅ Verified: `{blk['name']}`")
+                lines.append("Documentation is accurate.")
+            else:
+                lines.append(f"#### ❌ Error: `{blk['name']}`")
+                lines.append(aud.get('explanation', 'Audit failed.'))
+                
+            lines.append("") # Spacing between items
+            
+    return "\n".join(lines)
+
+# ==============================================================================
+# 5. MAIN EXECUTION
+# ==============================================================================
+
+def main():
+    args = parse_args()
+    
+    print("--- Initializing Auditor ---")
+    client = get_azure_client(args.azure_endpoint, args.azure_key)
+    extensions = (".py", ".java", ".js", ".ts", ".cs", ".go", ".cpp", ".c", ".rb", ".rs")
+    
+    # 1. Load Files
+    files_to_process = []
+    print(f"Scanning directory: {args.code_dir}")
+    for root, dirs, files in os.walk(args.code_dir):
+        for file in files:
+            if file.endswith(extensions):
+                full_path = os.path.join(root, file)
+                try:
+                    with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        files_to_process.append({
+                            "filename": file,
+                            "content": f.read()
+                        })
+                except Exception as e:
+                    print(f"Could not read {file}: {e}")
+
+    if not files_to_process:
+        print("No source files found. Exiting.")
+        sys.exit(1)
+
+    print(f"Found {len(files_to_process)} files.")
+
+    # 2. Phase 1: Extraction
+    print("\n--- Phase 1: Extracting Code Blocks ---")
+    file_batches = create_smart_batches(files_to_process, args.context_limit)
+    
+    all_code_blocks = []
+    for i, batch in enumerate(file_batches):
+        print(f"Processing Extraction Batch {i+1}/{len(file_batches)}...")
+        blocks = batch_extract_blocks(client, args.deployment, batch, args.output_limit)
+        all_code_blocks.extend(blocks)
+        
+    print(f"Extracted {len(all_code_blocks)} blocks.")
+
+    # 3. Fetch Docs
+    print("\n--- Fetching Documentation ---")
+    url = f"{args.confluence_url}/rest/api/content/{args.page_id}?expand=body.storage"
+    auth = (args.email, args.token)
+    res = requests.get(url, headers={"Accept": "application/json"}, auth=auth)
+    
+    if res.status_code != 200:
+        print(f"Failed to fetch Confluence page: {res.status_code}")
+        sys.exit(1)
+        
+    html = res.json()['body']['storage']['value']
+    soup = BeautifulSoup(html, 'html.parser')
+    doc_text = soup.get_text(separator='\n', strip=True)
+    print("Documentation fetched successfully.")
+
+    # 4. Phase 2: Audit
+    print("\n--- Phase 2: Auditing Code vs Documentation ---")
+    
+    doc_size = estimate_tokens(doc_text)
+    space_left = args.context_limit - doc_size - 2000 
+    
+    if space_left < 1000:
+        print("ERROR: Documentation is too large to fit in context window with code.")
+        sys.exit(1)
+        
+    block_batches = create_smart_batches(all_code_blocks, space_left)
+    
+    all_audits = []
+    for i, batch in enumerate(block_batches):
+        print(f"Processing Audit Batch {i+1}/{len(block_batches)}...")
+        audits = batch_audit_blocks(client, args.deployment, batch, doc_text, args.context_limit, args.output_limit)
+        
+        audit_map = {a['name']: a for a in audits}
+        for original_block in batch:
+            audit_data = audit_map.get(original_block['name'], {"action": "ERROR", "proposal": "Not found"})
+            all_audits.append({
+                "block": original_block,
+                "audit": audit_data
+            })
+            
+    # 5. Generate Report
+    print("\n--- Generating Report ---")
+    stats = {
+        'total': len(all_audits),
+        'updates': sum(1 for r in all_audits if r['audit'].get('action') == "UPDATE_EXISTING"),
+        'new': sum(1 for r in all_audits if r['audit'].get('action') == "CREATE_NEW")
+    }
+    
+    report_content = generate_markdown_report(all_audits, stats)
+    
+    with open(args.report_file, 'w', encoding='utf-8') as f:
+        f.write(report_content)
+        
+    print(f"Done! Report saved to: {args.report_file}")
+    print(f"Summary: {stats['total']} blocks, {stats['updates']} updates, {stats['new']} new features.")
+
+if __name__ == "__main__":
+    main()

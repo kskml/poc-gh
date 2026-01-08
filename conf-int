@@ -1,39 +1,57 @@
-import argparse
 import os
 import sys
 import requests
 import json
 from bs4 import BeautifulSoup
 from openai import AzureOpenAI
+from dotenv import load_dotenv # Import dotenv
 from typing import List, Dict
 
 # ==============================================================================
-# 1. ARGUMENT PARSING & CONFIGURATION
+# 1. CONFIGURATION LOADING
 # ==============================================================================
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Generic Code-to-Doc Auditor using Azure OpenAI")
+def load_config():
+    """
+    Loads configuration from .env file and environment variables.
+    Validates required fields and casts types.
+    """
+    # Load variables from .env file into environment
+    load_dotenv()
+
+    config = {
+        # Confluence
+        "confluence_url": os.getenv("CONFLUENCE_BASE_URL"),
+        "email": os.getenv("CONFLUENCE_EMAIL"),
+        "token": os.getenv("CONFLUENCE_API_TOKEN"),
+        "page_id": os.getenv("PAGE_ID"),
+        
+        # Azure
+        "azure_endpoint": os.getenv("AZURE_OPENAI_ENDPOINT"),
+        "azure_key": os.getenv("AZURE_OPENAI_KEY"),
+        "deployment": os.getenv("AZURE_DEPLOYMENT_NAME"),
+        
+        # Code
+        "code_dir": os.getenv("CODE_DIRECTORY", "./source_code"),
+        
+        # Optimization
+        "context_limit": int(os.getenv("CONTEXT_LIMIT", "100000")),
+        "output_limit": int(os.getenv("OUTPUT_LIMIT", "4000")),
+        "report_file": os.getenv("REPORT_FILENAME", "audit_report.md")
+    }
+
+    # Validation
+    required_keys = [
+        "confluence_url", "email", "token", "page_id", 
+        "azure_endpoint", "azure_key", "deployment"
+    ]
     
-    # Confluence Args
-    parser.add_argument("--confluence_url", required=True, help="e.g., https://domain.atlassian.net/wiki")
-    parser.add_argument("--email", required=True, help="Confluence email")
-    parser.add_argument("--token", required=True, help="Confluence API Token")
-    parser.add_argument("--page_id", required=True, help="Page ID to audit")
-    
-    # Azure Args
-    parser.add_argument("--azure_endpoint", required=True, help="Azure OpenAI Endpoint")
-    parser.add_argument("--azure_key", required=True, help="Azure OpenAI Key")
-    parser.add_argument("--deployment", required=True, help="Deployment name (e.g., gpt-4o)")
-    
-    # Code Args
-    parser.add_argument("--code_dir", required=True, help="Path to source code directory")
-    
-    # Optimization Args
-    parser.add_argument("--context_limit", type=int, default=100000, help="Input context limit (tokens)")
-    parser.add_argument("--output_limit", type=int, default=4000, help="Max output tokens")
-    parser.add_argument("--report_file", default="audit_report.md", help="Output markdown file")
-    
-    return parser.parse_args()
+    missing = [k for k in required_keys if not config.get(k)]
+    if missing:
+        print(f"Error: Missing required configuration variables in .env: {', '.join(missing)}")
+        sys.exit(1)
+        
+    return config
 
 # ==============================================================================
 # 2. UTILITIES & CLIENT INIT
@@ -212,16 +230,17 @@ def generate_markdown_report(results: List[Dict], stats: Dict) -> str:
 # ==============================================================================
 
 def main():
-    args = parse_args()
+    print("--- Loading Configuration ---")
+    cfg = load_config()
     
     print("--- Initializing Auditor ---")
-    client = get_azure_client(args.azure_endpoint, args.azure_key)
+    client = get_azure_client(cfg['azure_endpoint'], cfg['azure_key'])
     extensions = (".py", ".java", ".js", ".ts", ".cs", ".go", ".cpp", ".c", ".rb", ".rs")
     
     # 1. Load Files
     files_to_process = []
-    print(f"Scanning directory: {args.code_dir}")
-    for root, dirs, files in os.walk(args.code_dir):
+    print(f"Scanning directory: {cfg['code_dir']}")
+    for root, dirs, files in os.walk(cfg['code_dir']):
         for file in files:
             if file.endswith(extensions):
                 full_path = os.path.join(root, file)
@@ -242,20 +261,20 @@ def main():
 
     # 2. Phase 1: Extraction
     print("\n--- Phase 1: Extracting Code Blocks ---")
-    file_batches = create_smart_batches(files_to_process, args.context_limit)
+    file_batches = create_smart_batches(files_to_process, cfg['context_limit'])
     
     all_code_blocks = []
     for i, batch in enumerate(file_batches):
         print(f"Processing Extraction Batch {i+1}/{len(file_batches)}...")
-        blocks = batch_extract_blocks(client, args.deployment, batch, args.output_limit)
+        blocks = batch_extract_blocks(client, cfg['deployment'], batch, cfg['output_limit'])
         all_code_blocks.extend(blocks)
         
     print(f"Extracted {len(all_code_blocks)} blocks.")
 
     # 3. Fetch Docs
     print("\n--- Fetching Documentation ---")
-    url = f"{args.confluence_url}/rest/api/content/{args.page_id}?expand=body.storage"
-    auth = (args.email, args.token)
+    url = f"{cfg['confluence_url']}/rest/api/content/{cfg['page_id']}?expand=body.storage"
+    auth = (cfg['email'], cfg['token'])
     res = requests.get(url, headers={"Accept": "application/json"}, auth=auth)
     
     if res.status_code != 200:
@@ -271,7 +290,7 @@ def main():
     print("\n--- Phase 2: Auditing Code vs Documentation ---")
     
     doc_size = estimate_tokens(doc_text)
-    space_left = args.context_limit - doc_size - 2000 
+    space_left = cfg['context_limit'] - doc_size - 2000 
     
     if space_left < 1000:
         print("ERROR: Documentation is too large to fit in context window with code.")
@@ -282,7 +301,7 @@ def main():
     all_audits = []
     for i, batch in enumerate(block_batches):
         print(f"Processing Audit Batch {i+1}/{len(block_batches)}...")
-        audits = batch_audit_blocks(client, args.deployment, batch, doc_text, args.context_limit, args.output_limit)
+        audits = batch_audit_blocks(client, cfg['deployment'], batch, doc_text, cfg['context_limit'], cfg['output_limit'])
         
         audit_map = {a['name']: a for a in audits}
         for original_block in batch:
@@ -302,10 +321,10 @@ def main():
     
     report_content = generate_markdown_report(all_audits, stats)
     
-    with open(args.report_file, 'w', encoding='utf-8') as f:
+    with open(cfg['report_file'], 'w', encoding='utf-8') as f:
         f.write(report_content)
         
-    print(f"Done! Report saved to: {args.report_file}")
+    print(f"Done! Report saved to: {cfg['report_file']}")
     print(f"Summary: {stats['total']} blocks, {stats['updates']} updates, {stats['new']} new features.")
 
 if __name__ == "__main__":

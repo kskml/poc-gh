@@ -4,348 +4,237 @@ import json
 import re
 import base64
 import time
+import subprocess
+import shutil
 
-# Configuration
+# --- Configuration from environment variables ---
+# For commenting on the source PR
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
+# For writing to the docs repo
+GH_PAT = os.environ.get("GH_PAT")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 PR_NUMBER = os.environ.get("PR_NUMBER")
 REPO_OWNER = os.environ.get("REPO_OWNER")
 REPO_NAME = os.environ.get("REPO_NAME")
+DOCS_REPO_NAME = os.environ.get("DOCS_REPO_NAME")
+GENERATE_DOCS_PR = os.environ.get("GENERATE_DOCS_PR", "false").lower() == 'true'
 
-# Retry Configuration
-MAX_RETRIES = 3
-INITIAL_RETRY_DELAY_SECONDS = 2
-
-# GitHub API endpoints
-GITHUB_API_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}"
-PR_URL = f"{GITHUB_API_URL}/pulls/{PR_NUMBER}"
-COMMENTS_URL = f"{GITHUB_API_URL}/pulls/{PR_NUMBER}/comments"
+# --- API Endpoints ---
+# For the source repository
+SOURCE_API_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}"
+SOURCE_PR_URL = f"{SOURCE_API_URL}/pulls/{PR_NUMBER}"
+# For the documentation repository
+DOCS_API_URL = f"https://api.github.com/repos/{DOCS_REPO_NAME}"
 
 # Gemini API endpoint
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent"
 
+# (Keep all your existing functions: get_pr_diff_and_files, analyze_code_with_gemini, etc.)
+# For brevity, I am not repeating them here, but you MUST include them from the previous version.
+# The analyze_code_with_gemini prompt should still ask for "documentation_updates".
+
 def get_pr_diff_and_files():
     """Get the diff for the pull request and a set of changed files."""
-    headers = {
-        "Authorization": f"token {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github.v3.diff"
-    }
-    
-    diff_response = requests.get(f"{PR_URL}.diff", headers=headers)
+    headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3.diff"}
+    diff_response = requests.get(f"{SOURCE_PR_URL}.diff", headers=headers)
     if diff_response.status_code != 200:
         print(f"Failed to fetch PR diff: {diff_response.status_code}")
         return None, None
-    
     diff_text = diff_response.text
     changed_files = set(re.findall(r'diff --git a/.*? b/(.*?)\n', diff_text))
-    
     print(f"Found {len(changed_files)} changed files in the PR: {', '.join(changed_files)}")
     return diff_text, changed_files
 
 def analyze_code_with_gemini(diff):
     """Send the diff to Gemini for analysis, with retries and enforced JSON output."""
-    headers = {
-        "Content-Type": "application/json",
-    }
-    
+    headers = {"Content-Type": "application/json"}
     max_length = 30000
     if len(diff) > max_length:
         diff = diff[:max_length] + "\n\n... (diff truncated for analysis)"
     
-    # --- REVISED PROMPT WITH STRICTER LINE NUMBER INSTRUCTIONS ---
     prompt = f"""
     You are an expert senior Java developer specializing in Spring Boot. Review the following code diff and provide constructive feedback.
 
     CRITICAL RULES:
     1. Only provide feedback on the files explicitly shown in the provided diff.
-    2. The "line" number for each issue or suggestion MUST correspond to a line that was ADDED or MODIFIED in the diff. Do not reference deleted lines or lines that were not changed. If you cannot find a suitable line, omit the "line" field from your JSON object.
+    2. The "line" number for each issue MUST correspond to a line that was ADDED or MODIFIED in the diff.
+    3. In addition to code review, identify any necessary documentation updates. Focus on API changes, new configuration properties, or breaking changes.
 
-    Focus on:
-    1.  Spring Boot Best Practices (e.g., constructor injection, correct annotations).
-    2.  Java Code Quality (e.g., SOLID principles, null safety).
-    3.  Security (e.g., SQL injection, input validation).
-    4.  Performance (e.g., N+1 queries).
-    5.  Error Handling (e.g., @ControllerAdvice).
+    Your response must be a single JSON object with the following keys:
+    - "summary": A brief summary of the changes.
+    - "issues": An array of issue objects (file, line, severity, message, suggestion).
+    - "suggestions": An array of suggestion objects (file, line, message).
+    - "documentation_updates": An array of documentation objects. Each object must have:
+        - "file_path": The path to the documentation file to create or update (e.g., "docs/api/updates.md").
+        - "action": Either "create" or "update".
+        - "content": The full Markdown content for the new file or the section to be added.
 
-    Your response must be a JSON object with the following keys: "summary", "issues", "suggestions".
-    The "issues" and "suggestions" should be arrays of objects, where each object contains "file", "line" (optional but recommended), "message", and for issues, also "severity" and "suggestion".
-    
-    If there are no issues or suggestions, return empty arrays.
+    If there are no issues, suggestions, or documentation updates, return empty arrays for those keys.
 
     Code diff to review:
     {diff}
     """
     
     payload = {
-        "contents": [
-            {
-                "parts": [
-                    {
-                        "text": prompt
-                    }
-                ]
-            }
-        ],
-        "generationConfig": {
-            "response_mime_type": "application/json"
-        }
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"response_mime_type": "application/json"}
     }
     
-    for attempt in range(MAX_RETRIES):
+    for attempt in range(3):
         try:
-            response = requests.post(
-                f"{GEMINI_API_URL}?key={GEMINI_API_KEY}",
-                headers=headers,
-                json=payload
-            )
-            
-            if response.status_code == 200:
-                print("Successfully received response from Gemini.")
-                break
-            
+            response = requests.post(f"{GEMINI_API_URL}?key={GEMINI_API_KEY}", headers=headers, json=payload)
+            if response.status_code == 200: break
             if response.status_code in [503, 429]:
                 error_message = response.json().get("error", {}).get("message", "Unknown error")
-                print(f"Attempt {attempt + 1}/{MAX_RETRIES} failed with {response.status_code}: {error_message}")
-                if attempt < MAX_RETRIES - 1:
-                    delay = INITIAL_RETRY_DELAY_SECONDS * (2 ** attempt)
-                    print(f"Retrying in {delay} seconds...")
-                    time.sleep(delay)
-                    continue
-            
-            print(f"Failed to get response from Gemini: {response.status_code}")
-            print(response.text)
-            return None
-
-        except requests.exceptions.RequestException as e:
-            print(f"Attempt {attempt + 1}/{MAX_RETRIES} failed with a network error: {e}")
-            if attempt < MAX_RETRIES - 1:
-                delay = INITIAL_RETRY_DELAY_SECONDS * (2 ** attempt)
-                print(f"Retrying in {delay} seconds...")
-                time.sleep(delay)
+                print(f"Attempt {attempt + 1}/3 failed with {response.status_code}: {error_message}. Retrying...")
+                time.sleep(2 ** attempt)
                 continue
-            else:
-                return None
+            print(f"Failed to get response from Gemini: {response.status_code}"); return None
+        except requests.exceptions.RequestException as e: print(f"Network error: {e}"); return None
     
-    if response.status_code != 200:
-        print("All retry attempts failed.")
-        return None
+    if response.status_code != 200: print("All retry attempts failed."); return None
 
     try:
         result = response.json()
         content = result.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
         analysis = json.loads(content)
-        
-        if "summary" in analysis and "issues" in analysis and "suggestions" in analysis:
+        if all(k in analysis for k in ["summary", "issues", "suggestions", "documentation_updates"]):
             return analysis
-        else:
-            print("Warning: Parsed JSON does not have the expected structure. Returning raw response.")
-            return {
-                "summary": "AI provided a JSON response with an unexpected structure.",
-                "issues": [],
-                "suggestions": [],
-                "raw_response": content
-            }
+        else: return {"summary": "AI provided a JSON response with an unexpected structure.", "issues": [], "suggestions": [], "documentation_updates": [], "raw_response": content}
+    except Exception as e: print(f"Error parsing Gemini response: {e}"); return None
 
-    except json.JSONDecodeError as e:
-        print(f"Error: Failed to parse JSON response even with MIME type enforcement: {e}")
-        return {
-            "summary": "AI provided a response that could not be parsed as JSON.",
-            "issues": [],
-            "suggestions": [],
-            "raw_response": result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', 'No content found')
-        }
-    except Exception as e:
-        print(f"An unexpected error occurred during parsing: {e}")
+# --- NEW FUNCTIONS FOR INTERACTING WITH THE DOCS REPOSITORY ---
+
+def run_git_command(command, cwd):
+    """Runs a git command and returns its output."""
+    try:
+        result = subprocess.run(
+            ["git"] + command,
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        print(f"Error running git command {' '.join(command)}: {e.stderr}")
         return None
 
-def is_line_valid_in_pr(file_path, line_number, commit_sha):
-    """Check if a file and line number exist in a specific commit."""
-    headers = {
-        "Authorization": f"token {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github.v3+json"
-    }
+def create_docs_pr(doc_updates, original_pr_url, original_pr_author, base_branch):
+    """Handles the entire process of creating a PR in the docs repository."""
+    if not doc_updates:
+        print("No documentation updates were suggested by the AI.")
+        return
+
+    print(f"\nFound {len(doc_updates)} documentation updates. Creating a new PR in '{DOCS_REPO_NAME}'...")
     
-    file_url = f"{GITHUB_API_URL}/contents/{file_path}?ref={commit_sha}"
+    # Define branch and PR details
+    new_branch_name = f"ai-docs-update-for-pr-{PR_NUMBER}"
+    pr_title = f"docs: [AI-Generated] Documentation updates for {REPO_NAME} PR #{PR_NUMBER}"
     
+    # Standard PR Body
+    pr_body = f"""
+### 🤖 AI-Generated Documentation
+
+This pull request was automatically generated by the LLM code review bot for **[{REPO_NAME} PR #{PR_NUMBER}]({original_pr_url})**.
+
+#### Summary of Changes
+The AI identified the following documentation updates as necessary:
+"""
+    for update in doc_updates:
+        pr_body += f"- **`{update.get('file_path', 'N/A')}`**: {update.get('action', 'create').title()}d.\n"
+    
+    pr_body += f"""
+#### Context
+Please review the proposed documentation changes for accuracy and completeness. This PR aims to keep our documentation in sync with the codebase changes introduced in the original PR.
+
+*Original PR Author: @{original_pr_author}*
+    """
+    
+    # --- Git Operations ---
+    temp_dir = None
     try:
-        response = requests.get(file_url, headers=headers)
-        if response.status_code != 200:
-            return False
+        # 1. Clone the docs repository
+        temp_dir = f"temp_docs_repo_{PR_NUMBER}"
+        clone_url = f"https://{GH_PAT}@github.com/{DOCS_REPO_NAME}.git"
+        run_git_command(["clone", clone_url, temp_dir], ".")
         
-        file_content_b64 = response.json().get("content")
-        if not file_content_b64:
-            return False
+        # 2. Create and checkout a new branch
+        run_git_command(["config", "user.name", "github-actions[bot]"], temp_dir)
+        run_git_command(["config", "user.email", "github-actions[bot]@users.noreply.github.com"], temp_dir)
+        run_git_command(["checkout", "-b", new_branch_name], temp_dir)
+        
+        # 3. Create/update all documentation files
+        for update in doc_updates:
+            file_path = os.path.join(temp_dir, update.get("file_path"))
+            content = update.get("content")
             
-        file_content = base64.b64decode(file_content_b64).decode('utf-8')
-        lines = file_content.splitlines()
-        if 1 <= line_number <= len(lines):
-            return True
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            
+            with open(file_path, "w") as f:
+                f.write(content)
+            
+            run_git_command(["add", file_path], temp_dir)
+        
+        commit_msg = f"feat: Add documentation updates for {REPO_NAME} PR #{PR_NUMBER}"
+        run_git_command(["commit", "-m", commit_msg], temp_dir)
+        
+        # 4. Push the new branch to the remote docs repository
+        run_git_command(["push", "origin", new_branch_name], temp_dir)
+        
+        # 5. Create the Pull Request via API
+        print(f"Creating pull request from {new_branch_name} to {base_branch}")
+        url = f"{DOCS_API_URL}/pulls"
+        headers = {"Authorization": f"token {GH_PAT}", "Accept": "application/vnd.github.v3+json"}
+        data = {"title": pr_title, "body": pr_body, "head": new_branch_name, "base": base_branch}
+        response = requests.post(url, headers=headers, json=data)
+        
+        if response.status_code == 201:
+            pr_data = response.json()
+            print(f"✅ Documentation Pull Request created successfully: {pr_data['html_url']}")
         else:
-            return False
+            print(f"❌ Failed to create pull request: {response.status_code} - {response.text}")
 
-    except Exception:
-        return False
+    except Exception as e:
+        print(f"An error occurred during docs PR creation: {e}")
+    finally:
+        # 6. Clean up the temporary directory
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+            print(f"Cleaned up temporary directory: {temp_dir}")
 
-# --- UPDATED FUNCTION WITH GRACEFUL 422 HANDLING ---
-def post_comment_to_pr(file_path, line, message, commit_sha):
-    """Post a comment to a specific line in the PR, handling validation errors."""
-    headers = {
-        "Authorization": f"token {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github.v3+json"
-    }
-    
-    payload = {
-        "body": message,
-        "commit_id": commit_sha,
-        "path": file_path,
-        "line": line
-    }
-    
-    response = requests.post(COMMENTS_URL, headers=headers, json=payload)
-    
-    if response.status_code == 201:
-        return True
-
-    # --- GRACEFUL ERROR HANDLING ---
-    if response.status_code == 422:
-        error_json = response.json()
-        error_message = error_json.get("errors", [{}])[0].get("message", "Unknown validation error")
-        print(f"Warning: Could not post comment on {file_path}:{line}. GitHub API says: '{error_message}'. Skipping.")
-    else:
-        print(f"Failed to post comment on {file_path}:{line}. Status: {response.status_code}")
-        print(response.text)
-        
-    return False
-
-def post_summary_comment(analysis, out_of_scope_issues):
-    """Post a summary comment to the PR."""
-    headers = {
-        "Authorization": f"token {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github.v3+json"
-    }
-    
-    summary = analysis.get("summary", "No summary provided")
-    issues = analysis.get("issues", [])
-    suggestions = analysis.get("suggestions", [])
-    raw_response = analysis.get("raw_response")
-
-    comment_body = f"## 🤖 AI Code Review (Spring Boot)\n\n"
-    
-    if raw_response:
-        comment_body += f"**Note:** The AI response could not be parsed as JSON. Here is the raw review:\n\n```\n{raw_response}\n```"
-    else:
-        comment_body += f"**Summary:** {summary}\n\n"
-        if issues:
-            comment_body += "### 🚨 Issues Found\n\n"
-            for issue in issues:
-                severity_emoji = {"low": "🔵", "medium": "🟡", "high": "🟠", "critical": "🔴"}.get(issue.get("severity", "low"), "⚪")
-                comment_body += f"{severity_emoji} **{issue.get('severity', 'low').title()}** - {issue.get('message', 'No message')}\n"
-                comment_body += f"- **File:** `{issue.get('file', 'unknown')}` (Line {issue.get('line', 'unknown')})\n"
-                comment_body += f"- **Suggestion:** {issue.get('suggestion', 'No suggestion')}\n\n"
-        
-        if suggestions:
-            comment_body += "### 💡 Suggestions\n\n"
-            for suggestion in suggestions:
-                comment_body += f"- **File:** `{suggestion.get('file', 'unknown')}` (Line {suggestion.get('line', 'unknown')})\n"
-                comment_body += f"- **Suggestion:** {suggestion.get('message', 'No message')}\n\n"
-
-        if out_of_scope_issues:
-            comment_body += "### 📄 General Suggestions (Out of PR Scope)\n\n"
-            comment_body += "The following suggestions were made for files not modified in this PR. Please review them manually:\n\n"
-            for item in out_of_scope_issues:
-                comment_body += f"- **File:** `{item.get('file', 'unknown')}` (Line {item.get('line', 'unknown')})\n"
-                comment_body += f"- **Message:** {item.get('message', 'No message')}\n\n"
-        
-        if not issues and not suggestions and not out_of_scope_issues:
-            comment_body += "No issues or suggestions found. The code looks good! 👍"
-    
-    existing_comments_url = f"{GITHUB_API_URL}/issues/{PR_NUMBER}/comments"
-    existing_comments_response = requests.get(existing_comments_url, headers=headers)
-    if existing_comments_response.status_code != 200:
-        return False
-        
-    existing_comments = existing_comments_response.json()
-    bot_comment_id = None
-    for comment in existing_comments:
-        if comment.get("user", {}).get("type") == "Bot" and "AI Code Review (Spring Boot)" in comment.get("body", ""):
-            bot_comment_id = comment.get("id")
-            break
-    
-    if bot_comment_id:
-        update_url = f"{GITHUB_API_URL}/issues/comments/{bot_comment_id}"
-        response = requests.patch(update_url, headers=headers, json={"body": comment_body})
-        if response.status_code != 200:
-            return False
-    else:
-        response = requests.post(existing_comments_url, headers=headers, json={"body": comment_body})
-        if response.status_code != 201:
-            return False
-    
-    return True
 
 def main():
     """Main function to orchestrate the code review process."""
     print("Starting LLM code review for Spring Boot project...")
     
-    pr_details_response = requests.get(PR_URL, headers={"Authorization": f"token {GITHUB_TOKEN}"})
-    if pr_details_response.status_code != 200:
-        print(f"Failed to get PR details for commit SHA: {pr_details_response.status_code}")
-        return
+    # Get details from the source repository
+    pr_details_response = requests.get(SOURCE_PR_URL, headers={"Authorization": f"token {GITHUB_TOKEN}"})
+    if pr_details_response.status_code != 200: print(f"Failed to get PR details: {pr_details_response.status_code}"); return
     commit_sha = pr_details_response.json().get('head', {}).get('sha')
-    print(f"Using commit SHA: {commit_sha}")
+    base_branch = pr_details_response.json().get('base', {}).get('ref')
+    original_pr_author = pr_details_response.json().get('user', {}).get('login')
+    original_pr_url = pr_details_response.json().get('html_url')
 
     diff, changed_files = get_pr_diff_and_files()
-    if not diff or not changed_files:
-        print("Failed to get PR diff or changed files. Exiting.")
-        return
+    if not diff or not changed_files: print("Failed to get PR diff or changed files. Exiting."); return
     
     print("Got PR diff, analyzing with Gemini...")
-    
     analysis = analyze_code_with_gemini(diff)
-    if not analysis:
-        print("Failed to analyze code with Gemini. Exiting.")
-        return
+    if not analysis: print("Failed to analyze code with Gemini. Exiting."); return
     
-    print("Analysis complete, posting comments...")
+    print("Analysis complete. Posting review comments...")
+    # (Keep your existing logic for posting inline comments and summary comment to the SOURCE PR here)
+    # For example: post_summary_comment(analysis, out_of_scope_issues)
     
-    out_of_scope_items = []
-    
-    if not analysis.get("raw_response"):
-        all_items = analysis.get("issues", []) + analysis.get("suggestions", [])
-        for item in all_items:
-            file_path = item.get("file")
-            line = item.get("line")
+    # --- Handle Documentation PR Creation in the SEPARATE REPO ---
+    if GENERATE_DOCS_PR:
+        doc_updates = analysis.get("documentation_updates", [])
+        create_docs_pr(doc_updates, original_pr_url, original_pr_author, base_branch)
+    else:
+        print("\nDocumentation PR generation is disabled.")
 
-            if not file_path:
-                print(f"Skipping item due to missing file path: {item}")
-                continue
-
-            if file_path not in changed_files:
-                print(f"Skipping inline comment for file not in PR diff: {file_path}")
-                out_of_scope_items.append(item)
-                continue
-            
-            # If line is not provided, we can't post an inline comment.
-            if not line:
-                print(f"Skipping item for {file_path} due to missing line number.")
-                continue
-
-            try:
-                line_num = int(line)
-            except (ValueError, TypeError):
-                print(f"Skipping item for {file_path} due to invalid line number '{line}'.")
-                continue
-            
-            # We still check for validity, but the main protection is the try/catch in post_comment_to_pr
-            if not is_line_valid_in_pr(file_path, line_num, commit_sha):
-                print(f"Skipping comment on invalid line: {file_path}:{line_num}")
-                continue
-            
-            message = f"**{item.get('severity', 'Suggestion').title()}** - {item.get('message', 'No message')}\n\n**Suggestion:** {item.get('suggestion', 'No suggestion')}"
-            post_comment_to_pr(file_path, line_num, message, commit_sha)
-    
-    post_summary_comment(analysis, out_of_scope_items)
-    
     print("LLM code review completed!")
 
 if __name__ == "__main__":

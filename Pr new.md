@@ -5,75 +5,66 @@ from openai import AzureOpenAI
 from markdownify import markdownify as md
 from pathlib import Path
 
-# Load environment variables
+# Load environment variables once at the start
 load_dotenv()
 
-# Initialize Azure OpenAI Client
-client = AzureOpenAI(
-    api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-    api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
-    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
-)
+def get_confluence_content(base_url, email, token, page_id):
+    """
+    Fetches content from Confluence and converts HTML to Markdown.
+    """
+    auth = (email, token)
+    url = f"{base_url}/rest/api/content/{page_id}?expand=body.storage"
+    
+    print(f"Fetching Confluence page ID: {page_id}...")
+    response = requests.get(url, auth=auth)
+    
+    if response.status_code != 200:
+        raise Exception(f"Confluence API Error: {response.status_code} - {response.text}")
+    
+    html_data = response.json()['body']['storage']['value']
+    return md(html_data)
 
-class ConfluenceReader:
-    def __init__(self):
-        self.base_url = os.getenv("CONFLUENCE_BASE_URL")
-        self.email = os.getenv("CONFLUENCE_EMAIL")
-        self.token = os.getenv("CONFLUENCE_API_TOKEN")
-        self.auth = (self.email, self.token)
-
-    def get_content(self, page_id):
-        url = f"{self.base_url}/rest/api/content/{page_id}?expand=body.storage"
-        response = requests.get(url, auth=self.auth)
-        
-        if response.status_code != 200:
-            raise Exception(f"Error fetching Confluence: {response.status_code} - {response.text}")
-        
-        html_data = response.json()['body']['storage']['value']
-        return md(html_data)
-
-class CodeAggregator:
-    def __init__(self, root_path):
-        self.root_path = Path(root_path)
-        self.ignore_dirs = {'.git', '__pycache__', 'node_modules', '.venv', 'bin', 'obj'}
-
-    def get_combined_code(self):
-        combined_text = ""
-        extensions = {'.py', '.js', '.ts', '.java', '.cs', '.go', '.cpp', '.h', '.c', '.json', '.yaml', '.yml'}
-        
-        print("Reading source files...")
-        for file_path in self.root_path.rglob('*'):
-            if not file_path.is_file() or any(part in self.ignore_dirs for part in file_path.parts):
-                continue
+def read_local_code(root_path_str):
+    """
+    Reads all relevant code files from the local directory and combines them
+    into a single string with file headers.
+    """
+    root_path = Path(root_path_str)
+    ignore_dirs = {'.git', '__pycache__', 'node_modules', '.venv', 'bin', 'obj', 'dist'}
+    extensions = {'.py', '.js', '.ts', '.java', '.cs', '.go', '.cpp', '.h', '.c', '.json', '.yaml', '.yml'}
+    
+    combined_text = ""
+    file_count = 0
+    
+    print(f"Scanning local code in: {root_path_str}")
+    
+    for file_path in root_path.rglob('*'):
+        # Skip directories and ignored folders
+        if not file_path.is_file() or any(part in ignore_dirs for part in file_path.parts):
+            continue
+            
+        if file_path.suffix.lower() in extensions:
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+                    # Add a clear separator for the LLM
+                    relative_path = file_path.relative_to(root_path)
+                    combined_text += f"\n\n--- FILE START: {relative_path} ---\n"
+                    combined_text += content
+                    combined_text += "\n--- FILE END ---\n"
+                    file_count += 1
+            except Exception as e:
+                print(f"Skipping {file_path}: {e}")
                 
-            if file_path.suffix.lower() in extensions:
-                try:
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        content = f.read()
-                        combined_text += f"\n\n--- FILE: {file_path.relative_to(self.root_path)} ---\n"
-                        combined_text += content
-                except Exception as e:
-                    print(f"Skipping {file_path}: {e}")
-        
-        return combined_text
+    print(f"Successfully read {file_count} files.")
+    return combined_text
 
-def run_analysis():
-    # 1. Get Documentation
-    print("Fetching Confluence page...")
-    confluence_reader = ConfluenceReader()
-    page_id = os.getenv("PAGE_ID")
-    doc_content = confluence_reader.get_content(page_id)
-
-    # 2. Get Code
-    code_path = os.getenv("LOCAL_CODE_PATH")
-    if not os.path.exists(code_path):
-        print(f"Error: Path {code_path} does not exist.")
-        return
-
-    aggregator = CodeAggregator(code_path)
-    code_content = aggregator.get_combined_code()
-
-    # 3. SWE2 Focused Prompt
+def analyze_with_azure_openai(client, deployment_name, doc_content, code_content):
+    """
+    Sends the documentation and code to Azure OpenAI for SWE2 level analysis.
+    """
+    
+    # SWE2 Specific System Prompt
     system_prompt = """
     You are a Level 2 Software Engineer (SWE2) performing a detailed peer review. 
     Your task is to verify that the 'Technical Documentation' accurately describes the provided 'Source Code'.
@@ -123,33 +114,68 @@ def run_analysis():
     SOURCE CODE:
     {code_content}
     """
-
-    total_chars = len(doc_content) + len(user_prompt)
-    print(f"Total input characters: {total_chars}")
     
-    print("Sending to Azure OpenAI for SWE2 analysis...")
+    print("Sending request to Azure OpenAI...")
+    print(f"Total characters in input: {len(doc_content) + len(code_content)}")
     
     try:
         response = client.chat.completions.create(
-            model=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            model=deployment_name,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.1 # Low temperature for high precision/technical accuracy
+            temperature=0.1 # Low temperature for technical precision
         )
-        
-        analysis_result = response.choices[0].message.content
-        
-        # 4. Save Report
-        output_file = "swe2_gap_analysis_report.md"
-        with open(output_file, "w", encoding="utf-8") as f:
-            f.write(analysis_result)
-            
-        print(f"Success! Report saved to {output_file}")
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"Error calling Azure OpenAI: {str(e)}"
+
+def save_report(content, filename="swe2_gap_analysis_report.md"):
+    """
+    Saves the generated report to a markdown file.
+    """
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(content)
+    print(f"Report saved to {filename}")
+
+def main():
+    # 1. Initialize Azure Client
+    try:
+        client = AzureOpenAI(
+            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
+        )
+    except Exception as e:
+        print(f"Failed to initialize Azure OpenAI Client: {e}")
+        return
+
+    # 2. Get Configuration
+    base_url = os.getenv("CONFLUENCE_BASE_URL")
+    email = os.getenv("CONFLUENCE_EMAIL")
+    token = os.getenv("CONFLUENCE_API_TOKEN")
+    page_id = os.getenv("PAGE_ID")
+    code_path = os.getenv("LOCAL_CODE_PATH")
+    deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+
+    if not all([base_url, email, token, page_id, code_path]):
+        print("Error: Missing configuration in .env file.")
+        return
+
+    try:
+        # 3. Fetch Data
+        doc_text = get_confluence_content(base_url, email, token, page_id)
+        code_text = read_local_code(code_path)
+
+        # 4. Analyze
+        analysis_result = analyze_with_azure_openai(client, deployment_name, doc_text, code_text)
+
+        # 5. Save Output
+        save_report(analysis_result)
 
     except Exception as e:
-        print(f"Error during LLM call: {e}")
+        print(f"An error occurred during execution: {e}")
 
 if __name__ == "__main__":
-    run_analysis()
+    main()

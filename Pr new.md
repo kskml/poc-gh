@@ -58,35 +58,40 @@ def extract_flagged_snippets(root_path_str):
 
 def analyze_flagged_changes(client, deployment_name, doc_content, snippets):
     """
-    ASPICE SWE.2 Aligned Prompt with ID, Section, and Scope.
+    ASPICE SWE.2 Aligned Prompt.
+    Handles combined Non-Conformant and Gap scenarios.
     """
     
     system_prompt = """
     You are an ASPICE SWE.2 Auditor performing a **Functional Consistency Check**.
-    You are verifying that the Code Implementation is consistent with the Functional Documentation (Confluence).
+    You are verifying that the Code Implementation is consistent with the Functional Documentation.
     
     **CRITICAL INSTRUCTIONS:**
-    1. **No Code Details:** Do not mention variables, classes, file paths, or internal methods in the output.
-    2. **Confluence Section:** Identify the EXACT Section Header (e.g., ## Login) from the documentation.
+    1. **No Code Details:** Do not mention variables, classes, file paths, or internal methods.
+    2. **Confluence Section:** Identify the EXACT Section Header from the documentation.
     3. **Observation ID:** Assign a sequential ID (1, 2, 3...) to every row.
+    4. **Combined Severity Logic:**
+       - Check for Consistency: Does code match the doc?
+       - Check for Coverage: Does the doc cover all code features?
+       - **CRITICAL:** If a single change *both* violates the existing specification AND adds new behavior that is completely missing from the docs, report it as ONE row with Severity "🔴 **NON-CONFORMANT / GAP**".
     
-    **Column Definitions:**
-    - **ID:** Sequential number (1, 2, 3...).
-    - **Severity:** 
-      - 🔴 **NON-CONFORMANT:** Functional behavior in code contradicts documentation.
-      - 🟠 **GAP IDENTIFIED:** New functional behavior not covered in documentation.
-      - 🟡 **INCONSISTENCY:** Minor text or parameter description mismatch.
-      - ✅ **CONFORMANT:** Functional behavior matches documentation perfectly.
+    **Severity Definitions:**
+    - 🔴 **NON-CONFORMANT:** Code behavior contradicts the documentation.
+    - 🟠 **GAP IDENTIFIED:** Code has new functionality not covered in documentation.
+    - 🔴 **NON-CONFORMANT / GAP:** A change that violates existing spec AND introduces new undocumented features.
+    - 🟡 **INCONSISTENCY:** Minor text or parameter description mismatch.
+    - ✅ **CONFORMANT:** Functional behavior matches documentation perfectly.
     
+    **Columns:**
+    - **ID:** Sequential number.
+    - **Severity:** (Use the definitions above).
     - **Confluence Section:** The exact header from the docs.
-    - **Impact Scope:** Categorize the functional change.
-       - Options: **User Interface**, **System Logic**, **Data Processing**, **API Contract**, **Security/Permissions**.
-    
-    - **SWE.2 Observation (Functional):** Describe the gap in terms of Functional Specification.
-    - **Corrective Action:** Frame actions as updates to the Functional Specification.
+    - **Impact Scope:** User Interface, System Logic, Data Processing, API Contract, or Security.
+    - **SWE.2 Observation (Functional):** Describe the functional discrepancy clearly.
+    - **Corrective Action:** Specific update to the Functional Specification.
 
     **Output Format:**
-    Return ONLY a single Markdown table. Do not include headers or introductions.
+    Return ONLY a single Markdown table.
     """
 
     formatted_snippets = ""
@@ -119,29 +124,33 @@ def analyze_flagged_changes(client, deployment_name, doc_content, snippets):
     except Exception as e:
         return f"❌ Error calling Azure OpenAI: {str(e)}"
 
-def save_report(content, filename="ASPICE_SWE2_Final_Report.md"):
+def save_report(content, filename="ASPICE_SWE2_Combined_Report.md"):
     """
-    Saves the report with Summary, Definitions, and Detailed Analysis.
+    Saves the report with explicit definitions including the combined logic.
     """
     with open(filename, "w", encoding="utf-8") as f:
         # 1. Main Title
         f.write("# ASPICE SWE.2 Functional Consistency Report\n\n")
         
-        # 2. Executive Summary (Counts)
-        # We parse the table content to count rows for the summary
-        # This is a simple count based on newlines or IDs if the LLM behaves perfectly
-        # For safety in a POC, we just leave a placeholder for the user to review the table
-        # Or we can instruct LLM to provide counts. Let's stick to a generic header.
+        # 2. Executive Summary
         f.write("## Executive Summary\n\n")
         f.write("This report details the functional discrepancies identified between the Code Implementation and the Functional Specification.\n\n")
         f.write("---\n\n")
         
-        # 3. Definitions
+        # 3. Definitions (Expanded)
         f.write("## Assessment Criteria & Definitions\n\n")
-        f.write("| Assessment Aspect | Definition | Options |\n")
-        f.write("| :--- | :--- | :--- |\n")
-        f.write("| **Severity** | Risk level of the functional gap. | 🔴 Non-Conformant, 🟠 Gap Identified, 🟡 Inconsistency, ✅ Conformant |\n")
-        f.write("| **Impact Scope** | Which functional area is affected. | User Interface, System Logic, Data Processing, API Contract, Security |\n")
+        f.write("| Assessment Aspect | Definition |\n")
+        f.write("| :--- | :--- |\n")
+        f.write("| **Severity** | Risk level of the functional gap. |\n")
+        f.write("| **Impact Scope** | The functional area affected (UI, Logic, Data, API, Security). |\n")
+        f.write("\n### Severity Options\n\n")
+        f.write("| Option | Definition |\n")
+        f.write("| :--- | :--- |\n")
+        f.write("| 🔴 **NON-CONFORMANT** | Code behavior contradicts the existing Functional Specification. |\n")
+        f.write("| 🟠 **GAP IDENTIFIED** | Code implements new functionality that is missing from the Specification. |\n")
+        f.write("| 🔴 **NON-CONFORMANT / GAP** | A complex change that **both** violates the existing specification AND introduces new undocumented behavior. |\n")
+        f.write("| 🟡 **INCONSISTENCY** | Minor discrepancies in parameter definitions or descriptions. |\n")
+        f.write("| ✅ **CONFORMANT** | Functional behavior matches the specification accurately. |\n")
         f.write("\n---\n\n")
         
         # 4. LLM Analysis Content

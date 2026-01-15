@@ -10,10 +10,7 @@ load_dotenv()
 
 # --- CONFIGURATION FOR DEMO ---
 # Add this comment to your code to flag it for review
-# Example: # NEW_CHANGE: Added retry logic
 SEARCH_TAG = "NEW_CHANGE" 
-
-# How many lines above/below the tag to capture (provides context to the LLM)
 CONTEXT_LINES = 10 
 # ------------------------------
 
@@ -28,15 +25,12 @@ def get_confluence_content(base_url, email, token, page_id):
     return md(response.json()['body']['storage']['value'])
 
 def extract_flagged_snippets(root_path_str):
-    """
-    Scans local files for the SEARCH_TAG and extracts surrounding code.
-    """
+    """Scans local files for the SEARCH_TAG."""
     root_path = Path(root_path_str)
     ignore_dirs = {'.git', '__pycache__', 'node_modules', '.venv', 'bin', 'obj', 'dist'}
     extensions = {'.py', '.js', '.ts', '.java', '.cs', '.go', '.cpp', '.h', '.c'}
     
     found_snippets = []
-    
     print(f"🔍 Scanning for tag '{SEARCH_TAG}' in: {root_path_str}")
     
     for file_path in root_path.rglob('*'):
@@ -47,70 +41,62 @@ def extract_flagged_snippets(root_path_str):
             try:
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                     lines = f.readlines()
-                    
                 for i, line in enumerate(lines):
                     if SEARCH_TAG in line:
                         start_index = max(0, i - CONTEXT_LINES)
                         end_index = min(len(lines), i + CONTEXT_LINES + 1)
-                        
                         snippet_lines = lines[start_index:end_index]
                         snippet_text = "".join(snippet_lines)
-                        
                         found_snippets.append({
                             "file": str(file_path.relative_to(root_path)),
                             "line": i + 1,
                             "snippet": snippet_text
                         })
-                        print(f"   → Found change in: {file_path.name} (Line {i+1})")
-                        
+                        print(f"   → Found change in: {file_path.name}")
             except Exception as e:
                 print(f"Skipping {file_path}: {e}")
-                
     return found_snippets
 
 def analyze_flagged_changes(client, deployment_name, doc_content, snippets):
     """
-    Refined Prompt for SWE2 Demo Output.
+    Refined Prompt for Functional Reporting.
     """
     
     system_prompt = """
-    You are a Senior SWE2 performing a "Triage Review" for a documentation update request.
+    You are a Senior SWE2 acting as a liaison between Engineering and the Product Team.
+    Your task is to review code changes and generate a report for **Functional Stakeholders** (PM, QA, Business).
     
-    **Your Task:**
-    Analyze the provided code snippets (flagged as changes) against the Existing Documentation.
-    Determine if the documentation is still accurate or requires updates.
+    **CRITICAL INSTRUCTION - FUNCTIONAL PERSPECTIVE:**
+    - In the "Observation" column, describe the **Business Impact** or **User Experience Change**.
+    - DO NOT mention variable names, classes, database tables, or internal code mechanics (e.g., "refactored loop").
+    - DO mention changes to inputs, outputs, errors displayed to users, or behavior flows.
     
-    **Classification Logic:**
-    - 🔴 **CRITICAL:** Breaking changes in API signatures, removed parameters, or changed error codes.
-    - 🟠 **HIGH:** New parameters, new endpoints, or significant logic flow changes.
-    - 🟡 **MEDIUM:** Minor logic tweaks, enum value updates, or internal refactoring.
-    - ✅ **NO ACTION:** Comment-only changes, variable renames, or whitespace fixes.
+    **Translation Examples:**
+    - Code: `added timeout parameter` 
+      -> Observation: "Users can now control how long the system waits before giving up."
+    - Code: `removed include_profile param`
+      -> Observation: "The system will no longer return extended profile details in the standard response."
+    - Code: `renamed var x to y`
+      -> Observation: "No functional change."
     
-    **Output Structure (Markdown):**
-    Generate a professional report.
+    **Severity Logic:**
+    - 🔴 **CRITICAL:** Breaks existing user flows or changes data returned to the user.
+    - 🟠 **HIGH:** Adds new capability or changes validation rules.
+    - 🟡 **MEDIUM:** Cosmetic changes or minor wording updates in error messages.
+    - ✅ **NO ACTION:** Internal refactoring with zero user impact.
     
-    1. **Header:** "SWE2 Code Change Impact Analysis"
-    2. **Executive Summary:** Bullet points summarizing the findings (e.g., "2 Critical gaps found", "1 New endpoint detected").
-    3. **Detailed Review Table:**
-       Columns:
-       - **Severity:** (Use the emoji logic above)
-       - **File:** (Filename)
-       - **Confluence Section:** (The specific section header # or ## that needs updating)
-       - **Gap Type:** (API Contract, Logic, Error Handling, None)
-       - **Observation:** (What changed?)
-       - **Required Action:** (Specific text to add/edit in Confluence)
-    
-    **Style Guide:**
-    - Be concise and direct.
-    - If the doc is accurate, state "Documentation is Valid" in the Action column.
-    - Use bold text for file names and section headers.
+    **Output Structure (Markdown Table):**
+    1. **Severity:** (Use emojis)
+    2. **Area:** (e.g., User Login, Payments, Reporting)
+    3. **Observation:** (Functional description of the change)
+    4. **Documentation Action:** (What specifically needs to be added/edited in Confluence)
+    5. **File:** (Filename for Dev reference)
     """
 
-    # Prepare the snippets for the prompt
     formatted_snippets = ""
     for idx, snip in enumerate(snippets):
-        formatted_snippets += f"\n--- FLAGGED CHANGE {idx+1} ---\n"
-        formatted_snippets += f"File: {snip['file']} (Line {snip['line']})\n"
+        formatted_snippets += f"\n--- CHANGE {idx+1} ---\n"
+        formatted_snippets += f"File: {snip['file']}\n"
         formatted_snippets += f"Code:\n{snip['snippet']}\n"
 
     user_prompt = f"""
@@ -119,11 +105,11 @@ def analyze_flagged_changes(client, deployment_name, doc_content, snippets):
 
     ---
     
-    FLAGGED CODE CHANGES:
+    CODE CHANGES (Review these):
     {formatted_snippets}
     """
     
-    print("🧠 Generating SWE2 Impact Analysis...")
+    print("🧠 Generating Functional Impact Report...")
     
     try:
         response = client.chat.completions.create(
@@ -138,13 +124,12 @@ def analyze_flagged_changes(client, deployment_name, doc_content, snippets):
     except Exception as e:
         return f"❌ Error calling Azure OpenAI: {str(e)}"
 
-def save_report(content, filename="SWE2_Impact_Analysis.md"):
+def save_report(content, filename="Functional_Impact_Report.md"):
     with open(filename, "w", encoding="utf-8") as f:
         f.write(content)
     print(f"✅ Report saved to {filename}")
 
 def main():
-    # 1. Initialize Client
     try:
         client = AzureOpenAI(
             api_key=os.getenv("AZURE_OPENAI_API_KEY"),
@@ -155,7 +140,6 @@ def main():
         print(f"❌ Initialization Error: {e}")
         return
 
-    # 2. Config
     base_url = os.getenv("CONFLUENCE_BASE_URL")
     email = os.getenv("CONFLUENCE_EMAIL")
     token = os.getenv("CONFLUENCE_API_TOKEN")
@@ -164,25 +148,18 @@ def main():
     deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT")
 
     if not all([base_url, email, token, page_id, code_path]):
-        print("❌ Error: Missing configuration in .env file.")
+        print("❌ Error: Missing configuration.")
         return
 
     try:
-        # 3. Fetch Docs
         doc_text = get_confluence_content(base_url, email, token, page_id)
-        
-        # 4. Find Flagged Snippets
         snippets = extract_flagged_snippets(code_path)
         
         if snippets:
-            # 5. Analyze
             report_content = analyze_flagged_changes(client, deployment_name, doc_text, snippets)
-            
-            # 6. Save
             save_report(report_content)
         else:
-            print(f"⚠️  No code changes found with tag '{SEARCH_TAG}'. Make a change and tag it!")
-
+            print(f"⚠️  No code changes found with tag '{SEARCH_TAG}'.")
     except Exception as e:
         print(f"❌ Execution Error: {e}")
 

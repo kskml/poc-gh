@@ -8,28 +8,36 @@ from pathlib import Path
 # Load environment variables
 load_dotenv()
 
+# --- CONFIGURATION ---
+# This is the specific comment tag you will add to your code to mark new changes
+# Example in Python: # NEW_CHANGE
+# Example in Java/JS: // NEW_CHANGE
+SEARCH_TAG = "NEW_CHANGE" 
+CONTEXT_LINES = 15 # How many lines before and after the tag to include
+# --------------------
+
 def get_confluence_content(base_url, email, token, page_id):
+    """Fetches documentation."""
     auth = (email, token)
     url = f"{base_url}/rest/api/content/{page_id}?expand=body.storage"
-    
     print(f"Fetching Confluence page ID: {page_id}...")
     response = requests.get(url, auth=auth)
-    
     if response.status_code != 200:
-        raise Exception(f"Confluence API Error: {response.status_code} - {response.text}")
-    
-    html_data = response.json()['body']['storage']['value']
-    return md(html_data)
+        raise Exception(f"Confluence API Error: {response.status_code}")
+    return md(response.json()['body']['storage']['value'])
 
-def read_local_code(root_path_str):
+def extract_flagged_snippets(root_path_str):
+    """
+    Scans local files for the SEARCH_TAG and extracts the surrounding code context.
+    Returns a list of dictionaries containing file path and code snippet.
+    """
     root_path = Path(root_path_str)
     ignore_dirs = {'.git', '__pycache__', 'node_modules', '.venv', 'bin', 'obj', 'dist'}
-    extensions = {'.py', '.js', '.ts', '.java', '.cs', '.go', '.cpp', '.h', '.c', '.json', '.yaml', '.yml'}
+    extensions = {'.py', '.js', '.ts', '.java', '.cs', '.go', '.cpp', '.h', '.c'}
     
-    combined_text = ""
-    file_count = 0
+    found_snippets = []
     
-    print(f"Scanning local code in: {root_path_str}")
+    print(f"Scanning for tag '{SEARCH_TAG}' in: {root_path_str}")
     
     for file_path in root_path.rglob('*'):
         if not file_path.is_file() or any(part in ignore_dirs for part in file_path.parts):
@@ -38,68 +46,79 @@ def read_local_code(root_path_str):
         if file_path.suffix.lower() in extensions:
             try:
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read()
-                    relative_path = file_path.relative_to(root_path)
-                    combined_text += f"\n\n--- FILE START: {relative_path} ---\n"
-                    combined_text += content
-                    combined_text += "\n--- FILE END ---\n"
-                    file_count += 1
+                    lines = f.readlines()
+                    
+                for i, line in enumerate(lines):
+                    # Check if the magic tag is present in the line
+                    if SEARCH_TAG in line:
+                        # Calculate context window
+                        start_index = max(0, i - CONTEXT_LINES)
+                        end_index = min(len(lines), i + CONTEXT_LINES + 1)
+                        
+                        # Extract snippet
+                        snippet_lines = lines[start_index:end_index]
+                        snippet_text = "".join(snippet_lines)
+                        
+                        found_snippets.append({
+                            "file": str(file_path.relative_to(root_path)),
+                            "line_number": i + 1, # 1-based index for reporting
+                            "snippet": snippet_text
+                        })
+                        
             except Exception as e:
                 print(f"Skipping {file_path}: {e}")
                 
-    print(f"Successfully read {file_count} files.")
-    return combined_text
+    if not found_snippets:
+        print(f"No code changes found with tag '{SEARCH_TAG}'. Please add the tag to your code.")
+    else:
+        print(f"Found {len(found_snippets)} change(s).")
+        
+    return found_snippets
 
-def analyze_with_azure_openai(client, deployment_name, doc_content, code_content):
+def analyze_flagged_changes(client, deployment_name, doc_content, snippets):
     """
-    Generates a professional SWE2 Audit Report in Markdown format.
+    Analyzes specific code snippets against documentation.
     """
     
-    # Optimized Prompt for Demo Presentation
     system_prompt = """
-    You are a Senior Technical Lead reviewing an SWE2's audit of Documentation vs Source Code.
-    Generate a professional "Gap Analysis Report" in Markdown format.
+    You are a Senior SWE2 reviewing specific code updates against existing documentation.
     
-    **Structure the report as follows:**
+    **Context:**
+    1. You have "Existing Documentation".
+    2. You have "Code Snippets" that have been flagged by the developer as new/changed code.
     
-    1. **Header:**
-       - Title: "SWE2 Documentation Compliance Report"
-       - Date: [Today's Date]
-       - Status: "Review Required"
+    **Your Task:**
+    For each flagged snippet, determine if the documentation accurately reflects the new code behavior.
     
-    2. **Executive Summary:**
-       - A bulleted list summarizing the overall health of the documentation.
-       - Example: "Documentation is 80% aligned with code. 3 Critical Logic Gaps found."
+    **Output Format (Markdown Table):**
+    Create a table with the following columns:
+    - **File:** (The filename of the change)
+    - **Confluence Section:** (Which section needs update, e.g., ## API Endpoints)
+    - **Gap Type:** (New Feature, Logic Change, Parameter Update, No Action Needed)
+    - **Observation:** (What is different in the code?)
+    - **SWE2 Action:** (Specific instruction to fix the documentation)
     
-    3. **Detailed Findings Table:**
-       Use a Markdown table with the following columns:
-       - **Severity:** (Assign: P0-Critical, P1-High, P2-Medium, P3-Low based on impact)
-       - **Confluence Section:** (The specific Header # or ## that needs update)
-       - **Gap Type:** (Logic Mismatch, API Contract Missing, Error Handling, Typo)
-       - **Observation:** (Detailed technical observation)
-       - **SWE2 Recommendation:** (Specific action to fix the doc or code)
-       - **Evidence File:** (The source file proving the gap)
-       
-    4. **Next Steps:**
-       - A numbered list of immediate actions for the engineering team.
-       
-    **Style Guidelines:**
-    - Be precise and technical.
-    - Use bolding for key terms in the table.
-    - Ensure the table is aligned and readable.
+    If the change is trivial (e.g., a comment or a variable rename), mark "No Action Needed".
     """
+
+    # Format snippets for the prompt
+    formatted_snippets = ""
+    for idx, snip in enumerate(snippets):
+        formatted_snippets += f"\n--- SNIPPET {idx+1} ---\n"
+        formatted_snippets += f"File: {snip['file']} (Line {snip['line_number']})\n"
+        formatted_snippets += f"Code:\n{snip['snippet']}\n"
 
     user_prompt = f"""
-    TECHNICAL DOCUMENTATION:
+    EXISTING DOCUMENTATION:
     {doc_content}
 
     ---
     
-    SOURCE CODE:
-    {code_content}
+    FLAGGED CODE CHANGES:
+    {formatted_snippets}
     """
     
-    print("Generating Professional SWE2 Audit Report...")
+    print("Analyzing flagged changes against documentation...")
     
     try:
         response = client.chat.completions.create(
@@ -108,19 +127,20 @@ def analyze_with_azure_openai(client, deployment_name, doc_content, code_content
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.1 # Low temperature for factual consistency
+            temperature=0.1
         )
         return response.choices[0].message.content
     except Exception as e:
         return f"Error calling Azure OpenAI: {str(e)}"
 
-def save_report(content, filename="SWE2_Audit_Report.md"):
+def save_report(content, filename="Tagged_Change_Report.md"):
     with open(filename, "w", encoding="utf-8") as f:
+        f.write("# SWE2 Flagged Change Impact Report\n\n")
         f.write(content)
     print(f"Report saved to {filename}")
 
 def main():
-    # 1. Initialize Azure Client
+    # 1. Initialize Client
     try:
         client = AzureOpenAI(
             api_key=os.getenv("AZURE_OPENAI_API_KEY"),
@@ -128,10 +148,10 @@ def main():
             azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
         )
     except Exception as e:
-        print(f"Failed to initialize Azure OpenAI Client: {e}")
+        print(f"Initialization Error: {e}")
         return
 
-    # 2. Get Configuration
+    # 2. Config
     base_url = os.getenv("CONFLUENCE_BASE_URL")
     email = os.getenv("CONFLUENCE_EMAIL")
     token = os.getenv("CONFLUENCE_API_TOKEN")
@@ -140,22 +160,27 @@ def main():
     deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT")
 
     if not all([base_url, email, token, page_id, code_path]):
-        print("Error: Missing configuration in .env file.")
+        print("Error: Missing configuration.")
         return
 
     try:
-        # 3. Fetch Data
+        # 3. Fetch Docs
         doc_text = get_confluence_content(base_url, email, token, page_id)
-        code_text = read_local_code(code_path)
-
-        # 4. Analyze
-        report_content = analyze_with_azure_openai(client, deployment_name, doc_text, code_text)
-
-        # 5. Save Output
-        save_report(report_content)
+        
+        # 4. Find Flagged Snippets
+        snippets = extract_flagged_snippets(code_path)
+        
+        if snippets:
+            # 5. Analyze
+            report_content = analyze_flagged_changes(client, deployment_name, doc_text, snippets)
+            
+            # 6. Save
+            save_report(report_content)
+        else:
+            print("No code changes found with the specified tag.")
 
     except Exception as e:
-        print(f"An error occurred during execution: {e}")
+        print(f"Execution Error: {e}")
 
 if __name__ == "__main__":
     main()

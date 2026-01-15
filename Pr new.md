@@ -14,7 +14,7 @@ CONTEXT_LINES = 10
 # ----------------------
 
 def get_confluence_content(base_url, email, token, page_id):
-    """Fetches documentation and converts to Markdown."""
+    """Fetches documentation."""
     auth = (email, token)
     url = f"{base_url}/rest/api/content/{page_id}?expand=body.storage"
     print(f"Fetching Confluence page ID: {page_id}...")
@@ -47,71 +47,64 @@ def extract_flagged_snippets(root_path_str):
                         snippet_lines = lines[start_index:end_index]
                         snippet_text = "".join(snippet_lines)
                         found_snippets.append({
-                            "file": str(file_path.relative_to(root_path)),
+                            "file": str(file_path.relative_to(root_path)), 
                             "line": i + 1,
                             "snippet": snippet_text
                         })
-                        print(f"   → Found change in: {file_path.name}")
+                        print(f"   → Found change.")
             except Exception as e:
                 print(f"Skipping {file_path}: {e}")
     return found_snippets
 
 def analyze_flagged_changes(client, deployment_name, doc_content, snippets):
     """
-    Refined Prompt for Section Mapping & Functional Severity.
+    ASPICE SWE.2 Aligned Prompt.
     """
     
     system_prompt = """
-    You are a Senior Technical Writer analyzing code changes for Product Management.
-    Your goal is to map code changes to the existing Confluence Documentation and assess the functional impact.
+    You are an ASPICE SWE.2 Auditor performing a **Functional Consistency Check**.
+    You are verifying that the Code Implementation is consistent with the Functional Documentation (Confluence).
     
-    **STRICT RULES:**
-    1. **Confluence Section:** You MUST identify the specific Section Header (e.g., ## Login, ### API Responses) from the provided "Existing Documentation" that relates to the code change. 
-       - If no section exists, suggest where it *should* go (e.g., "N/A - Needs New Section").
-    2. **Functional Observation:** Describe the change in **Business/User Terms**.
-       - DO NOT mention variables, classes, or internal methods.
-       - DO mention inputs, outputs, error messages, or user permissions.
-       - Example: "Users can now upload files larger than 10MB." (Not "Increased buffer size").
-    3. **Severity (Functional):**
-       - 🔴 **CRITICAL:** Breaks existing user flow, removes a feature, or returns different data than expected.
-       - 🟠 **HIGH:** Adds a new feature or capability visible to the user.
-       - 🟡 **MEDIUM:** Changes validation rules, error text, or UI labels.
-       - ✅ **NONE:** Internal refactoring (zero user impact).
+    **CRITICAL INSTRUCTIONS - ASPICE SWE.2 CONTEXT:**
+    1. **Perspective:** Report on **Functional Behavior**, **User Experience**, and **System Logic**.
+    2. **No Code Details:** Do not mention variables, classes, file paths, or internal methods in the output.
+    3. **SWE.2 Consistency Check:** Verify if the documented functional behavior matches the implemented behavior.
     
-    **Output Format (Markdown):**
-    
-    # Functional Impact Dashboard
-    
-    ## Executive Summary
-    - **Total Changes:** [Count]
-    - **Critical:** [Count]
-    - **New Features:** [Count]
-    - **Documentation Coverage:** [Percentage]
-    
-    ## Detailed Review
-    
-    | Severity | Confluence Section | Functional Impact (Observation) | Documentation Action | File |
-    | :--- | :--- | :--- | :--- | :--- |
-    | [Emoji] | [Exact Header from Doc] | [User description] | [What to edit/add] | [File Name] |
+    **Column Definitions:**
+    - **Severity:** 
+      - 🔴 **NON-CONFORMANT:** Functional behavior in code contradicts documentation.
+      - 🟠 **GAP IDENTIFIED:** Code has new functional behavior not covered in documentation.
+      - 🟡 **INCONSISTENCY:** Minor text or parameter description mismatch.
+      - ✅ **CONFORMANT:** Functional behavior matches documentation perfectly.
+      
+    - **SWE.2 Observation (Functional):**
+      - Describe the gap in terms of **Functional Specification**.
+      - Example: "Functional Specification describes behavior A, but implementation performs behavior B."
+      
+    - **Corrective Action:**
+      - Frame actions as updates to the **Functional Specification**.
+      - Example: "Update Functional Specification to reflect new behavior."
+
+    **Output Format:**
+    Return ONLY a single Markdown table. Do not include headers or introductions.
     """
 
     formatted_snippets = ""
     for idx, snip in enumerate(snippets):
         formatted_snippets += f"\n--- CHANGE {idx+1} ---\n"
-        formatted_snippets += f"File: {snip['file']}\n"
         formatted_snippets += f"Code:\n{snip['snippet']}\n"
 
     user_prompt = f"""
-    EXISTING DOCUMENTATION:
+    FUNCTIONAL DOCUMENTATION (Confluence):
     {doc_content}
 
     ---
     
-    CODE CHANGES:
+    CODE IMPLEMENTATION CHANGES:
     {formatted_snippets}
     """
     
-    print("🧠 Generating Functional Dashboard...")
+    print("🧠 Running ASPICE SWE.2 Functional Consistency Check...")
     
     try:
         response = client.chat.completions.create(
@@ -126,10 +119,30 @@ def analyze_flagged_changes(client, deployment_name, doc_content, snippets):
     except Exception as e:
         return f"❌ Error calling Azure OpenAI: {str(e)}"
 
-def save_report(content, filename="Functional_Impact_Dashboard.md"):
+def save_report(content, filename="ASPICE_SWE2_Audit_Report.md"):
+    """
+    Saves the report with explicit Severity Definitions at the top.
+    """
     with open(filename, "w", encoding="utf-8") as f:
+        # 1. Main Title
+        f.write("# ASPICE SWE.2 Functional Consistency Report\n\n")
+        
+        # 2. Severity Definitions Section (New Requirement)
+        f.write("## Severity & Classification Definitions\n\n")
+        f.write("This report evaluates the consistency between Functional Specification and Code Implementation based on ASPICE SWE.2 criteria.\n\n")
+        f.write("| Severity | Definition (ASPICE Context) |\n")
+        f.write("| :--- | :--- |\n")
+        f.write("| 🔴 **NON-CONFORMANT** | The implemented functionality contradicts the Functional Specification. This represents a High Risk to quality and compliance. | \n")
+        f.write("| 🟠 **GAP IDENTIFIED** | New functional behavior exists in the code but is missing from the Specification. Represents a Traceability Gap. | \n")
+        f.write("| 🟡 **INCONSISTENCY** | Minor discrepancies in parameter definitions, descriptions, or limits. | \n")
+        f.write("| ✅ **CONFORMANT** | Functional behavior matches the specification accurately. | \n")
+        f.write("\n---\n\n")
+        
+        # 3. LLM Analysis Content (The Table)
+        f.write("## Detailed Analysis\n\n")
         f.write(content)
-    print(f"✅ Dashboard saved to {filename}")
+        
+    print(f"✅ Report saved to {filename}")
 
 def main():
     try:

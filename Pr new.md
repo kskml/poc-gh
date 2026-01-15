@@ -8,11 +8,10 @@ from pathlib import Path
 # Load environment variables
 load_dotenv()
 
-# --- CONFIGURATION FOR DEMO ---
-# Add this comment to your code to flag it for review
+# --- CONFIGURATION ---
 SEARCH_TAG = "NEW_CHANGE" 
 CONTEXT_LINES = 10 
-# ------------------------------
+# ----------------------
 
 def get_confluence_content(base_url, email, token, page_id):
     """Fetches documentation and converts to Markdown."""
@@ -59,38 +58,41 @@ def extract_flagged_snippets(root_path_str):
 
 def analyze_flagged_changes(client, deployment_name, doc_content, snippets):
     """
-    Refined Prompt for Functional Reporting.
+    Refined Prompt for Section Mapping & Functional Severity.
     """
     
     system_prompt = """
-    You are a Senior SWE2 acting as a liaison between Engineering and the Product Team.
-    Your task is to review code changes and generate a report for **Functional Stakeholders** (PM, QA, Business).
+    You are a Senior Technical Writer analyzing code changes for Product Management.
+    Your goal is to map code changes to the existing Confluence Documentation and assess the functional impact.
     
-    **CRITICAL INSTRUCTION - FUNCTIONAL PERSPECTIVE:**
-    - In the "Observation" column, describe the **Business Impact** or **User Experience Change**.
-    - DO NOT mention variable names, classes, database tables, or internal code mechanics (e.g., "refactored loop").
-    - DO mention changes to inputs, outputs, errors displayed to users, or behavior flows.
+    **STRICT RULES:**
+    1. **Confluence Section:** You MUST identify the specific Section Header (e.g., ## Login, ### API Responses) from the provided "Existing Documentation" that relates to the code change. 
+       - If no section exists, suggest where it *should* go (e.g., "N/A - Needs New Section").
+    2. **Functional Observation:** Describe the change in **Business/User Terms**.
+       - DO NOT mention variables, classes, or internal methods.
+       - DO mention inputs, outputs, error messages, or user permissions.
+       - Example: "Users can now upload files larger than 10MB." (Not "Increased buffer size").
+    3. **Severity (Functional):**
+       - 🔴 **CRITICAL:** Breaks existing user flow, removes a feature, or returns different data than expected.
+       - 🟠 **HIGH:** Adds a new feature or capability visible to the user.
+       - 🟡 **MEDIUM:** Changes validation rules, error text, or UI labels.
+       - ✅ **NONE:** Internal refactoring (zero user impact).
     
-    **Translation Examples:**
-    - Code: `added timeout parameter` 
-      -> Observation: "Users can now control how long the system waits before giving up."
-    - Code: `removed include_profile param`
-      -> Observation: "The system will no longer return extended profile details in the standard response."
-    - Code: `renamed var x to y`
-      -> Observation: "No functional change."
+    **Output Format (Markdown):**
     
-    **Severity Logic:**
-    - 🔴 **CRITICAL:** Breaks existing user flows or changes data returned to the user.
-    - 🟠 **HIGH:** Adds new capability or changes validation rules.
-    - 🟡 **MEDIUM:** Cosmetic changes or minor wording updates in error messages.
-    - ✅ **NO ACTION:** Internal refactoring with zero user impact.
+    # Functional Impact Dashboard
     
-    **Output Structure (Markdown Table):**
-    1. **Severity:** (Use emojis)
-    2. **Area:** (e.g., User Login, Payments, Reporting)
-    3. **Observation:** (Functional description of the change)
-    4. **Documentation Action:** (What specifically needs to be added/edited in Confluence)
-    5. **File:** (Filename for Dev reference)
+    ## Executive Summary
+    - **Total Changes:** [Count]
+    - **Critical:** [Count]
+    - **New Features:** [Count]
+    - **Documentation Coverage:** [Percentage]
+    
+    ## Detailed Review
+    
+    | Severity | Confluence Section | Functional Impact (Observation) | Documentation Action | File |
+    | :--- | :--- | :--- | :--- | :--- |
+    | [Emoji] | [Exact Header from Doc] | [User description] | [What to edit/add] | [File Name] |
     """
 
     formatted_snippets = ""
@@ -105,11 +107,11 @@ def analyze_flagged_changes(client, deployment_name, doc_content, snippets):
 
     ---
     
-    CODE CHANGES (Review these):
+    CODE CHANGES:
     {formatted_snippets}
     """
     
-    print("🧠 Generating Functional Impact Report...")
+    print("🧠 Generating Functional Dashboard...")
     
     try:
         response = client.chat.completions.create(
@@ -124,10 +126,10 @@ def analyze_flagged_changes(client, deployment_name, doc_content, snippets):
     except Exception as e:
         return f"❌ Error calling Azure OpenAI: {str(e)}"
 
-def save_report(content, filename="Functional_Impact_Report.md"):
+def save_report(content, filename="Functional_Impact_Dashboard.md"):
     with open(filename, "w", encoding="utf-8") as f:
         f.write(content)
-    print(f"✅ Report saved to {filename}")
+    print(f"✅ Dashboard saved to {filename}")
 
 def main():
     try:

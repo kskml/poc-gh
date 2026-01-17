@@ -1,0 +1,279 @@
+import os
+import logging
+import base64
+import json
+from github import Github, GithubException
+from openai import AzureOpenAI
+from typing import List, Dict, Tuple, Optional
+
+# Configure Logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+def initialize_clients() -> Tuple[Github, Github, AzureOpenAI, str, str]:
+    """
+    Initializes GitHub and Azure OpenAI clients using environment variables.
+    Returns:
+        Tuple containing (source_github_client, docs_github_client, openai_client, deployment_name)
+    """
+    source_token = os.getenv("SOURCE_GITHUB_TOKEN")
+    docs_token = os.getenv("DOCS_GITHUB_TOKEN")
+    
+    g_source = Github(source_token)
+    g_docs = Github(docs_token)
+    
+    openai_client = AzureOpenAI(
+        api_key=os.getenv("AZURE_OPENAI_KEY"),
+        api_version="2024-02-01",
+        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
+    )
+    
+    deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
+    
+    return g_source, g_docs, openai_client, deployment_name
+
+def get_pr_diff(g_client: Github, repo_full_name: str, pr_number: int) -> Tuple[List[str], str, str]:
+    """
+    Fetches Pull Request details including changed files and the full diff.
+    """
+    logger.info(f"Fetching PR #{pr_number} from {repo_full_name}")
+    repo = g_client.get_repo(repo_full_name)
+    pr = repo.get_pull(pr_number)
+    
+    changed_files = [f.filename for f in pr.get_files()]
+    
+    full_diff_text = ""
+    for file in pr.get_files():
+        if file.patch:
+            full_diff_text += f"File: {file.filename}\nDiff:\n{file.patch}\n\n"
+            
+    return changed_files, full_diff_text, pr.title
+
+def search_candidate_docs(g_docs: Github, docs_repo_full_name: str, file_path: str) -> List[str]:
+    """
+    Searches the Documentation repo for files matching the changed code file path.
+    Uses heuristic search to handle large numbers of files efficiently.
+    """
+    filename_no_ext = os.path.splitext(os.path.basename(file_path))[0]
+    candidates = []
+    
+    docs_repo = g_docs.get_repo(docs_repo_full_name)
+    
+    # Query 1: Exact filename match with extension
+    query = f"filename:{filename_no_ext} extension:ascii repo:{docs_repo_full_name}"
+    try:
+        result = docs_repo.search_code(query)
+        if result.totalCount > 0:
+            candidates.extend([item.path for item in result])
+    except Exception as e:
+        logger.warning(f"Search API limit or error: {e}")
+
+    # Query 2: Fallback to filename match only
+    if not candidates:
+        query = f"{filename_no_ext} extension:ascii repo:{docs_repo_full_name}"
+        try:
+            result = docs_repo.search_code(query)
+            if result.totalCount > 0:
+                candidates.extend([item.path for item in result[:3]])
+        except Exception as e:
+            logger.warning(f"Search API limit or error: {e}")
+            
+    return list(set(candidates))
+
+def fetch_doc_content(g_docs: Github, docs_repo_full_name: str, doc_path: str) -> Optional[str]:
+    """
+    Fetches the raw decoded content of a documentation file.
+    """
+    try:
+        docs_repo = g_docs.get_repo(docs_repo_full_name)
+        content_file = docs_repo.get_contents(doc_path)
+        return content_file.decoded_content.decode("utf-8")
+    except Exception as e:
+        logger.error(f"Could not fetch doc content for {doc_path}: {e}")
+        return None
+
+def call_llm_analysis(client: AzureOpenAI, deployment: str, code_diff: str, doc_content: str, doc_path: str) -> Dict:
+    """
+    Step 1: LLM identifies gaps and proposes changes.
+    """
+    system_prompt = """
+    You are an expert software architect and technical writer. 
+    Compare the 'Code Diff' with the 'Current Documentation'.
+    Identify missing features, behavior changes, or bug fixes not reflected in docs.
+    
+    Output strictly in JSON format:
+    {
+        "needs_update": boolean,
+        "reasoning": "string",
+        "proposed_changes": "string (AsciiDoc format)"
+    }
+    """
+    
+    user_prompt = f"""
+    Code Diff:\n{code_diff}\n\n
+    Documentation File: {doc_path}\n
+    Current Content:\n{doc_content}
+    """
+    
+    try:
+        response = client.chat.completions.create(
+            model=deployment,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt[:40000]} # Token safety
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.2
+        )
+        return json.loads(response.choices[0].message.content)
+    except Exception as e:
+        logger.error(f"LLM Analysis failed for {doc_path}: {e}")
+        return {"needs_update": False, "reasoning": "LLM Error", "proposed_changes": ""}
+
+def call_llm_refactor(client: AzureOpenAI, deployment: str, doc_content: str, proposed_changes: str, doc_path: str) -> Optional[str]:
+    """
+    Step 2: LLM applies proposed changes to rewrite the full file.
+    """
+    system_prompt = """
+    You are an expert AsciiDoc writer.
+    Rewrite the 'Current Documentation' to seamlessly integrate the 'Proposed Changes'.
+    Maintain style and structure. Return ONLY the complete updated file content (no markdown blocks).
+    """
+    
+    user_prompt = f"""
+    File Path: {doc_path}\n
+    Proposed Changes:\n{proposed_changes}\n
+    Current Content:\n{doc_content}\n
+    Generate the updated full documentation content.
+    """
+    
+    try:
+        response = client.chat.completions.create(
+            model=deployment,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt[:40000]}
+            ],
+            temperature=0.3
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"LLM Refactor failed for {doc_path}: {e}")
+        return None
+
+def create_docs_pr(g_docs: Github, docs_repo_full_name: str, branch_name: str, updated_files: Dict[str, str], pr_title: str, summary_log: List[Dict]):
+    """
+    Commits changes to the Docs repo and raises a Pull Request.
+    """
+    docs_repo = g_docs.get_repo(docs_repo_full_name)
+    base_branch = docs_repo.get_branch("main")
+    
+    # 1. Create Branch
+    try:
+        docs_repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=base_branch.commit.sha)
+        logger.info(f"Created branch {branch_name} in docs repo")
+    except GithubException as e:
+        if e.status == 422:
+            logger.info("Branch already exists, proceeding.")
+        else:
+            raise
+
+    # 2. Commit Files
+    commit_message = f"Update docs based on source PR: {pr_title}"
+    
+    for path, new_content in updated_files.items():
+        try:
+            # Fetch SHA to update existing file
+            content_file = docs_repo.get_contents(path, ref=branch_name)
+            docs_repo.update_file(
+                path=path, message=commit_message, content=new_content, 
+                sha=content_file.sha, branch=branch_name
+            )
+        except GithubException:
+            # Create new file (404 error)
+            docs_repo.create_file(
+                path=path, message=commit_message, content=new_content, branch=branch_name
+            )
+        logger.info(f"Committed changes to {path}")
+
+    # 3. Create Pull Request
+    pr_body = "This PR was automatically generated by the AI Doc Bot.\n\n**Summary of Changes:**\n"
+    for item in summary_log:
+        pr_body += f"- **File:** `{item['file']}`\n  **Reasoning:** {item['reasoning']}\n"
+        
+    try:
+        # Check duplicate PRs
+        existing = docs_repo.get_pulls(state="open", head=branch_name.split('/')[-1])
+        if list(existing):
+            logger.info("PR already exists.")
+            return
+
+        docs_repo.create_pull(
+            title=f"[Auto-Generated] Doc Updates for: {pr_title}",
+            body=pr_body,
+            head=branch_name,
+            base="main"
+        )
+        logger.info("Pull Request created successfully.")
+    except Exception as e:
+        logger.error(f"Failed to create PR: {e}")
+
+def main():
+    # --- Configuration ---
+    g_source, g_docs, openai_client, deployment_name = initialize_clients()
+    
+    docs_repo_owner = os.getenv("DOCS_REPO_OWNER")
+    docs_repo_name = os.getenv("DOCS_REPO_NAME")
+    docs_repo_full_name = f"{docs_repo_owner}/{docs_repo_name}"
+    
+    source_repo_full_name = os.getenv("GITHUB_REPOSITORY")
+    pr_number = int(os.getenv("PR_NUMBER"))
+    
+    # --- 1. Fetch PR Diff ---
+    changed_files, diff_text, pr_title = get_pr_diff(g_source, source_repo_full_name, pr_number)
+    logger.info(f"Processing {len(changed_files)} changed files.")
+    
+    updated_files = {}
+    pr_summary = []
+    processed_doc_paths = set()
+    
+    # --- 2. Map and Process Files ---
+    for code_file in changed_files:
+        candidate_docs = search_candidate_docs(g_docs, docs_repo_full_name, code_file)
+        
+        for doc_path in candidate_docs:
+            if doc_path in processed_doc_paths:
+                continue
+            processed_doc_paths.add(doc_path)
+            
+            logger.info(f"Analyzing Doc: {doc_path} against Code: {code_file}")
+            
+            doc_content = fetch_doc_content(g_docs, docs_repo_full_name, doc_path)
+            if not doc_content:
+                continue
+                
+            # Step 3: LLM Analysis
+            analysis = call_llm_analysis(openai_client, deployment_name, diff_text, doc_content, doc_path)
+            
+            if analysis.get("needs_update"):
+                logger.info(f"Gap identified in {doc_path}. Refactoring...")
+                
+                # Step 4: LLM Refactor
+                new_content = call_llm_refactor(openai_client, deployment_name, doc_content, analysis["proposed_changes"], doc_path)
+                
+                if new_content:
+                    updated_files[doc_path] = new_content
+                    pr_summary.append({
+                        "file": doc_path,
+                        "reasoning": analysis["reasoning"]
+                    })
+    
+    # --- 3. Commit and Raise PR ---
+    if updated_files:
+        branch_name = f"ai-doc-update-pr-{pr_number}"
+        create_docs_pr(g_docs, docs_repo_full_name, branch_name, updated_files, pr_title, pr_summary)
+    else:
+        logger.info("No documentation gaps found.")
+
+if __name__ == "__main__":
+    main()

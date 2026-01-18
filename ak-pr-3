@@ -1,0 +1,285 @@
+import os
+import logging
+import json
+import base64
+import requests  # New dependency for direct REST API calls
+from openai import AzureOpenAI
+from typing import List, Dict, Any, Iterator
+import concurrent.futures
+
+# Configure standard logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# --- Configuration ---
+def get_config() -> Dict[str, str]:
+    return {
+        "azure_endpoint": os.getenv("AZURE_OPENAI_ENDPOINT"),
+        "azure_api_key": os.getenv("AZURE_OPENAI_API_KEY"),
+        "deployment_name": os.getenv("AZURE_DEPLOYMENT_NAME"),
+        "gh_token": os.getenv("GH_TOKEN"),
+        "docs_repo": os.getenv("DOCS_REPO_NAME"), # e.g., "my-org/my-docs-repo"
+        "gh_api_base": os.getenv("GH_API_BASE", "https://api.github.com"), # For Enterprise: "https://github.mycompany.com/api/v3"
+        "source_pr_number": os.getenv("SOURCE_PR_NUMBER")
+    }
+
+# --- Clients ---
+def get_azure_client(config: Dict[str, str]) -> AzureOpenAI:
+    return AzureOpenAI(
+        api_key=config["azure_api_key"],
+        api_version="2024-02-15-preview",
+        azure_endpoint=config["azure_endpoint"]
+    )
+
+def get_gh_headers(token: str) -> Dict[str, str]:
+    """Standard REST headers for GitHub v3 API."""
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github.v3+json",
+        "Content-Type": "application/json"
+    }
+
+# -----------------------------------------------------------------------
+# HELPER: SMART BATCHING
+# -----------------------------------------------------------------------
+
+def smart_batch_generator(docs_map: Dict[str, str], max_chars_per_batch: int = 12000) -> Iterator[List[Dict[str, str]]]:
+    current_batch = []
+    current_batch_chars = 0
+    for path, content in docs_map.items():
+        if not content or not content.strip():
+            continue
+        doc_size = len(content)
+        if doc_size > max_chars_per_batch:
+            logger.warning(f"Skipping {path}: Content too large for single batch ({doc_size} chars).")
+            continue
+        if current_batch_chars + doc_size > max_chars_per_batch and current_batch:
+            yield current_batch
+            current_batch = []
+            current_batch_chars = 0
+        current_batch.append({"path": path, "content": content})
+        current_batch_chars += doc_size
+    if current_batch:
+        yield current_batch
+
+# -----------------------------------------------------------------------
+# PHASE 1: BATCHED ANALYSIS
+# -----------------------------------------------------------------------
+
+def analyze_doc_batch(diff: str, doc_batch: List[Dict[str, str]], client: AzureOpenAI, deployment: str) -> List[Dict[str, Any]]:
+    logger.info(f"Analyzing batch of {len(doc_batch)} docs...")
+    delimiter = "|||DOC_SPLIT|||"
+    docs_content_str = delimiter.join([f"{d['path']}\n{d['content']}" for d in doc_batch])
+
+    system_prompt = """
+    You are a code documentation auditor. Compare the 'Code Diff' against the provided 'Documentation Files'.
+    Files are separated by '|||DOC_SPLIT|||'. The line following is the FILE PATH.
+    Identify files that are outdated. Return JSON:
+    {
+        "affected_files": [{"file_path": "...", "reasoning": "...", "proposed_ascii_changes": "..."}]
+    }
+    """
+    user_prompt = f"Code Diff:\n{diff}\n\nDocumentation Files:\n{docs_content_str}"
+
+    try:
+        response = client.chat.completions.create(
+            model=deployment,
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+            response_format={"type": "json_object"},
+            temperature=0.2
+        )
+        return json.loads(response.choices[0].message.content).get("affected_files", [])
+    except Exception as e:
+        logger.error(f"Error in batch analysis: {e}")
+        return []
+
+def identify_relevant_docs_batched(diff: str, ascii_docs_map: Dict[str, str], client: AzureOpenAI, deployment: str) -> List[Dict[str, Any]]:
+    logger.info(f"Phase 1: Starting Smart Batch Analysis for {len(ascii_docs_map)} docs...")
+    all_affected_files = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_batch = {
+            executor.submit(analyze_doc_batch, diff, batch, client, deployment): batch
+            for batch in smart_batch_generator(ascii_docs_map)
+        }
+        for future in concurrent.futures.as_completed(future_to_batch):
+            try:
+                all_affected_files.extend(future.result())
+            except Exception as exc:
+                logger.error(f"Batch processing exception: {exc}")
+    logger.info(f"Phase 1 Complete. Identified {len(all_affected_files)} files needing updates.")
+    return all_affected_files
+
+# -----------------------------------------------------------------------
+# PHASE 2: INDIVIDUAL REFACTORING
+# -----------------------------------------------------------------------
+
+def refactor_single_file(diff: str, file_meta: Dict[str, Any], all_docs_map: Dict[str, str], client: AzureOpenAI, deployment: str) -> Dict[str, Any]:
+    path = file_meta['file_path']
+    logger.info(f"Phase 2: Refactoring {path}...")
+    current_content = all_docs_map.get(path, "")
+    proposed_changes = file_meta.get('proposed_ascii_changes', "")
+
+    system_prompt = "Update documentation based on Code Diff and Proposed Changes. Return JSON: {\"updated_file_content\": \"...\"}"
+    user_prompt = f"Path: {path}\nDiff: {diff}\nChanges: {proposed_changes}\nContent:\n{current_content}"
+
+    try:
+        response = client.chat.completions.create(
+            model=deployment,
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+            response_format={"type": "json_object"},
+            temperature=0.2
+        )
+        result = json.loads(response.choices[0].message.content)
+        return {
+            "file_path": path,
+            "reasoning": file_meta.get('reasoning'),
+            "proposed_changes": proposed_changes,
+            "updated_file_content": result.get("updated_file_content", current_content)
+        }
+    except Exception as e:
+        logger.error(f"Error refactoring {path}: {e}")
+        return None
+
+# -----------------------------------------------------------------------
+# PHASE 3: GITHUB REST API IMPLEMENTATION
+# -----------------------------------------------------------------------
+
+def create_docs_pr(updated_files: List[Dict[str, str]], config: Dict[str, str]) -> None:
+    if not updated_files:
+        logger.info("No files to update.")
+        return
+
+    api_base = config["gh_api_base"]
+    token = config["gh_token"]
+    repo_name = config["docs_repo"] # "owner/repo"
+    headers = get_gh_headers(token)
+    
+    # Parse owner and repo name
+    owner, repo = repo_name.split('/')
+
+    try:
+        # --- Step 1: Get Base Branch SHA ---
+        base_branch = "main" # Default or fetch via config, assuming main for now
+        # GET /repos/{owner}/{repo}/git/ref/heads/{branch}
+        ref_url = f"{api_base}/repos/{owner}/{repo}/git/ref/heads/{base_branch}"
+        logger.info(f"Fetching base branch info from {ref_url}")
+        r = requests.get(ref_url, headers=headers)
+        r.raise_for_status()
+        base_sha = r.json()['object']['sha']
+
+        # --- Step 2: Create New Branch ---
+        branch_suffix = config.get("source_pr_number", "update").replace("/", "-")
+        new_branch_name = f"docs-update-{branch_suffix}"
+        
+        # Clean up if exists
+        try:
+            del_url = f"{api_base}/repos/{owner}/{repo}/git/refs/heads/{new_branch_name}"
+            requests.delete(del_url, headers=headers)
+            logger.info(f"Deleted existing branch {new_branch_name}")
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code != 404:
+                raise
+
+        # POST /repos/{owner}/{repo}/git/refs
+        create_ref_url = f"{api_base}/repos/{owner}/{repo}/git/refs"
+        payload_ref = {
+            "ref": f"refs/heads/{new_branch_name}",
+            "sha": base_sha
+        }
+        logger.info(f"Creating branch {new_branch_name}...")
+        r = requests.post(create_ref_url, headers=headers, json=payload_ref)
+        r.raise_for_status()
+
+        # --- Step 3: Create/Update Files ---
+        pr_body_lines = ["### Automated Documentation Updates\n"]
+        
+        for file_data in updated_files:
+            path = file_data["file_path"]
+            new_content = file_data["updated_file_content"]
+            
+            # Encode content to Base64
+            encoded_content = base64.b64encode(new_content.encode("utf-8")).decode("utf-8")
+            
+            # GET File SHA (to know if we are updating or creating)
+            # GET /repos/{owner}/{repo}/contents/{path}?ref={branch}
+            get_file_url = f"{api_base}/repos/{owner}/{repo}/contents/{path}"
+            params = {"ref": new_branch_name}
+            
+            file_sha = None
+            r_get = requests.get(get_file_url, headers=headers, params=params)
+            
+            if r_get.status_code == 200:
+                file_sha = r_get.json().get("sha")
+                logger.info(f"Updating existing file: {path}")
+            elif r_get.status_code == 404:
+                logger.info(f"Creating new file: {path}")
+            else:
+                r_get.raise_for_status()
+
+            # PUT /repos/{owner}/{repo}/contents/{path}
+            payload_file = {
+                "message": f"Update docs for {path}",
+                "content": encoded_content,
+                "branch": new_branch_name
+            }
+            if file_sha:
+                payload_file["sha"] = file_sha
+            
+            r_put = requests.put(get_file_url, headers=headers, json=payload_file)
+            r_put.raise_for_status()
+            
+            pr_body_lines.append(f"**File:** `{path}` - {file_data['reasoning']}")
+
+        # --- Step 4: Create Pull Request ---
+        # POST /repos/{owner}/{repo}/pulls
+        pr_url = f"{api_base}/repos/{owner}/{repo}/pulls"
+        payload_pr = {
+            "title": f"Docs Update (Source PR #{config.get('source_pr_number', 'N/A')})",
+            "body": "\n".join(pr_body_lines),
+            "head": new_branch_name,
+            "base": base_branch
+        }
+        logger.info("Creating Pull Request...")
+        r_pr = requests.post(pr_url, headers=headers, json=payload_pr)
+        r_pr.raise_for_status()
+        
+        logger.info(f"PR Created successfully: {r_pr.json()['html_url']}")
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"GitHub API Error: {e}")
+        if e.response is not None:
+            logger.error(f"Response Body: {e.response.text}")
+        raise
+
+# -----------------------------------------------------------------------
+# MAIN ORCHESTRATOR
+# -----------------------------------------------------------------------
+
+def run_docs_sync_job(pr_diff: str, ascii_docs_map: Dict[str, str]):
+    config = get_config()
+    client = get_azure_client(config)
+    deployment = config["deployment_name"]
+
+    logger.info("Starting Enterprise Docs Sync Job...")
+
+    # 1. Batched Analysis
+    affected_files_meta = identify_relevant_docs_batched(pr_diff, ascii_docs_map, client, deployment)
+
+    # 2. Refactoring
+    fully_updated_files = []
+    for file_meta in affected_files_meta:
+        updated_data = refactor_single_file(pr_diff, file_meta, ascii_docs_map, client, deployment)
+        if updated_data:
+            fully_updated_files.append(updated_data)
+
+    # 3. REST API PR Creation
+    create_docs_pr(fully_updated_files, config)
+    logger.info("Job Finished.")
+
+# --- Mock Execution ---
+if __name__ == "__main__":
+    # Ensure these env vars are set for this to run
+    # mock_docs = {"docs/test.ascii": "Old content"}
+    # mock_diff = "+ def new_feature(): pass"
+    # run_docs_sync_job(mock_diff, mock_docs)
+    pass

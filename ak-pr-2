@@ -1,8 +1,12 @@
 import os
 import logging
 import json
+from dotenv import load_dotenv # <--- Added this
 from github import Github, GithubException
 from openai import AzureOpenAI
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configure Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -13,6 +17,9 @@ def initialize_clients():
     source_token = os.getenv("SOURCE_GITHUB_TOKEN")
     docs_token = os.getenv("DOCS_GITHUB_TOKEN")
     
+    if not source_token or not docs_token:
+        raise ValueError("GitHub Tokens not found in environment variables.")
+
     g_source = Github(source_token)
     g_docs = Github(docs_token)
     
@@ -29,10 +36,7 @@ def initialize_clients():
     return g_source, g_docs, openai_client, deployment_name, docs_repo_owner, docs_repo_name
 
 def get_pr_diff(g_client, repo_full_name, pr_number):
-    """
-    Fetches Pull Request details including changed files and the full diff.
-    Extracts file status (Added, Modified, Removed, Renamed) to pass to LLM.
-    """
+    """Fetches Pull Request details including changed files and the full diff."""
     logger.info(f"Fetching PR #{pr_number} from {repo_full_name}")
     repo = g_client.get_repo(repo_full_name)
     pr = repo.get_pull(pr_number)
@@ -43,7 +47,7 @@ def get_pr_diff(g_client, repo_full_name, pr_number):
     for file in pr.get_files():
         file_info = {
             "filename": file.filename,
-            "status": file.status, # added, removed, modified, renamed
+            "status": file.status, 
             "previous_filename": file.previous_filename
         }
         file_details.append(file_info)
@@ -54,10 +58,7 @@ def get_pr_diff(g_client, repo_full_name, pr_number):
     return file_details, full_diff_text, pr.title
 
 def search_candidate_docs(g_docs, docs_repo_full_name, file_path, file_status):
-    """
-    Searches the Documentation repo for files matching the changed code file path.
-    Includes logic to find renamed files if applicable.
-    """
+    """Searches the Documentation repo for files matching the changed code file path."""
     filename_no_ext = os.path.splitext(os.path.basename(file_path))[0]
     candidates = []
     docs_repo = g_docs.get_repo(docs_repo_full_name)
@@ -89,12 +90,7 @@ def fetch_doc_content(g_docs, docs_repo_full_name, doc_path):
         return None
 
 def analyze_and_update_document(client, deployment, code_diff, doc_content, doc_path, file_status):
-    """
-    SINGLE CALL LLM: 
-    1. Detects specific functions/methods/configs changed.
-    2. Generates proposed changes summary.
-    3. Generates full updated file content.
-    """
+    """SINGLE CALL LLM: Analyzes gaps and generates updated content."""
     
     system_prompt = """
     You are an expert technical writer and code analyst.
@@ -114,17 +110,16 @@ def analyze_and_update_document(client, deployment, code_diff, doc_content, doc_
     
     Return strictly in this JSON format:
     {
-        "file_path": "string (The documentation file path)",
-        "status": "string (The status of the code change: Added/Modified/Removed)",
+        "file_path": "string",
+        "status": "string (Added/Modified/Removed)",
         "needs_update": boolean,
-        "reasoning": "string (Explain why update is needed)",
-        "affected_functions_methods": ["string", "string"] (List of specific code elements changed),
-        "proposed_ascii_changes": "string (Summary of changes in AsciiDoc format for the PR description)",
-        "updated_file_content": "string (The complete new file content if needs_update is true, otherwise empty)"
+        "reasoning": "string",
+        "affected_functions_methods": ["string", "string"],
+        "proposed_ascii_changes": "string",
+        "updated_file_content": "string"
     }
     """
 
-    # Include file status in the user prompt for context
     user_prompt = f"""
     Code Status: {file_status}
     Documentation File: {doc_path}
@@ -138,7 +133,6 @@ def analyze_and_update_document(client, deployment, code_diff, doc_content, doc_
     Please provide the JSON analysis and updated content.
     """
     
-    # Safety truncation
     max_input_length = 60000
     if len(user_prompt) > max_input_length:
         logger.warning(f"Input for {doc_path} is too long, truncating diff.")
@@ -154,7 +148,6 @@ def analyze_and_update_document(client, deployment, code_diff, doc_content, doc_
             response_format={"type": "json_object"},
             temperature=0.2
         )
-        
         return json.loads(response.choices[0].message.content)
     except Exception as e:
         logger.error(f"LLM Call failed for {doc_path}: {e}")
@@ -171,7 +164,6 @@ def create_docs_pr(g_docs, docs_repo_full_name, branch_name, updated_files, pr_t
     docs_repo = g_docs.get_repo(docs_repo_full_name)
     base_branch = docs_repo.get_branch("main")
     
-    # 1. Create Branch
     try:
         docs_repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=base_branch.commit.sha)
         logger.info(f"Created branch {branch_name} in docs repo")
@@ -181,28 +173,23 @@ def create_docs_pr(g_docs, docs_repo_full_name, branch_name, updated_files, pr_t
         else:
             raise
 
-    # 2. Commit Files
     commit_message = f"Update docs based on source PR: {pr_title}"
     
     for path, new_content in updated_files.items():
         try:
-            # Check if file exists to update
             content_file = docs_repo.get_contents(path, ref=branch_name)
             docs_repo.update_file(
                 path=path, message=commit_message, content=new_content, 
                 sha=content_file.sha, branch=branch_name
             )
         except GithubException:
-            # Create new file
             docs_repo.create_file(
                 path=path, message=commit_message, content=new_content, branch=branch_name
             )
         logger.info(f"Committed changes to {path}")
 
-    # 3. Create Pull Request
-    pr_body = "This PR was automatically generated by the AI Doc Bot.\n\n**Detailed Analysis:**\n"
+    pr_body = "This PR was automatically generated by the AI Doc Bot (Local Run).\n\n**Detailed Analysis:**\n"
     for item in summary_log:
-        # Detailed body with proposed changes
         pr_body += f"---\n"
         pr_body += f"**File:** `{item['file']}`\n"
         pr_body += f"**Status:** {item['status']}\n"
@@ -217,7 +204,7 @@ def create_docs_pr(g_docs, docs_repo_full_name, branch_name, updated_files, pr_t
             return
 
         docs_repo.create_pull(
-            title=f"[Auto-Generated] Doc Updates for: {pr_title}",
+            title=f"[Local-Run] Doc Updates for: {pr_title}",
             body=pr_body,
             head=branch_name,
             base="main"
@@ -228,13 +215,24 @@ def create_docs_pr(g_docs, docs_repo_full_name, branch_name, updated_files, pr_t
 
 def main():
     # --- 0. Initialization ---
-    g_source, g_docs, openai_client, deployment_name, docs_repo_owner, docs_repo_name = initialize_clients()
+    try:
+        g_source, g_docs, openai_client, deployment_name, docs_repo_owner, docs_repo_name = initialize_clients()
+    except Exception as e:
+        logger.critical(f"Initialization failed: {e}")
+        return
+
     docs_repo_full_name = f"{docs_repo_owner}/{docs_repo_name}"
     
-    source_repo_full_name = os.getenv("GITHUB_REPOSITORY")
+    # Manual Source Repo Construction for Local Run
+    source_repo_owner = os.getenv("SOURCE_REPO_OWNER")
+    source_repo_name = os.getenv("SOURCE_REPO_NAME")
+    source_repo_full_name = f"{source_repo_owner}/{source_repo_name}"
+    
     pr_number = int(os.getenv("PR_NUMBER"))
     
-    # --- 1. Fetch PR Diff (With File Status) ---
+    logger.info(f"Starting local run for PR #{pr_number} on {source_repo_full_name}")
+
+    # --- 1. Fetch PR Diff ---
     file_details, diff_text, pr_title = get_pr_diff(g_source, source_repo_full_name, pr_number)
     
     updated_files = {}
@@ -246,7 +244,6 @@ def main():
         code_file = file_info['filename']
         file_status = file_info['status']
         
-        # Identify candidate doc files
         candidate_docs = search_candidate_docs(g_docs, docs_repo_full_name, code_file, file_status)
         
         for doc_path in candidate_docs:
@@ -256,12 +253,10 @@ def main():
             
             logger.info(f"Processing: {doc_path} (Code Status: {file_status})")
             
-            # Fetch content. If doc doesn't exist (404), send empty string to LLM (it might need to create it)
             doc_content = fetch_doc_content(g_docs, docs_repo_full_name, doc_path)
             if doc_content is None:
-                doc_content = "" # Treat as new file
+                doc_content = "" 
             
-            # --- 3. ENHANCED SINGLE CALL LLM ---
             result = analyze_and_update_document(
                 openai_client, 
                 deployment_name, 
@@ -273,7 +268,6 @@ def main():
             
             if result.get("needs_update") and result.get("updated_file_content"):
                 logger.info(f"Updates generated for {doc_path}.")
-                
                 updated_files[doc_path] = result["updated_file_content"]
                 pr_summary.append({
                     "file": doc_path,
@@ -285,9 +279,9 @@ def main():
             else:
                 logger.info(f"No update needed for {doc_path}.")
 
-    # --- 4. Commit and Raise PR ---
+    # --- 3. Commit and Raise PR ---
     if updated_files:
-        branch_name = f"ai-doc-update-pr-{pr_number}"
+        branch_name = f"local-doc-update-pr-{pr_number}"
         create_docs_pr(g_docs, docs_repo_full_name, branch_name, updated_files, pr_title, pr_summary)
     else:
         logger.info("No documentation gaps found. No PR raised.")

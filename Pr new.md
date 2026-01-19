@@ -1,197 +1,230 @@
-import os
 import requests
-from dotenv import load_dotenv
-from openai import AzureOpenAI
-from markdownify import markdownify as md
-from pathlib import Path
-
-# Load environment variables
-load_dotenv()
+import json
+import getpass
+import os
 
 # --- CONFIGURATION ---
-SEARCH_TAG = "NEW_CHANGE" 
-CONTEXT_LINES = 10 
-# ----------------------
+# TODO: Update these variables with your specific details
 
-def get_confluence_content(base_url, email, token, page_id):
-    """Fetches documentation."""
-    auth = (email, token)
-    url = f"{base_url}/rest/api/content/{page_id}?expand=body.storage"
-    print(f"Fetching Confluence page ID: {page_id}...")
-    response = requests.get(url, auth=auth)
-    if response.status_code != 200:
-        raise Exception(f"Confluence API Error: {response.status_code}")
-    return md(response.json()['body']['storage']['value'])
+# The base URL of your GitHub Enterprise instance.
+# e.g., 'https://github.mycompany.com'
+GITHUB_ENTERPRISE_URL = "https://github.mycompany.com" 
 
-def extract_flagged_snippets(root_path_str):
-    """Scans local files for the SEARCH_TAG."""
-    root_path = Path(root_path_str)
-    ignore_dirs = {'.git', '__pycache__', 'node_modules', '.venv', 'bin', 'obj', 'dist'}
-    extensions = {'.py', '.js', '.ts', '.java', '.cs', '.go', '.cpp', '.h', '.c'}
-    
-    found_snippets = []
-    print(f"🔍 Scanning for tag '{SEARCH_TAG}' in: {root_path_str}")
-    
-    for file_path in root_path.rglob('*'):
-        if not file_path.is_file() or any(part in ignore_dirs for part in file_path.parts):
+# The repository owner and name.
+# e.g., for 'https://github.mycompany.com/my-org/my-repo', owner is 'my-org' and name is 'my-repo'.
+REPO_OWNER = "your-org"
+REPO_NAME = "your-repo"
+
+# The branch you want to merge your changes INTO.
+BASE_BRANCH = "main"
+
+# The name for the NEW branch that will contain your changes.
+# It's good practice to make this unique.
+HEAD_BRANCH = "feature/my-new-changes-from-api"
+
+# --- Pull Request Details ---
+PR_TITLE = "Automated PR: Add new feature from script"
+PR_BODY = """
+This pull request was created automatically by a Python script.
+
+It includes the following changes:
+- Updated the README.md file.
+- Added a new configuration file.
+
+Please review the changes before merging.
+"""
+
+# --- Files to be included in the Pull Request ---
+# TODO: List the paths of the files you have modified locally.
+# The script will read these files from your current directory.
+MODIFIED_FILES = [
+    "README.md",
+    "config/new_settings.json"
+]
+
+# --- END OF CONFIGURATION ---
+
+
+def get_api_session(token: str) -> requests.Session:
+    """Creates and returns a requests session with GitHub API headers."""
+    session = requests.Session()
+    session.headers.update({
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json",
+        "Content-Type": "application/json"
+    })
+    return session
+
+def handle_response(response: requests.Response):
+    """Checks for API errors and returns JSON response."""
+    if response.status_code >= 400:
+        try:
+            error_data = response.json()
+            error_message = error_data.get('message', 'Unknown API error')
+            print(f"Error: {response.status_code} - {error_message}")
+            if 'errors' in error_data:
+                for err in error_data['errors']:
+                    print(f"  - {err.get('message', '')}")
+        except json.JSONDecodeError:
+            print(f"Error: {response.status_code} - {response.text}")
+        response.raise_for_status()  # This will raise an HTTPError
+    return response.json()
+
+def get_latest_commit_sha(session: requests.Session, base_branch: str) -> str:
+    """Step 1: Get the SHA of the latest commit on the base branch."""
+    print(f"Step 1: Getting latest commit SHA for branch '{base_branch}'...")
+    url = f"{GITHUB_ENTERPRISE_URL}/api/v3/repos/{REPO_OWNER}/{REPO_NAME}/git/refs/heads/{base_branch}"
+    response = session.get(url)
+    data = handle_response(response)
+    commit_sha = data['object']['sha']
+    print(f"   Latest commit SHA: {commit_sha}")
+    return commit_sha
+
+def create_blobs_for_files(session: requests.Session, file_paths: list) -> dict:
+    """Step 2: Create a blob for each modified file's content."""
+    print("\nStep 2: Creating blobs for modified files...")
+    file_blobs = {}
+    for file_path in file_paths:
+        if not os.path.exists(file_path):
+            print(f"   Warning: File '{file_path}' not found. Skipping.")
             continue
-            
-        if file_path.suffix.lower() in extensions:
-            try:
-                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    lines = f.readlines()
-                for i, line in enumerate(lines):
-                    if SEARCH_TAG in line:
-                        start_index = max(0, i - CONTEXT_LINES)
-                        end_index = min(len(lines), i + CONTEXT_LINES + 1)
-                        snippet_lines = lines[start_index:end_index]
-                        snippet_text = "".join(snippet_lines)
-                        found_snippets.append({
-                            "file": str(file_path.relative_to(root_path)), 
-                            "line": i + 1,
-                            "snippet": snippet_text
-                        })
-                        print(f"   → Found change.")
-            except Exception as e:
-                print(f"Skipping {file_path}: {e}")
-    return found_snippets
-
-def analyze_flagged_changes(client, deployment_name, doc_content, snippets):
-    """
-    ASPICE SWE.2 Aligned Prompt.
-    Handles combined Non-Conformant and Gap scenarios.
-    """
-    
-    system_prompt = """
-    You are an ASPICE SWE.2 Auditor performing a **Functional Consistency Check**.
-    You are verifying that the Code Implementation is consistent with the Functional Documentation.
-    
-    **CRITICAL INSTRUCTIONS:**
-    1. **No Code Details:** Do not mention variables, classes, file paths, or internal methods.
-    2. **Confluence Section:** Identify the EXACT Section Header from the documentation.
-    3. **Observation ID:** Assign a sequential ID (1, 2, 3...) to every row.
-    4. **Combined Severity Logic:**
-       - Check for Consistency: Does code match the doc?
-       - Check for Coverage: Does the doc cover all code features?
-       - **CRITICAL:** If a single change *both* violates the existing specification AND adds new behavior that is completely missing from the docs, report it as ONE row with Severity "🔴 **NON-CONFORMANT / GAP**".
-    
-    **Severity Definitions:**
-    - 🔴 **NON-CONFORMANT:** Code behavior contradicts the documentation.
-    - 🟠 **GAP IDENTIFIED:** Code has new functionality not covered in documentation.
-    - 🔴 **NON-CONFORMANT / GAP:** A change that violates existing spec AND introduces new undocumented features.
-    - 🟡 **INCONSISTENCY:** Minor text or parameter description mismatch.
-    - ✅ **CONFORMANT:** Functional behavior matches documentation perfectly.
-    
-    **Columns:**
-    - **ID:** Sequential number.
-    - **Severity:** (Use the definitions above).
-    - **Confluence Section:** The exact header from the docs.
-    - **Impact Scope:** User Interface, System Logic, Data Processing, API Contract, or Security.
-    - **SWE.2 Observation (Functional):** Describe the functional discrepancy clearly.
-    - **Corrective Action:** Specific update to the Functional Specification.
-
-    **Output Format:**
-    Return ONLY a single Markdown table.
-    """
-
-    formatted_snippets = ""
-    for idx, snip in enumerate(snippets):
-        formatted_snippets += f"\n--- CHANGE {idx+1} ---\n"
-        formatted_snippets += f"Code:\n{snip['snippet']}\n"
-
-    user_prompt = f"""
-    FUNCTIONAL DOCUMENTATION (Confluence):
-    {doc_content}
-
-    ---
-    
-    CODE IMPLEMENTATION CHANGES:
-    {formatted_snippets}
-    """
-    
-    print("🧠 Running ASPICE SWE.2 Functional Consistency Check...")
-    
-    try:
-        response = client.chat.completions.create(
-            model=deployment_name,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.1
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        return f"❌ Error calling Azure OpenAI: {str(e)}"
-
-def save_report(content, filename="ASPICE_SWE2_Combined_Report.md"):
-    """
-    Saves the report with explicit definitions including the combined logic.
-    """
-    with open(filename, "w", encoding="utf-8") as f:
-        # 1. Main Title
-        f.write("# ASPICE SWE.2 Functional Consistency Report\n\n")
         
-        # 2. Executive Summary
-        f.write("## Executive Summary\n\n")
-        f.write("This report details the functional discrepancies identified between the Code Implementation and the Functional Specification.\n\n")
-        f.write("---\n\n")
-        
-        # 3. Definitions (Expanded)
-        f.write("## Assessment Criteria & Definitions\n\n")
-        f.write("| Assessment Aspect | Definition |\n")
-        f.write("| :--- | :--- |\n")
-        f.write("| **Severity** | Risk level of the functional gap. |\n")
-        f.write("| **Impact Scope** | The functional area affected (UI, Logic, Data, API, Security). |\n")
-        f.write("\n### Severity Options\n\n")
-        f.write("| Option | Definition |\n")
-        f.write("| :--- | :--- |\n")
-        f.write("| 🔴 **NON-CONFORMANT** | Code behavior contradicts the existing Functional Specification. |\n")
-        f.write("| 🟠 **GAP IDENTIFIED** | Code implements new functionality that is missing from the Specification. |\n")
-        f.write("| 🔴 **NON-CONFORMANT / GAP** | A complex change that **both** violates the existing specification AND introduces new undocumented behavior. |\n")
-        f.write("| 🟡 **INCONSISTENCY** | Minor discrepancies in parameter definitions or descriptions. |\n")
-        f.write("| ✅ **CONFORMANT** | Functional behavior matches the specification accurately. |\n")
-        f.write("\n---\n\n")
-        
-        # 4. LLM Analysis Content
-        f.write("## Detailed Functional Analysis\n\n")
-        f.write(content)
-        
-    print(f"✅ Report saved to {filename}")
+        print(f"   Processing file: {file_path}")
+        with open(file_path, 'rb') as f:
+            # The API expects content to be base64 encoded for binary files or UTF-8 for text.
+            # We'll read as text, assuming source files. For true binary files, use base64.
+            content = f.read().decode('utf-8', errors='replace')
+
+        blob_data = {
+            "content": content,
+            "encoding": "utf-8"
+        }
+        url = f"{GITHUB_ENTERPRISE_URL}/api/v3/repos/{REPO_OWNER}/{REPO_NAME}/git/blobs"
+        response = session.post(url, data=json.dumps(blob_data))
+        blob_sha = handle_response(response)['sha']
+        file_blobs[file_path] = blob_sha
+        print(f"     -> Created blob with SHA: {blob_sha}")
+    return file_blobs
+
+def create_new_tree(session: requests.Session, base_commit_sha: str, file_blobs: dict) -> str:
+    """Step 3: Create a new tree with the updated file blobs."""
+    print("\nStep 3: Creating a new Git tree...")
+    
+    # First, get the base tree SHA from the base commit
+    url = f"{GITHUB_ENTERPRISE_URL}/api/v3/repos/{REPO_OWNER}/{REPO_NAME}/git/commits/{base_commit_sha}"
+    response = session.get(url)
+    base_tree_sha = handle_response(response)['tree']['sha']
+    print(f"   Base tree SHA: {base_tree_sha}")
+
+    # Prepare the tree items for the modified files
+    tree_items = []
+    for path, blob_sha in file_blobs.items():
+        tree_items.append({
+            "path": path,
+            "mode": "100644",  # Represents a regular file (blob)
+            "type": "blob",
+            "sha": blob_sha
+        })
+
+    tree_data = {
+        "base_tree": base_tree_sha,
+        "tree": tree_items
+    }
+    url = f"{GITHUB_ENTERPRISE_URL}/api/v3/repos/{REPO_OWNER}/{REPO_NAME}/git/trees"
+    response = session.post(url, data=json.dumps(tree_data))
+    new_tree_sha = handle_response(response)['sha']
+    print(f"   New tree created with SHA: {new_tree_sha}")
+    return new_tree_sha
+
+def create_new_commit(session: requests.Session, base_commit_sha: str, new_tree_sha: str, message: str) -> str:
+    """Step 4: Create a new commit."""
+    print("\nStep 4: Creating a new commit...")
+    commit_data = {
+        "message": message,
+        "parents": [base_commit_sha],
+        "tree": new_tree_sha
+        # You can also add author/committer details here if needed
+    }
+    url = f"{GITHUB_ENTERPRISE_URL}/api/v3/repos/{REPO_OWNER}/{REPO_NAME}/git/commits"
+    response = session.post(url, data=json.dumps(commit_data))
+    new_commit_sha = handle_response(response)['sha']
+    print(f"   New commit created with SHA: {new_commit_sha}")
+    return new_commit_sha
+
+def create_or_update_branch(session: requests.Session, branch_name: str, commit_sha: str):
+    """Step 5: Create the new branch and point it to the new commit."""
+    print(f"\nStep 5: Creating/updating branch '{branch_name}'...")
+    ref_data = {
+        "ref": f"refs/heads/{branch_name}",
+        "sha": commit_sha
+    }
+    url = f"{GITHUB_ENTERPRISE_URL}/api/v3/repos/{REPO_OWNER}/{REPO_NAME}/git/refs"
+    response = session.post(url, data=json.dumps(ref_data))
+    # A 422 error here might mean the branch already exists, so we try to update it.
+    if response.status_code == 422:
+        print(f"   Branch '{branch_name}' might already exist. Attempting to update...")
+        update_url = f"{GITHUB_ENTERPRISE_URL}/api/v3/repos/{REPO_OWNER}/{REPO_NAME}/git/refs/heads/{branch_name}"
+        update_data = {"sha": commit_sha, "force": False}
+        response = session.patch(update_url, data=json.dumps(update_data))
+    
+    handle_response(response)
+    print(f"   Branch '{branch_name}' now points to commit {commit_sha}.")
+
+def create_pull_request(session: requests.Session, head_branch: str, base_branch: str, title: str, body: str):
+    """Step 6: Create the Pull Request."""
+    print("\nStep 6: Creating the Pull Request...")
+    pr_data = {
+        "title": title,
+        "body": body,
+        "head": head_branch,
+        "base": base_branch
+    }
+    url = f"{GITHUB_ENTERPRISE_URL}/api/v3/repos/{REPO_OWNER}/{REPO_NAME}/pulls"
+    response = session.post(url, data=json.dumps(pr_data))
+    pr_info = handle_response(response)
+    pr_url = pr_info['html_url']
+    print("\n----------------------------------------------------")
+    print(f"✅ Success! Pull Request created.")
+    print(f"   View it here: {pr_url}")
+    print("----------------------------------------------------")
+
 
 def main():
+    """Main function to orchestrate the PR creation process."""
+    print("--- GitHub Enterprise PR Creator ---")
+    
+    # 1. Authenticate
+    token = getpass.getpass("Enter your GitHub Personal Access Token: ")
+    session = get_api_session(token)
+    
+    # 2. Execute the workflow
     try:
-        client = AzureOpenAI(
-            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
-            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
-        )
+        # Get the starting point from the base branch
+        latest_commit_sha = get_latest_commit_sha(session, BASE_BRANCH)
+
+        # Create blobs for the content of your modified files
+        file_blobs = create_blobs_for_files(session, MODIFIED_FILES)
+        if not file_blobs:
+            print("\nNo valid files were processed. Aborting PR creation.")
+            return
+
+        # Create a new tree that includes the new blobs
+        new_tree_sha = create_new_tree(session, latest_commit_sha, file_blobs)
+
+        # Create a new commit that points to the new tree
+        new_commit_sha = create_new_commit(session, latest_commit_sha, new_tree_sha, PR_TITLE)
+
+        # Create a new branch that points to the new commit
+        create_or_update_branch(session, HEAD_BRANCH, new_commit_sha)
+
+        # Finally, create the pull request
+        create_pull_request(session, HEAD_BRANCH, BASE_BRANCH, PR_TITLE, PR_BODY)
+
+    except requests.exceptions.RequestException as e:
+        print(f"\nAn API request failed: {e}")
     except Exception as e:
-        print(f"❌ Initialization Error: {e}")
-        return
+        print(f"\nAn unexpected error occurred: {e}")
 
-    base_url = os.getenv("CONFLUENCE_BASE_URL")
-    email = os.getenv("CONFLUENCE_EMAIL")
-    token = os.getenv("CONFLUENCE_API_TOKEN")
-    page_id = os.getenv("PAGE_ID")
-    code_path = os.getenv("LOCAL_CODE_PATH")
-    deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT")
-
-    if not all([base_url, email, token, page_id, code_path]):
-        print("❌ Error: Missing configuration.")
-        return
-
-    try:
-        doc_text = get_confluence_content(base_url, email, token, page_id)
-        snippets = extract_flagged_snippets(code_path)
-        
-        if snippets:
-            report_content = analyze_flagged_changes(client, deployment_name, doc_text, snippets)
-            save_report(report_content)
-        else:
-            print(f"⚠️  No code changes found with tag '{SEARCH_TAG}'.")
-    except Exception as e:
-        print(f"❌ Execution Error: {e}")
 
 if __name__ == "__main__":
     main()

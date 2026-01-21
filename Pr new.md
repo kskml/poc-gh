@@ -2,42 +2,27 @@ import requests
 import json
 import getpass
 import os
+import base64
 
 # --- CONFIGURATION ---
 # TODO: Update these variables with your specific details
 
-# The base URL of your GitHub Enterprise instance.
-# e.g., 'https://github.mycompany.com'
-GITHUB_ENTERPRISE_URL = "https://github.mycompany.com" 
-
-# The repository owner and name.
-# e.g., for 'https://github.mycompany.com/my-org/my-repo', owner is 'my-org' and name is 'my-repo'.
-REPO_OWNER = "your-org"
-REPO_NAME = "your-repo"
-
-# The branch you want to merge your changes INTO.
+GITHUB_ENTERPRISE_URL = "https://domain"  # Your domain, without /api/v3
+REPO_OWNER = "owner"
+REPO_NAME = "repo"
 BASE_BRANCH = "main"
-
-# The name for the NEW branch that will contain your changes.
-HEAD_BRANCH = "feature/my-new-changes-from-api"
+HEAD_BRANCH = "feature/update-asciidoc-via-contents-api"
 
 # --- Pull Request Details ---
-PR_TITLE = "Automated PR: Add new feature from script"
-PR_BODY = """
-This pull request was created automatically by a Python script.
-
-It includes the following changes:
-- Updated the README.md file.
-- Added a new configuration file.
-
-Please review the changes before merging.
-"""
+PR_TITLE = "Automated PR: Update docs via Contents API"
+PR_BODY = "This PR was created using the GitHub Contents API to avoid blob creation issues."
 
 # --- Files to be included in the Pull Request ---
-# TODO: List the paths of the files you have modified locally.
+# Define each file you want to add/update.
+# Set 'is_binary' to True for images, PDFs, zips, etc.
 MODIFIED_FILES = [
-    "README.md",
-    "config/new_settings.json"
+    {"path": "docs/guide.adoc", "is_binary": False},
+    # {"path": "images/logo.png", "is_binary": True},
 ]
 
 # --- END OF CONFIGURATION ---
@@ -54,15 +39,13 @@ def get_api_session(token: str) -> requests.Session:
     return session
 
 def handle_response(response: requests.Response):
-    """Checks for API errors and returns JSON response with improved 404 handling."""
+    """Checks for API errors and returns JSON response."""
     if response.status_code == 404:
         print("\n--- 404 Not Found Error ---")
-        print("This usually means the URL or repository path is incorrect.")
         print(f"Request URL was: {response.url}")
-        print("Please check your GITHUB_ENTERPRISE_URL, REPO_OWNER, and REPO_NAME variables.")
-        print("Also, ensure your PAT has the 'repo' scope and you have write access to the repository.")
+        print("Please check your GITHUB_ENTERPRISE_URL, REPO_OWNER, and REPO_NAME.")
         print("---------------------------\n")
-        response.raise_for_status() # Raise the error to stop execution
+        response.raise_for_status()
 
     if response.status_code >= 400:
         try:
@@ -77,18 +60,6 @@ def handle_response(response: requests.Response):
         response.raise_for_status()
     return response.json()
 
-def test_connection_and_repo_access(session: requests.Session):
-    """Tests basic API connectivity and repository access."""
-    print("--- Step 0: Testing Connection and Repository Access ---")
-    url = f"{GITHUB_ENTERPRISE_URL}/api/v3/repos/{REPO_OWNER}/{REPO_NAME}"
-    try:
-        response = session.get(url)
-        handle_response(response)
-        print(f"✅ Successfully connected to repository: {REPO_OWNER}/{REPO_NAME}")
-    except requests.exceptions.HTTPError as e:
-        print(f"❌ Failed to connect to the repository. Halting execution.")
-        raise e
-
 def get_latest_commit_sha(session: requests.Session, base_branch: str) -> str:
     """Step 1: Get the SHA of the latest commit on the base branch."""
     print(f"\nStep 1: Getting latest commit SHA for branch '{base_branch}'...")
@@ -99,71 +70,77 @@ def get_latest_commit_sha(session: requests.Session, base_branch: str) -> str:
     print(f"   Latest commit SHA: {commit_sha}")
     return commit_sha
 
-def create_blobs_for_files(session: requests.Session, file_paths: list) -> dict:
-    """Step 2: Create a blob for each modified file's content."""
-    print("\nStep 2: Creating blobs for modified files...")
-    file_blobs = {}
-    for file_path in file_paths:
-        if not os.path.exists(file_path):
-            print(f"   Warning: File '{file_path}' not found. Skipping.")
-            continue
-        
-        print(f"   Processing file: {file_path}")
-        with open(file_path, 'rb') as f:
-            content = f.read().decode('utf-8', errors='replace')
-
-        blob_data = {"content": content, "encoding": "utf-8"}
-        url = f"{GITHUB_ENTERPRISE_URL}/api/v3/repos/{REPO_OWNER}/{REPO_NAME}/git/blobs"
-        response = session.post(url, data=json.dumps(blob_data))
-        blob_sha = handle_response(response)['sha']
-        file_blobs[file_path] = blob_sha
-        print(f"     -> Created blob with SHA: {blob_sha}")
-    return file_blobs
-
-def create_new_tree(session: requests.Session, base_commit_sha: str, file_blobs: dict) -> str:
-    """Step 3: Create a new tree with the updated file blobs."""
-    print("\nStep 3: Creating a new Git tree...")
-    url = f"{GITHUB_ENTERPRISE_URL}/api/v3/repos/{REPO_OWNER}/{REPO_NAME}/git/commits/{base_commit_sha}"
-    response = session.get(url)
-    base_tree_sha = handle_response(response)['tree']['sha']
-    print(f"   Base tree SHA: {base_tree_sha}")
-
-    tree_items = [{"path": path, "mode": "100644", "type": "blob", "sha": blob_sha} for path, blob_sha in file_blobs.items()]
-    tree_data = {"base_tree": base_tree_sha, "tree": tree_items}
-    url = f"{GITHUB_ENTERPRISE_URL}/api/v3/repos/{REPO_OWNER}/{REPO_NAME}/git/trees"
-    response = session.post(url, data=json.dumps(tree_data))
-    new_tree_sha = handle_response(response)['sha']
-    print(f"   New tree created with SHA: {new_tree_sha}")
-    return new_tree_sha
-
-def create_new_commit(session: requests.Session, base_commit_sha: str, new_tree_sha: str, message: str) -> str:
-    """Step 4: Create a new commit."""
-    print("\nStep 4: Creating a new commit...")
-    commit_data = {"message": message, "parents": [base_commit_sha], "tree": new_tree_sha}
-    url = f"{GITHUB_ENTERPRISE_URL}/api/v3/repos/{REPO_OWNER}/{REPO_NAME}/git/commits"
-    response = session.post(url, data=json.dumps(commit_data))
-    new_commit_sha = handle_response(response)['sha']
-    print(f"   New commit created with SHA: {new_commit_sha}")
-    return new_commit_sha
-
 def create_or_update_branch(session: requests.Session, branch_name: str, commit_sha: str):
-    """Step 5: Create the new branch and point it to the new commit."""
-    print(f"\nStep 5: Creating/updating branch '{branch_name}'...")
+    """Step 2: Create the new branch and point it to the new commit."""
+    print(f"\nStep 2: Creating/updating branch '{branch_name}'...")
     ref_data = {"ref": f"refs/heads/{branch_name}", "sha": commit_sha}
     url = f"{GITHUB_ENTERPRISE_URL}/api/v3/repos/{REPO_OWNER}/{REPO_NAME}/git/refs"
+    
+    # Try to create the branch. If it fails with 422, it might already exist.
     response = session.post(url, data=json.dumps(ref_data))
     if response.status_code == 422:
-        print(f"   Branch '{branch_name}' might already exist. Attempting to update...")
-        update_url = f"{GITHUB_ENTERPRISE_URL}/api/v3/repos/{REPO_OWNER}/{REPO_NAME}/git/heads/{branch_name}"
-        update_data = {"sha": commit_sha, "force": False}
-        response = session.patch(update_url, data=json.dumps(update_data))
+        print(f"   Branch '{branch_name}' already exists. No need to create it.")
+    else:
+        handle_response(response) # Will raise an error for other issues
+        print(f"   ✅ Branch '{branch_name}' created successfully.")
     
-    handle_response(response)
-    print(f"   Branch '{branch_name}' now points to commit {commit_sha}.")
+def update_files_via_contents_api(session: requests.Session, files_config: list, branch_name: str):
+    """Step 3: Update files on the new branch using the Contents API."""
+    print(f"\nStep 3: Updating files on branch '{branch_name}' via Contents API...")
+    
+    for file_info in files_config:
+        file_path = file_info["path"]
+        is_binary = file_info.get("is_binary", False)
+        full_path = os.path.abspath(file_path)
+
+        if not os.path.exists(full_path):
+            print(f"   ❌ ERROR: File not found at '{full_path}'. Skipping.")
+            continue
+        
+        print(f"\n   Processing file: {file_path}")
+        
+        # Read file content
+        with open(full_path, 'rb') as f:
+            content_bytes = f.read()
+
+        if is_binary:
+            content_to_upload = base64.b64encode(content_bytes).decode('utf-8')
+            encoding = "base64"
+        else:
+            content_to_upload = content_bytes.decode('utf-8', errors='replace')
+            encoding = "utf-8"
+        
+        # To update a file, we need its current SHA. Let's try to get it.
+        # If the file doesn't exist, this will fail, and we'll know to create it.
+        file_sha = None
+        get_url = f"{GITHUB_ENTERPRISE_URL}/api/v3/repos/{REPO_OWNER}/{REPO_NAME}/contents/{file_path}"
+        try:
+            get_response = session.get(get_url, params={"ref": branch_name})
+            if get_response.status_code == 200:
+                file_sha = handle_response(get_response)['sha']
+                print(f"   -> Found existing file with SHA: {file_sha}")
+        except requests.exceptions.HTTPError:
+            print(f"   -> File '{file_path}' does not exist on branch '{branch_name}'. Will create it.")
+
+        # Prepare the PUT request payload
+        put_payload = {
+            "message": f"Automated commit: Update {file_path}",
+            "content": content_to_upload,
+            "branch": branch_name
+        }
+        if file_sha:
+            put_payload["sha"] = file_sha
+
+        # Make the PUT request to create/update the file
+        put_url = f"{GITHUB_ENTERPRISE_URL}/api/v3/repos/{REPO_OWNER}/{REPO_NAME}/contents/{file_path}"
+        response = session.put(put_url, data=json.dumps(put_payload))
+        result = handle_response(response)
+        print(f"   ✅ Successfully updated/created file. Commit SHA: {result['commit']['sha']}")
+
 
 def create_pull_request(session: requests.Session, head_branch: str, base_branch: str, title: str, body: str):
-    """Step 6: Create the Pull Request."""
-    print("\nStep 6: Creating the Pull Request...")
+    """Step 4: Create the Pull Request."""
+    print("\nStep 4: Creating the Pull Request...")
     pr_data = {"title": title, "body": body, "head": head_branch, "base": base_branch}
     url = f"{GITHUB_ENTERPRISE_URL}/api/v3/repos/{REPO_OWNER}/{REPO_NAME}/pulls"
     response = session.post(url, data=json.dumps(pr_data))
@@ -176,32 +153,27 @@ def create_pull_request(session: requests.Session, head_branch: str, base_branch
 
 
 def main():
-    """Main function to orchestrate the PR creation process."""
-    print("--- GitHub Enterprise PR Creator ---")
-    
+    print("--- GitHub Enterprise PR Creator (Contents API Version) ---")
     token = getpass.getpass("Enter your GitHub Personal Access Token: ")
     session = get_api_session(token)
     
     try:
-        # NEW: Run a diagnostic test first
-        test_connection_and_repo_access(session)
-        
-        # Execute the workflow
+        # 1. Get the starting point from the base branch
         latest_commit_sha = get_latest_commit_sha(session, BASE_BRANCH)
-        file_blobs = create_blobs_for_files(session, MODIFIED_FILES)
-        if not file_blobs:
-            print("\nNo valid files were processed. Aborting PR creation.")
-            return
-        new_tree_sha = create_new_tree(session, latest_commit_sha, file_blobs)
-        new_commit_sha = create_new_commit(session, latest_commit_sha, new_tree_sha, PR_TITLE)
-        create_or_update_branch(session, HEAD_BRANCH, new_commit_sha)
+        
+        # 2. Create the new branch
+        create_or_update_branch(session, HEAD_BRANCH, latest_commit_sha)
+        
+        # 3. Update files on the new branch (the new method)
+        update_files_via_contents_api(session, MODIFIED_FILES, HEAD_BRANCH)
+        
+        # 4. Create the Pull Request
         create_pull_request(session, HEAD_BRANCH, BASE_BRANCH, PR_TITLE, PR_BODY)
 
     except requests.exceptions.RequestException as e:
         print(f"\nAn API request failed: {e}")
     except Exception as e:
         print(f"\nAn unexpected error occurred: {e}")
-
 
 if __name__ == "__main__":
     main()

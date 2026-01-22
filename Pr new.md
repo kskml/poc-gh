@@ -1,179 +1,206 @@
-import requests
-import json
-import getpass
 import os
-import base64
+import requests
+from dotenv import load_dotenv
+from openai import AzureOpenAI
+from markdownify import markdownify as md
+
+# Load environment variables
+load_dotenv()
 
 # --- CONFIGURATION ---
-# TODO: Update these variables with your specific details
+# Confluence
+CONFLUENCE_BASE_URL = os.getenv("CONFLUENCE_BASE_URL")
+CONFLUENCE_EMAIL = os.getenv("CONFLUENCE_EMAIL")
+CONFLUENCE_API_TOKEN = os.getenv("CONFLUENCE_API_TOKEN")
+PAGE_ID = os.getenv("PAGE_ID")
 
-GITHUB_ENTERPRISE_URL = "https://domain"  # Your domain, without /api/v3
-REPO_OWNER = "owner"
-REPO_NAME = "repo"
-BASE_BRANCH = "main"
-HEAD_BRANCH = "feature/update-asciidoc-via-contents-api"
+# GitHub
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_REPO_OWNER = os.getenv("GITHUB_REPO_OWNER") # e.g., "my-org"
+GITHUB_REPO_NAME = os.getenv("GITHUB_REPO_NAME") # e.g., "my-project"
+GITHUB_BASE_TAG = os.getenv("GITHUB_BASE_TAG")   # e.g., "v1.0.0"
+GITHUB_HEAD_TAG = os.getenv("GITHUB_HEAD_TAG")   # e.g., "v1.1.0"
 
-# --- Pull Request Details ---
-PR_TITLE = "Automated PR: Update docs via Contents API"
-PR_BODY = "This PR was created using the GitHub Contents API to avoid blob creation issues."
+# Azure
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
+AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
+AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION")
+# ----------------------
 
-# --- Files to be included in the Pull Request ---
-# Define each file you want to add/update.
-# Set 'is_binary' to True for images, PDFs, zips, etc.
-MODIFIED_FILES = [
-    {"path": "docs/guide.adoc", "is_binary": False},
-    # {"path": "images/logo.png", "is_binary": True},
-]
+def get_confluence_content(base_url, email, token, page_id):
+    """Fetches documentation."""
+    auth = (email, token)
+    url = f"{base_url}/rest/api/content/{page_id}?expand=body.storage"
+    print(f"Fetching Confluence page ID: {page_id}...")
+    response = requests.get(url, auth=auth)
+    if response.status_code != 200:
+        raise Exception(f"Confluence API Error: {response.status_code}")
+    return md(response.json()['body']['storage']['value'])
 
-# --- END OF CONFIGURATION ---
-
-
-def get_api_session(token: str) -> requests.Session:
-    """Creates and returns a requests session with GitHub API headers."""
-    session = requests.Session()
-    session.headers.update({
+def get_github_diff(owner, repo, base_tag, head_tag, token):
+    """
+    Fetches the Unified Diff between two release tags from GitHub API.
+    """
+    headers = {
         "Authorization": f"token {token}",
-        "Accept": "application/vnd.github.v3+json",
-        "Content-Type": "application/json"
-    })
-    return session
-
-def handle_response(response: requests.Response):
-    """Checks for API errors and returns JSON response."""
-    if response.status_code == 404:
-        print("\n--- 404 Not Found Error ---")
-        print(f"Request URL was: {response.url}")
-        print("Please check your GITHUB_ENTERPRISE_URL, REPO_OWNER, and REPO_NAME.")
-        print("---------------------------\n")
-        response.raise_for_status()
-
-    if response.status_code >= 400:
-        try:
-            error_data = response.json()
-            error_message = error_data.get('message', 'Unknown API error')
-            print(f"Error: {response.status_code} - {error_message}")
-            if 'errors' in error_data:
-                for err in error_data['errors']:
-                    print(f"  - {err.get('message', '')}")
-        except json.JSONDecodeError:
-            print(f"Error: {response.status_code} - {response.text}")
-        response.raise_for_status()
-    return response.json()
-
-def get_latest_commit_sha(session: requests.Session, base_branch: str) -> str:
-    """Step 1: Get the SHA of the latest commit on the base branch."""
-    print(f"\nStep 1: Getting latest commit SHA for branch '{base_branch}'...")
-    url = f"{GITHUB_ENTERPRISE_URL}/api/v3/repos/{REPO_OWNER}/{REPO_NAME}/git/refs/heads/{base_branch}"
-    response = session.get(url)
-    data = handle_response(response)
-    commit_sha = data['object']['sha']
-    print(f"   Latest commit SHA: {commit_sha}")
-    return commit_sha
-
-def create_or_update_branch(session: requests.Session, branch_name: str, commit_sha: str):
-    """Step 2: Create the new branch and point it to the new commit."""
-    print(f"\nStep 2: Creating/updating branch '{branch_name}'...")
-    ref_data = {"ref": f"refs/heads/{branch_name}", "sha": commit_sha}
-    url = f"{GITHUB_ENTERPRISE_URL}/api/v3/repos/{REPO_OWNER}/{REPO_NAME}/git/refs"
+        "Accept": "application/vnd.github.v3+json"
+    }
     
-    # Try to create the branch. If it fails with 422, it might already exist.
-    response = session.post(url, data=json.dumps(ref_data))
-    if response.status_code == 422:
-        print(f"   Branch '{branch_name}' already exists. No need to create it.")
-    else:
-        handle_response(response) # Will raise an error for other issues
-        print(f"   ✅ Branch '{branch_name}' created successfully.")
+    url = f"https://api.github.com/repos/{owner}/{repo}/compare/{base_tag}...{head_tag}"
+    print(f"Fetching GitHub Diff: {base_tag} -> {head_tag}...")
     
-def update_files_via_contents_api(session: requests.Session, files_config: list, branch_name: str):
-    """Step 3: Update files on the new branch using the Contents API."""
-    print(f"\nStep 3: Updating files on branch '{branch_name}' via Contents API...")
+    response = requests.get(url, headers=headers)
+    if response.status_code != 200:
+        raise Exception(f"GitHub API Error: {response.status_code} - {response.text}")
     
-    for file_info in files_config:
-        file_path = file_info["path"]
-        is_binary = file_info.get("is_binary", False)
-        full_path = os.path.abspath(file_path)
-
-        if not os.path.exists(full_path):
-            print(f"   ❌ ERROR: File not found at '{full_path}'. Skipping.")
-            continue
+    data = response.json()
+    
+    # Extract the diff string from the response
+    # GitHub returns a large 'files' array, but the top-level 'diff' field aggregates it for us nicely
+    diff_content = data.get('diff', '')
+    
+    if not diff_content:
+        print("Warning: No diff found between tags (or identical tags).")
+        return ""
         
-        print(f"\n   Processing file: {file_path}")
-        
-        # Read file content
-        with open(full_path, 'rb') as f:
-            content_bytes = f.read()
+    print(f"✅ Diff retrieved (Length: {len(diff_content)} chars).")
+    return diff_content
 
-        if is_binary:
-            content_to_upload = base64.b64encode(content_bytes).decode('utf-8')
-            encoding = "base64"
-        else:
-            content_to_upload = content_bytes.decode('utf-8', errors='replace')
-            encoding = "utf-8"
-        
-        # To update a file, we need its current SHA. Let's try to get it.
-        # If the file doesn't exist, this will fail, and we'll know to create it.
-        file_sha = None
-        get_url = f"{GITHUB_ENTERPRISE_URL}/api/v3/repos/{REPO_OWNER}/{REPO_NAME}/contents/{file_path}"
-        try:
-            get_response = session.get(get_url, params={"ref": branch_name})
-            if get_response.status_code == 200:
-                file_sha = handle_response(get_response)['sha']
-                print(f"   -> Found existing file with SHA: {file_sha}")
-        except requests.exceptions.HTTPError:
-            print(f"   -> File '{file_path}' does not exist on branch '{branch_name}'. Will create it.")
+def analyze_diff_with_confluence(client, deployment_name, doc_content, git_diff):
+    """
+    Analyzes the Git Diff against Confluence Documentation.
+    Uses the same ASPICE SWE.2 logic and combined severity.
+    """
+    
+    system_prompt = """
+    You are an ASPICE SWE.2 Auditor analyzing the impact of a **Software Release** (GitHub Diff) on **Functional Documentation** (Confluence).
+    
+    **CRITICAL INSTRUCTIONS:**
+    1. **Source Material:** You are given a "GitHub Unified Diff". Parse `+` (additions) and `-` (deletions) to understand functionality.
+    2. **Functional Filtering:** IGNORE whitespace, imports, comments, and variable renames (refactoring). Focus ONLY on functional logic, API contracts, and business rules.
+    3. **Confluence Section:** Identify the EXACT Section Header from the documentation.
+    4. **Observation ID:** Assign a sequential ID (1, 2, 3...) to every row.
+    5. **Combined Severity Logic:**
+       - If a functional change violates the existing spec AND adds new behavior, use "NON-CONFORMANT / GAP".
+    
+    **Severity Definitions:**
+    - 🔴 **NON-CONFORMANT:** Code change contradicts the existing documentation (Breaking Change).
+    - 🟠 **GAP IDENTIFIED:** Code adds new functionality not covered in documentation.
+    - 🔴 **NON-CONFORMANT / GAP:** Complex change violating spec AND adding features.
+    - 🟡 **INCONSISTENCY:** Minor text or parameter description mismatch.
+    - ✅ **CONFORMANT:** Change is purely internal refactoring or documentation matches new code.
+    
+    **Columns:**
+    - **ID:** Sequential number.
+    - **Severity:** (Use definitions above).
+    - **Confluence Section:** The exact header from the docs.
+    - **Impact Scope:** User Interface, System Logic, Data Processing, API Contract, Security.
+    - **SWE.2 Observation (Functional):** Describe the functional gap clearly.
+    - **Corrective Action:** Specific update to the Functional Specification.
 
-        # Prepare the PUT request payload
-        put_payload = {
-            "message": f"Automated commit: Update {file_path}",
-            "content": content_to_upload,
-            "branch": branch_name
-        }
-        if file_sha:
-            put_payload["sha"] = file_sha
+    **Output Format:**
+    Return ONLY a single Markdown table.
+    """
 
-        # Make the PUT request to create/update the file
-        put_url = f"{GITHUB_ENTERPRISE_URL}/api/v3/repos/{REPO_OWNER}/{REPO_NAME}/contents/{file_path}"
-        response = session.put(put_url, data=json.dumps(put_payload))
-        result = handle_response(response)
-        print(f"   ✅ Successfully updated/created file. Commit SHA: {result['commit']['sha']}")
+    user_prompt = f"""
+    FUNCTIONAL DOCUMENTATION (Confluence):
+    {doc_content}
 
-
-def create_pull_request(session: requests.Session, head_branch: str, base_branch: str, title: str, body: str):
-    """Step 4: Create the Pull Request."""
-    print("\nStep 4: Creating the Pull Request...")
-    pr_data = {"title": title, "body": body, "head": head_branch, "base": base_branch}
-    url = f"{GITHUB_ENTERPRISE_URL}/api/v3/repos/{REPO_OWNER}/{REPO_NAME}/pulls"
-    response = session.post(url, data=json.dumps(pr_data))
-    pr_info = handle_response(response)
-    pr_url = pr_info['html_url']
-    print("\n----------------------------------------------------")
-    print(f"✅ Success! Pull Request created.")
-    print(f"   View it here: {pr_url}")
-    print("----------------------------------------------------")
-
-
-def main():
-    print("--- GitHub Enterprise PR Creator (Contents API Version) ---")
-    token = getpass.getpass("Enter your GitHub Personal Access Token: ")
-    session = get_api_session(token)
+    ---
+    
+    GITHUB RELEASE DIFF (Changes between tags):
+    {git_diff}
+    """
+    
+    print("🧠 Running ASPICE SWE.2 Functional Consistency Check on Release...")
     
     try:
-        # 1. Get the starting point from the base branch
-        latest_commit_sha = get_latest_commit_sha(session, BASE_BRANCH)
-        
-        # 2. Create the new branch
-        create_or_update_branch(session, HEAD_BRANCH, latest_commit_sha)
-        
-        # 3. Update files on the new branch (the new method)
-        update_files_via_contents_api(session, MODIFIED_FILES, HEAD_BRANCH)
-        
-        # 4. Create the Pull Request
-        create_pull_request(session, HEAD_BRANCH, BASE_BRANCH, PR_TITLE, PR_BODY)
-
-    except requests.exceptions.RequestException as e:
-        print(f"\nAn API request failed: {e}")
+        response = client.chat.completions.create(
+            model=deployment_name,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.1
+        )
+        return response.choices[0].message.content
     except Exception as e:
-        print(f"\nAn unexpected error occurred: {e}")
+        return f"❌ Error calling Azure OpenAI: {str(e)}"
+
+def save_report(content, filename="GitHub_Release_Impact_Report.md"):
+    """
+    Saves the report with Release Summary and Definitions.
+    """
+    with open(filename, "w", encoding="utf-8") as f:
+        # 1. Main Title
+        f.write("# ASPICE SWE.2 Release Impact Analysis\n\n")
+        
+        # 2. Release Info (Hardcoded for now, could be dynamic)
+        f.write(f"**Release Comparison:** `{GITHUB_BASE_TAG}` → `{GITHUB_HEAD_TAG}`\n\n")
+        
+        # 3. Executive Summary
+        f.write("## Executive Summary\n\n")
+        f.write("This report details the functional discrepancies introduced by the code release changes.\n\n")
+        f.write("---\n\n")
+        
+        # 4. Definitions
+        f.write("## Assessment Criteria & Definitions\n\n")
+        f.write("| Assessment Aspect | Definition |\n")
+        f.write("| :--- | :--- |\n")
+        f.write("| **Severity** | Risk level of the functional gap introduced by the release. |\n")
+        f.write("| **Impact Scope** | The functional area affected (UI, Logic, Data, API, Security). |\n")
+        f.write("\n### Severity Options\n\n")
+        f.write("| Option | Definition |\n")
+        f.write("| :--- | :--- |\n")
+        f.write("| 🔴 **NON-CONFORMANT** | Code behavior contradicts the existing Functional Specification (Breaking Change). |\n")
+        f.write("| 🟠 **GAP IDENTIFIED** | Code implements new functionality that is missing from the Specification. |\n")
+        f.write("| 🔴 **NON-CONFORMANT / GAP** | A complex change that **both** violates the existing specification AND introduces new undocumented behavior. |\n")
+        f.write("| 🟡 **INCONSISTENCY** | Minor discrepancies in parameter definitions or descriptions. |\n")
+        f.write("| ✅ **CONFORMANT** | Functional behavior matches the specification accurately. |\n")
+        f.write("\n---\n\n")
+        
+        # 5. LLM Analysis Content
+        f.write("## Detailed Functional Analysis\n\n")
+        f.write(content)
+        
+    print(f"✅ Report saved to {filename}")
+
+def main():
+    # 1. Initialize Clients
+    try:
+        client = AzureOpenAI(
+            api_key=AZURE_OPENAI_API_KEY,
+            api_version=AZURE_OPENAI_API_VERSION,
+            azure_endpoint=AZURE_OPENAI_ENDPOINT
+        )
+    except Exception as e:
+        print(f"❌ Initialization Error: {e}")
+        return
+
+    if not all([CONFLUENCE_BASE_URL, CONFLUENCE_EMAIL, CONFLUENCE_API_TOKEN, PAGE_ID, 
+                GITHUB_TOKEN, GITHUB_REPO_OWNER, GITHUB_REPO_NAME, GITHUB_BASE_TAG, GITHUB_HEAD_TAG]):
+        print("❌ Error: Missing configuration in .env file.")
+        return
+
+    try:
+        # 2. Fetch Docs
+        doc_text = get_confluence_content(CONFLUENCE_BASE_URL, CONFLUENCE_EMAIL, CONFLUENCE_API_TOKEN, PAGE_ID)
+        
+        # 3. Fetch GitHub Diff
+        git_diff = get_github_diff(GITHUB_REPO_OWNER, GITHUB_REPO_NAME, GITHUB_BASE_TAG, GITHUB_HEAD_TAG, GITHUB_TOKEN)
+        
+        if git_diff:
+            # 4. Analyze
+            report_content = analyze_diff_with_confluence(client, AZURE_OPENAI_DEPLOYMENT, doc_text, git_diff)
+            
+            # 5. Save
+            save_report(report_content)
+        else:
+            print("⚠️  No Diff found to analyze.")
+
+    except Exception as e:
+        print(f"❌ Execution Error: {e}")
 
 if __name__ == "__main__":
     main()

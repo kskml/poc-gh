@@ -1,0 +1,241 @@
+import os
+import requests
+import re
+from dotenv import load_dotenv
+from openai import AzureOpenAI
+from markdownify import markdownify as md
+
+# Load environment variables
+load_dotenv()
+
+# --- CONFIGURATION ---
+# Confluence
+CONFLUENCE_BASE_URL = os.getenv("CONFLUENCE_BASE_URL")
+CONFLUENCE_EMAIL = os.getenv("CONFLUENCE_EMAIL")
+CONFLUENCE_API_TOKEN = os.getenv("CONFLUENCE_API_TOKEN")
+PAGE_ID = os.getenv("PAGE_ID")
+
+# GitHub
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_REPO_OWNER = os.getenv("GITHUB_REPO_OWNER")
+GITHUB_REPO_NAME = os.getenv("GITHUB_REPO_NAME")
+GITHUB_BASE_TAG = os.getenv("GITHUB_BASE_TAG")   # e.g., "v1.0.0"
+GITHUB_HEAD_TAG = os.getenv("GITHUB_HEAD_TAG")   # e.g., "v1.1.0"
+
+# Azure
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
+AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
+AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION")
+# ----------------------
+
+def get_confluence_content(base_url, email, token, page_id):
+    """Fetches documentation and converts to Markdown."""
+    auth = (email, token)
+    url = f"{base_url}/rest/api/content/{page_id}?expand=body.storage"
+    print(f"Fetching Confluence page ID: {page_id}...")
+    response = requests.get(url, auth=auth)
+    if response.status_code != 200:
+        raise Exception(f"Confluence API Error: {response.status_code}")
+    return md(response.json()['body']['storage']['value'])
+
+def chunk_confluence_by_headings(markdown_text):
+    """
+    Splits the markdown content into chunks based on Headers (#, ##, ###).
+    Returns a list of dictionaries: {'header': '## Title', 'content': '...'}
+    """
+    print("Splitting Confluence content into sections...")
+    
+    # Regex to find headers
+    # This pattern looks for lines starting with #
+    lines = markdown_text.split('\n')
+    chunks = []
+    current_header = "# Introduction" # Default for pre-amble
+    current_content = []
+    
+    for line in lines:
+        if line.strip().startswith('#'):
+            # Save previous chunk if it exists and has content
+            if current_content:
+                chunks.append({
+                    'header': current_header,
+                    'content': "\n".join(current_content)
+                })
+            # Start new chunk
+            current_header = line.strip()
+            current_content = []
+        else:
+            current_content.append(line)
+            
+    # Don't forget the last chunk
+    if current_content:
+        chunks.append({
+            'header': current_header,
+            'content': "\n".join(current_content)
+        })
+        
+    print(f"✅ Created {len(chunks)} sections.")
+    return chunks
+
+def get_full_github_diff(owner, repo, base_tag, head_tag, token):
+    """Fetches the complete diff."""
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    url = f"https://api.github.com/repos/{owner}/{repo}/compare/{base_tag}...{head_tag}"
+    print(f"Fetching GitHub Diff: {base_tag} -> {head_tag}...")
+    
+    response = requests.get(url, headers=headers)
+    if response.status_code != 200:
+        raise Exception(f"GitHub API Error: {response.status_code} - {response.text}")
+    
+    diff_content = response.json().get('diff', '')
+    print(f"✅ Diff retrieved (Length: {len(diff_content)} chars).")
+    return diff_content
+
+def analyze_single_section(client, deployment_name, section_header, section_content, full_diff):
+    """
+    Invokes LLM for a SINGLE section of documentation against the FULL diff.
+    """
+    
+    system_prompt = """
+    You are an ASPICE SWE.2 Auditor.
+    You are analyzing ONE specific section of documentation against a Software Release Code Diff.
+    
+    **Instructions:**
+    1. Read the "Confluence Section".
+    2. Read the "GitHub Code Diff".
+    3. Determine if the changes in the Diff affect this specific Section.
+    
+    **Output Rules:**
+    - If the Diff has NO IMPACT on this section (irrelevant), return exactly: `NO_IMPACT`.
+    - If the Diff HAS IMPACT, return ONLY a Markdown table row (do not include table headers).
+    
+    **Severity Definitions:**
+    - 🔴 **NON-CONFORMANT:** Code contradicts doc.
+    - 🟠 **GAP IDENTIFIED:** Code adds new feature.
+    - 🔴 **NON-CONFORMANT / GAP:** Complex change.
+    - 🟡 **INCONSISTENCY:** Minor mismatch.
+    
+    **Row Format:**
+    | ID | Severity | Confluence Section | Impact Scope | SWE.2 Observation (Functional) | Corrective Action |
+    | 1 | 🔴 **NON-CONFORMANT** | {Use the provided Section Header} | UI/Logic/Data/API | [Observation] | [Action] |
+    
+    **CRITICAL:** Ensure the "Confluence Section" column uses the EXACT header provided in the prompt.
+    """
+
+    user_prompt = f"""
+    CONFLUENCE SECTION:
+    {section_header}
+    {section_content}
+
+    ---
+    
+    GITHUB CODE DIFF (Release Changes):
+    {full_diff}
+    """
+    
+    # Short sleep to avoid rate limits slightly if many calls
+    # time.sleep(0.5) 
+    
+    try:
+        response = client.chat.completions.create(
+            model=deployment_name,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.1
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"Error analyzing section '{section_header}': {e}")
+        return "NO_IMPACT"
+
+def main():
+    # 1. Initialize Clients
+    try:
+        client = AzureOpenAI(
+            api_key=AZURE_OPENAI_API_KEY,
+            api_version=AZURE_OPENAI_API_VERSION,
+            azure_endpoint=AZURE_OPENAI_ENDPOINT
+        )
+    except Exception as e:
+        print(f"❌ Initialization Error: {e}")
+        return
+
+    if not all([CONFLUENCE_BASE_URL, CONFLUENCE_EMAIL, CONFLUENCE_API_TOKEN, PAGE_ID, 
+                GITHUB_TOKEN, GITHUB_REPO_OWNER, GITHUB_REPO_NAME, GITHUB_BASE_TAG, GITHUB_HEAD_TAG]):
+        print("❌ Error: Missing configuration.")
+        return
+
+    try:
+        # 2. Fetch Docs
+        doc_text = get_confluence_content(CONFLUENCE_BASE_URL, CONFLUENCE_EMAIL, CONFLUENCE_API_TOKEN, PAGE_ID)
+        
+        # 3. Chunk Docs
+        sections = chunk_confluence_by_headings(doc_text)
+        
+        # 4. Fetch GitHub Diff (Full Context)
+        full_diff = get_full_github_diff(GITHUB_REPO_OWNER, GITHUB_REPO_NAME, GITHUB_BASE_TAG, GITHUB_HEAD_TAG, GITHUB_TOKEN)
+        
+        if not full_diff:
+            print("⚠️  No Diff found to analyze.")
+            return
+
+        # 5. Iterative Analysis (Multiple Invocations)
+        print(f"🔄 Starting Analysis across {len(sections)} sections...")
+        accumulated_rows = []
+        
+        for idx, section in enumerate(sections):
+            print(f"   Analyzing Section {idx+1}/{len(sections)}: {section['header']}")
+            
+            result = analyze_single_section(
+                client, 
+                AZURE_OPENAI_DEPLOYMENT, 
+                section['header'], 
+                section['content'], 
+                full_diff
+            )
+            
+            # If the LLM found a gap (didn't say NO_IMPACT), add to our list
+            if result and "NO_IMPACT" not in result and "❌" not in result:
+                accumulated_rows.append(result)
+
+        # 6. Generate Final Markdown Report
+        if not accumulated_rows:
+            print("✅ No gaps found across all sections.")
+        else:
+            with open("Chunked_Section_Report.md", "w", encoding="utf-8") as f:
+                f.write("# ASPICE SWE.2 Sectional Impact Analysis\n\n")
+                f.write(f"**Release Comparison:** `{GITHUB_BASE_TAG}` → `{GITHUB_HEAD_TAG}`\n\n")
+                f.write("---\n\n")
+                f.write("## Assessment Criteria & Definitions\n\n")
+                f.write("| Option | Definition |\n")
+                f.write("| :--- | :--- |\n")
+                f.write("| 🔴 **NON-CONFORMANT** | Code behavior contradicts the existing Functional Specification. |\n")
+                f.write("| 🟠 **GAP IDENTIFIED** | Code implements new functionality that is missing from the Specification. |\n")
+                f.write("| 🔴 **NON-CONFORMANT / GAP** | A complex change that **both** violates the existing specification AND introduces new undocumented behavior. |\n")
+                f.write("| 🟡 **INCONSISTENCY** | Minor discrepancies in parameter definitions or descriptions. |\n")
+                f.write("\n---\n\n")
+                f.write("## Detailed Functional Analysis\n\n")
+                
+                # Table Header
+                f.write("| ID | Severity | Confluence Section | Impact Scope | SWE.2 Observation (Functional) | Corrective Action |\n")
+                f.write("| :--- | :--- | :--- | :--- | :--- | :--- |\n")
+                
+                # Append all collected rows
+                for row in accumulated_rows:
+                    # Remove the pipe characters if the LLM added them to wrap content (common in table cells)
+                    # We just want the clean line.
+                    clean_row = row.replace("\n", "<br/>") # Handle multi-line cells if any
+                    f.write(clean_row + "\n")
+            
+            print(f"✅ Final Report generated: Chunked_Section_Report.md")
+
+    except Exception as e:
+        print(f"❌ Execution Error: {e}")
+
+if __name__ == "__main__":
+    main()

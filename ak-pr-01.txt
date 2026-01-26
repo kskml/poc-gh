@@ -1,0 +1,232 @@
+import os
+import base64
+import json
+import requests
+from openai import OpenAI
+
+# --- Configuration ---
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+REPO_OWNER = "your-repo-owner"  # e.g., "octocat"
+REPO_NAME = "your-repo-name"    # e.g., "Hello-World"
+FILE_PATH = "docs/architecture.adoc" # The path to the ascii doc in the repo
+GAP_FILE_PATH = "./gap_description.adoc" # Local path to the gap doc
+BASE_BRANCH = "main"
+FEATURE_BRANCH = "feat/auto-refactor-ascii-doc"
+
+# Headers for GitHub API
+GITHUB_HEADERS = {
+    "Authorization": f"token {GITHUB_TOKEN}",
+    "Accept": "application/vnd.github.v3+json"
+}
+
+def read_local_file(file_path):
+    """
+    Reads the local gap file content.
+    """
+    if not os.path.exists(file_path):
+        print(f"Error: Local file {file_path} not found.")
+        exit(1)
+    with open(file_path, 'r', encoding='utf-8') as f:
+        return f.read()
+
+def get_github_file_details(owner, repo, path, branch):
+    """
+    Fetches the current content and SHA of the file from GitHub API.
+    Returns: (decoded_content, sha)
+    """
+    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+    params = {"ref": branch}
+    response = requests.get(url, headers=GITHUB_HEADERS, params=params)
+    
+    if response.status_code != 200:
+        print(f"Failed to fetch file: {response.json()}")
+        exit(1)
+        
+    data = response.json()
+    file_sha = data['sha']
+    # GitHub returns content base64 encoded
+    decoded_content = base64.b64decode(data['content']).decode('utf-8')
+    return decoded_content, file_sha
+
+def apply_changes_via_llm(original_content, gap_instructions):
+    """
+    Sends the original content and gap instructions to LLM
+    to generate the updated document.
+    """
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    
+    prompt = f"""
+    You are an expert software architect. 
+    I have an ASCII document and a set of proposed changes (gaps).
+    
+    Original Document:
+    ---
+    {original_content}
+    ---
+    
+    Proposed Changes (Gap):
+    ---
+    {gap_instructions}
+    ---
+    
+    Task:
+    Apply the proposed changes to the original document.
+    Return ONLY the updated ASCII document content. 
+    Do not include explanations, markdown code blocks (like ```), or intro text.
+    Just the raw text.
+    """
+    
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o", # Or gpt-3.5-turbo
+            messages=[
+                {"role": "system", "content": "You are a precise code editor."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.1
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"Error calling LLM: {e}")
+        exit(1)
+
+def create_github_branch(owner, repo, base_branch, new_branch):
+    """
+    Creates a new branch from the base branch SHA.
+    """
+    # 1. Get the SHA of the base branch
+    url = f"https://api.github.com/repos/{owner}/{repo}/git/refs/heads/{base_branch}"
+    response = requests.get(url, headers=GITHUB_HEADERS)
+    if response.status_code != 200:
+        print(f"Error getting base branch SHA: {response.json()}")
+        exit(1)
+    base_sha = response.json()['object']['sha']
+    
+    # 2. Create the new branch
+    url = f"https://api.github.com/repos/{owner}/{repo}/git/refs"
+    payload = {
+        "ref": f"refs/heads/{new_branch}",
+        "sha": base_sha
+    }
+    response = requests.post(url, headers=GITHUB_HEADERS, json=payload)
+    
+    # Branch might already exist, which is fine for this logic
+    if response.status_code in [200, 201]:
+        print(f"Branch '{new_branch}' created successfully or already exists.")
+    else:
+        print(f"Failed to create branch: {response.json()}")
+        exit(1)
+
+def update_file_in_github(owner, repo, path, new_content, sha, branch):
+    """
+    Updates the file in the repository on the specified branch.
+    """
+    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+    
+    # Encode content to base64
+    encoded_content = base64.b64encode(new_content.encode('utf-8')).decode('utf-8')
+    
+    payload = {
+        "message": "Refactor ASCII doc based on LLM proposed changes",
+        "content": encoded_content,
+        "sha": sha,
+        "branch": branch
+    }
+    
+    response = requests.put(url, headers=GITHUB_HEADERS, json=payload)
+    
+    if response.status_code in [200, 201]:
+        print(f"File updated successfully in branch '{branch}'.")
+        return True
+    else:
+        print(f"Failed to update file: {response.json()}")
+        return False
+
+def create_pull_request(owner, repo, title, body, head, base):
+    """
+    Creates a Pull Request using GitHub API.
+    """
+    url = f"https://api.github.com/repos/{owner}/{repo}/pulls"
+    payload = {
+        "title": title,
+        "body": body,
+        "head": head,
+        "base": base
+    }
+    
+    response = requests.post(url, headers=GITHUB_HEADERS, json=payload)
+    
+    if response.status_code == 201:
+        pr_data = response.json()
+        print(f"Pull Request created successfully: {pr_data['html_url']}")
+        return pr_data['html_url']
+    elif response.status_code == 422:
+        # Validation error, likely PR already exists
+        print("Pull Request might already exist or validation failed.")
+        print(response.json())
+    else:
+        print(f"Failed to create PR: {response.json()}")
+    return None
+
+def main():
+    print("--- Starting Automated PR Workflow ---")
+
+    # Step 1: Read local gap description
+    print("1. Reading local gap description...")
+    gap_content = read_local_file(GAP_FILE_PATH)
+
+    # Step 2: Fetch current file from GitHub
+    print(f"2. Fetching current file '{FILE_PATH}' from GitHub...")
+    current_content, current_sha = get_github_file_details(REPO_OWNER, REPO_NAME, FILE_PATH, BASE_BRANCH)
+
+    # Step 3: Use LLM to apply changes
+    print("3. Sending content to LLM for refactoring...")
+    updated_content = apply_changes_via_llm(current_content, gap_content)
+    
+    # Basic validation that LLM returned something
+    if not updated_content or len(updated_content) < len(current_content) / 2:
+        print("Warning: LLM returned suspiciously short content. Aborting.")
+        return
+
+    # Step 4: Create feature branch
+    print(f"4. Creating feature branch '{FEATURE_BRANCH}'...")
+    create_github_branch(REPO_OWNER, REPO_NAME, BASE_BRANCH, FEATURE_BRANCH)
+
+    # Step 5: Commit updated file to new branch
+    print("5. Committing updated file to repository...")
+    success = update_file_in_github(
+        REPO_OWNER, 
+        REPO_NAME, 
+        FILE_PATH, 
+        updated_content, 
+        current_sha, 
+        FEATURE_BRANCH
+    )
+    
+    if not success:
+        return
+
+    # Step 6: Raise Pull Request
+    print("6. Raising Pull Request...")
+    pr_title = "Automated Refactor: Update ASCII Documentation"
+    pr_body = "This PR applies changes identified by the gap analysis tool.\n\nGenerated via AI Agent."
+    pr_url = create_pull_request(
+        REPO_OWNER, 
+        REPO_NAME, 
+        pr_title, 
+        pr_body, 
+        FEATURE_BRANCH, 
+        BASE_BRANCH
+    )
+    
+    if pr_url:
+        print(f"\n--- Success! PR Created at: {pr_url} ---")
+    else:
+        print("\n--- Finished. PR creation step encountered issues. ---")
+
+if __name__ == "__main__":
+    if not GITHUB_TOKEN or not OPENAI_API_KEY:
+        print("Please set GITHUB_TOKEN and OPENAI_API_KEY environment variables.")
+    else:
+        main()

@@ -1,6 +1,5 @@
 import os
 import requests
-import re
 from dotenv import load_dotenv
 from openai import AzureOpenAI
 from markdownify import markdownify as md
@@ -39,42 +38,52 @@ def get_confluence_content(base_url, email, token, page_id):
         raise Exception(f"Confluence API Error: {response.status_code}")
     return md(response.json()['body']['storage']['value'])
 
-def chunk_confluence_by_headings(markdown_text):
+def chunk_confluence_hierarchical(markdown_text, split_level=1):
     """
-    Splits the markdown content into chunks based on Headers (#, ##, ###).
-    Returns a list of dictionaries: {'header': '## Title', 'content': '...'}
+    Splits markdown into chunks based on header levels.
+    split_level=1 means we ONLY break on Level 1 Headers (#).
+    Subheaders (##, ###) are kept inside the content of their parent chunk.
     """
-    print("Splitting Confluence content into sections...")
+    print(f"Splitting Confluence content (Splitting only on Level {split_level} Headers)...")
     
-    # Regex to find headers
-    # This pattern looks for lines starting with #
     lines = markdown_text.split('\n')
     chunks = []
-    current_header = "# Introduction" # Default for pre-amble
+    current_header = "# Introduction" # Default header for pre-amble content
     current_content = []
     
     for line in lines:
         if line.strip().startswith('#'):
-            # Save previous chunk if it exists and has content
-            if current_content:
-                chunks.append({
-                    'header': current_header,
-                    'content': "\n".join(current_content)
-                })
-            # Start new chunk
-            current_header = line.strip()
-            current_content = []
+            # Calculate exact header level (e.g., 1 for '#', 2 for '##')
+            stripped_line = line.strip()
+            header_marker = stripped_line.split()[0] 
+            header_level = len(header_marker)
+            
+            # Only split if we hit the target level
+            if header_level <= split_level:
+                # Save previous chunk
+                if current_content:
+                    chunks.append({
+                        'header': current_header,
+                        'content': "\n".join(current_content)
+                    })
+                
+                # Start new chunk
+                current_header = stripped_line
+                current_content = []
+            else:
+                # It is a subheader (##, ###), keep it as content
+                current_content.append(line)
         else:
             current_content.append(line)
             
-    # Don't forget the last chunk
+    # Save last chunk
     if current_content:
         chunks.append({
             'header': current_header,
             'content': "\n".join(current_content)
         })
         
-    print(f"✅ Created {len(chunks)} sections.")
+    print(f"✅ Created {len(chunks)} sections (Major Chunks).")
     return chunks
 
 def get_full_github_diff(owner, repo, base_tag, head_tag, token):
@@ -136,9 +145,6 @@ def analyze_single_section(client, deployment_name, section_header, section_cont
     {full_diff}
     """
     
-    # Short sleep to avoid rate limits slightly if many calls
-    # time.sleep(0.5) 
-    
     try:
         response = client.chat.completions.create(
             model=deployment_name,
@@ -174,8 +180,9 @@ def main():
         # 2. Fetch Docs
         doc_text = get_confluence_content(CONFLUENCE_BASE_URL, CONFLUENCE_EMAIL, CONFLUENCE_API_TOKEN, PAGE_ID)
         
-        # 3. Chunk Docs
-        sections = chunk_confluence_by_headings(doc_text)
+        # 3. Chunk Docs (SPLIT LEVEL 1 - Only #)
+        # This ensures we split only on Major Headers, minimizing invocations
+        sections = chunk_confluence_hierarchical(doc_text, split_level=1)
         
         # 4. Fetch GitHub Diff (Full Context)
         full_diff = get_full_github_diff(GITHUB_REPO_OWNER, GITHUB_REPO_NAME, GITHUB_BASE_TAG, GITHUB_HEAD_TAG, GITHUB_TOKEN)
@@ -184,8 +191,8 @@ def main():
             print("⚠️  No Diff found to analyze.")
             return
 
-        # 5. Iterative Analysis (Multiple Invocations)
-        print(f"🔄 Starting Analysis across {len(sections)} sections...")
+        # 5. Iterative Analysis
+        print(f"🔄 Starting Analysis across {len(sections)} major sections...")
         accumulated_rows = []
         
         for idx, section in enumerate(sections):
@@ -199,7 +206,7 @@ def main():
                 full_diff
             )
             
-            # If the LLM found a gap (didn't say NO_IMPACT), add to our list
+            # Filter results
             if result and "NO_IMPACT" not in result and "❌" not in result:
                 accumulated_rows.append(result)
 
@@ -207,7 +214,7 @@ def main():
         if not accumulated_rows:
             print("✅ No gaps found across all sections.")
         else:
-            with open("Chunked_Section_Report.md", "w", encoding="utf-8") as f:
+            with open("Level1_Chunked_Report.md", "w", encoding="utf-8") as f:
                 f.write("# ASPICE SWE.2 Sectional Impact Analysis\n\n")
                 f.write(f"**Release Comparison:** `{GITHUB_BASE_TAG}` → `{GITHUB_HEAD_TAG}`\n\n")
                 f.write("---\n\n")
@@ -221,18 +228,14 @@ def main():
                 f.write("\n---\n\n")
                 f.write("## Detailed Functional Analysis\n\n")
                 
-                # Table Header
                 f.write("| ID | Severity | Confluence Section | Impact Scope | SWE.2 Observation (Functional) | Corrective Action |\n")
                 f.write("| :--- | :--- | :--- | :--- | :--- | :--- |\n")
                 
-                # Append all collected rows
                 for row in accumulated_rows:
-                    # Remove the pipe characters if the LLM added them to wrap content (common in table cells)
-                    # We just want the clean line.
-                    clean_row = row.replace("\n", "<br/>") # Handle multi-line cells if any
+                    clean_row = row.replace("\n", "<br/>")
                     f.write(clean_row + "\n")
             
-            print(f"✅ Final Report generated: Chunked_Section_Report.md")
+            print(f"✅ Final Report generated: Level1_Chunked_Report.md")
 
     except Exception as e:
         print(f"❌ Execution Error: {e}")

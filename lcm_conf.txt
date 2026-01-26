@@ -48,7 +48,9 @@ def chunk_confluence_hierarchical(markdown_text, split_level=1):
     
     lines = markdown_text.split('\n')
     chunks = []
-    current_header = "# Introduction" # Default header for pre-amble content
+    
+    # Initialize as None so we can detect the first header dynamically
+    current_header = None
     current_content = []
     
     for line in lines:
@@ -60,26 +62,38 @@ def chunk_confluence_hierarchical(markdown_text, split_level=1):
             
             # Only split if we hit the target level
             if header_level <= split_level:
-                # Save previous chunk
-                if current_content:
-                    chunks.append({
-                        'header': current_header,
-                        'content': "\n".join(current_content)
-                    })
-                
-                # Start new chunk
-                current_header = stripped_line
-                current_content = []
+                # If this is the first header we encountered
+                if current_header is None:
+                    # Check if there was content before the first header (Preamble)
+                    if current_content:
+                        chunks.append({
+                            'header': 'Preamble', # Dynamic fallback for text before first header
+                            'content': "\n".join(current_content)
+                        })
+                    # Now set the header to the actual one found
+                    current_header = stripped_line
+                    current_content = []
+                else:
+                    # Normal Flow: Save previous chunk and start new one
+                    if current_content:
+                        chunks.append({
+                            'header': current_header,
+                            'content': "\n".join(current_content)
+                        })
+                    
+                    # Start new chunk with the found header
+                    current_header = stripped_line
+                    current_content = []
             else:
                 # It is a subheader (##, ###), keep it as content
                 current_content.append(line)
         else:
             current_content.append(line)
             
-    # Save last chunk
+    # Save the last chunk (if it exists)
     if current_content:
         chunks.append({
-            'header': current_header,
+            'header': current_header if current_header else 'Preamble',
             'content': "\n".join(current_content)
         })
         
@@ -106,6 +120,7 @@ def get_full_github_diff(owner, repo, base_tag, head_tag, token):
 def analyze_single_section(client, deployment_name, section_header, section_content, full_diff):
     """
     Invokes LLM for a SINGLE section of documentation against the FULL diff.
+    Returns a table row if a gap exists, or "NO_IMPACT" if aligned.
     """
     
     system_prompt = """
@@ -118,8 +133,8 @@ def analyze_single_section(client, deployment_name, section_header, section_cont
     3. Determine if the changes in the Diff affect this specific Section.
     
     **Output Rules:**
-    - If the Diff has NO IMPACT on this section (irrelevant), return exactly: `NO_IMPACT`.
-    - If the Diff HAS IMPACT, return ONLY a Markdown table row (do not include table headers).
+    - If the code diff is FULLY ALIGNED with the section and no documentation updates are needed, return exactly: `NO_IMPACT`.
+    - If there IS a gap, return ONLY a Markdown table row (do not include table headers).
     
     **Severity Definitions:**
     - 🔴 **NON-CONFORMANT:** Code contradicts doc.
@@ -181,7 +196,6 @@ def main():
         doc_text = get_confluence_content(CONFLUENCE_BASE_URL, CONFLUENCE_EMAIL, CONFLUENCE_API_TOKEN, PAGE_ID)
         
         # 3. Chunk Docs (SPLIT LEVEL 1 - Only #)
-        # This ensures we split only on Major Headers, minimizing invocations
         sections = chunk_confluence_hierarchical(doc_text, split_level=1)
         
         # 4. Fetch GitHub Diff (Full Context)
@@ -206,15 +220,18 @@ def main():
                 full_diff
             )
             
-            # Filter results
-            if result and "NO_IMPACT" not in result and "❌" not in result:
+            # 6. Filter Logic: Skip NO_IMPACT
+            if result and result != "NO_IMPACT":
                 accumulated_rows.append(result)
+                print(f"      → Impact Found.")
+            else:
+                print(f"      → No Impact. Skipping.")
 
-        # 6. Generate Final Markdown Report
+        # 7. Generate Final Markdown Report
         if not accumulated_rows:
-            print("✅ No gaps found across all sections.")
+            print("✅ No gaps found across all sections. Report not generated.")
         else:
-            with open("Level1_Chunked_Report.md", "w", encoding="utf-8") as f:
+            with open("Dynamic_Header_Report.md", "w", encoding="utf-8") as f:
                 f.write("# ASPICE SWE.2 Sectional Impact Analysis\n\n")
                 f.write(f"**Release Comparison:** `{GITHUB_BASE_TAG}` → `{GITHUB_HEAD_TAG}`\n\n")
                 f.write("---\n\n")
@@ -235,7 +252,7 @@ def main():
                     clean_row = row.replace("\n", "<br/>")
                     f.write(clean_row + "\n")
             
-            print(f"✅ Final Report generated: Level1_Chunked_Report.md")
+            print(f"✅ Report generated: Dynamic_Header_Report.md")
 
     except Exception as e:
         print(f"❌ Execution Error: {e}")

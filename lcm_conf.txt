@@ -34,10 +34,7 @@ AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION")
 # ----------------------
 
 def clean_confluence_html(html_content):
-    """
-    Replaces complex macros with clean text.
-    Handles Case Insensitivity and Fallbacks better.
-    """
+    """Replaces complex macros with clean text."""
     print("   Cleaning Draw.io and PlantUML macros...")
     
     # 1. Draw.io (Case Insensitive)
@@ -55,7 +52,6 @@ def clean_confluence_html(html_content):
     cleaned_html = pattern_drawio.sub(replace_drawio, html_content)
 
     # 2. PlantUML (Case Insensitive)
-    # Tries to get 'title', if not found, tries other params or falls back
     pattern_plantuml_title = re.compile(
         r'<ac:structured-macro ac:name="plantUML"[^>]*>.*?' + 
         r'<ac:parameter ac:name="title">(.*?)</ac:parameter>' + 
@@ -69,7 +65,7 @@ def clean_confluence_html(html_content):
 
     cleaned_html = pattern_plantuml_title.sub(replace_plantuml_title, cleaned_html)
 
-    # 3. Fallback for PlantUML (Removes garbage, keeps generic placeholder)
+    # 3. Fallback for PlantUML
     pattern_plantuml_generic = re.compile(
         r'<ac:structured-macro ac:name="plantUML"[^>]*>.*?</ac:structured-macro>', 
         re.DOTALL | re.IGNORECASE
@@ -83,39 +79,33 @@ def clean_confluence_html(html_content):
     return cleaned_html
 
 def get_confluence_content(base_url, email, token, page_id):
-    """Fetches documentation, cleans HTML artifacts, and converts to Markdown."""
     auth = (email, token)
     url = f"{base_url}/rest/api/content/{page_id}?expand=body.storage"
     print(f"Fetching Confluence page ID: {page_id}...")
     response = requests.get(url, auth=auth)
     if response.status_code != 200:
         raise Exception(f"Confluence API Error: {response.status_code}")
-    
     raw_html = response.json()['body']['storage']['value']
     clean_html = clean_confluence_html(raw_html)
     return md(clean_html)
 
 def find_local_diagram(diagram_name, local_path):
-    """Searches local path for .puml file."""
     if not local_path or not os.path.exists(local_path):
         return None
-        
-    # Normalize name: "Order Flow" -> "order_flow"
     target_name_normalized = diagram_name.replace(" ", "_").replace("-", "_").lower()
+    target_stem = target_name_normalized.rsplit(".", 1)[0]
     
     extensions = ['.puml', '.pu', '.plantuml']
     path_obj = Path(local_path)
     
     for ext in extensions:
-        # Try exact match
         potential_file = path_obj / f"{target_name_normalized}{ext}"
         if potential_file.exists():
             return potential_file.read_text(encoding='utf-8')
         
-        # Try stem match (fuzzy)
         for file in path_obj.glob(f"*{ext}"):
             file_stem = file.stem.lower().replace(" ", "_").replace("-", "_")
-            if file_stem == target_name_normalized:
+            if file_stem == target_stem:
                 print(f"      🗂️  Found matching diagram: {file.name}")
                 return file.read_text(encoding='utf-8')
     return None
@@ -164,7 +154,6 @@ def chunk_confluence_hierarchical(markdown_text):
             'header': current_header if current_header else 'Preamble',
             'content': "\n".join(current_content)
         })
-        
     print(f"✅ Created {len(chunks)} sections.")
     return chunks
 
@@ -183,27 +172,24 @@ def get_full_github_diff(owner, repo, base_tag, head_tag, token):
     return diff_content
 
 def analyze_single_section(client, deployment_name, section_header, section_content, full_diff, local_diag_path):
-    """Invokes LLM with Text AND Diagram context."""
+    """Invokes LLM with Text AND Diagram context. FIXED REGEX."""
     
-    # 1. Robust Diagram Detection
-    # Matches: **[PlantUML Diagram: Name]**, **[PlantUML Diagram]**, [PlantUML Diagram], etc.
-    # \*? allows optional bolding. (:\s*(.*?))? makes name optional.
-    # re.IGNORECASE handles [plantuml] or [PLANTUML].
+    # FIXED REGEX
+    # Matches: **[PlantUML Diagram: Name]** or [Draw.io Diagram]
+    # Structure: Optional Asterisks + Bracket + Type + Diagram + Optional (: Name) + Bracket + Optional Asterisks
     pattern = re.compile(
-        r'\[?\*?\*?\[(PlantUML|Draw\.io) Diagram(?\s*:(.*?))?\]\*?\*?\]?', 
+        r'\*?\*\[(PlantUML|Draw\.io) Diagram(?:\s*:\s*(.*?))?\]\*?\*', 
         re.IGNORECASE
     )
     
     matches = pattern.findall(section_content)
     
-    # Debug: If 0 matches, print snippet to see why
+    # Debug logic
     if len(matches) == 0:
-        # Check if the word "Diagram" exists at all
         if "Diagram" in section_content:
-            print(f"      ⚠️  Word 'Diagram' found but regex didn't match. Checking structure...")
-            # Print a small snippet around the word "Diagram"
+            print(f"      ⚠️  Word 'Diagram' found but regex didn't match.")
             idx = section_content.find("Diagram")
-            snippet = section_content[max(0, idx-20):min(len(section_content), idx+20)]
+            snippet = section_content[max(0, idx-30):min(len(section_content), idx+30)]
             print(f"      Snippet: ...{snippet}...")
         else:
             print(f"      ℹ️  No diagrams detected in this section.")
@@ -212,17 +198,15 @@ def analyze_single_section(client, deployment_name, section_header, section_cont
     
     for match in matches:
         diag_type, diag_name = match
-        # Ensure diag_name is not None (happens if no colon/name in placeholder)
         if not diag_name:
             diag_name = "Unknown"
         
-        # Only load PlantUML locally
         if diag_type.lower() == "plantuml":
             diag_content = find_local_diagram(diag_name, local_diag_path)
             if diag_content:
                 diagram_contexts.append(f"\n--- DIAGRAM CONTEXT: {diag_name} ---\n{diag_content}\n")
     
-    prompt_diagrams = "\n".join(diagram_contexts) if diagram_contexts else "No local diagrams found."
+    prompt_diagrams = "\n".join(diagram_contexts) if diagram_contexts else "No local diagrams found for this section."
     
     system_prompt = """
     You are an ASPICE SWE.2 Auditor analyzing a Documentation Section against Code Changes.
@@ -321,7 +305,7 @@ def main():
         if not accumulated_rows:
             print("✅ No gaps found.")
         else:
-            with open("Robust_Diagram_Report.md", "w", encoding="utf-8") as f:
+            with open("Fixed_Regex_Report.md", "w", encoding="utf-8") as f:
                 f.write("# ASPICE SWE.2 Analysis\n\n")
                 f.write(f"**Release:** `{GITHUB_BASE_TAG}` → `{GITHUB_HEAD_TAG}`\n\n")
                 f.write("## Assessment Criteria\n\n")

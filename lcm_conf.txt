@@ -4,6 +4,7 @@ import re
 from dotenv import load_dotenv
 from openai import AzureOpenAI
 from markdownify import markdownify as md
+from pathlib import Path
 
 # Load environment variables
 load_dotenv()
@@ -22,6 +23,9 @@ GITHUB_REPO_NAME = os.getenv("GITHUB_REPO_NAME")
 GITHUB_BASE_TAG = os.getenv("GITHUB_BASE_TAG")   # e.g., "v1.0.0"
 GITHUB_HEAD_TAG = os.getenv("GITHUB_HEAD_TAG")   # e.g., "v1.1.0"
 
+# Local Diagrams
+LOCAL_DIAGRAMS_PATH = os.getenv("LOCAL_DIAGRAMS_PATH") # e.g., "./diagrams"
+
 # Azure
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
@@ -30,18 +34,14 @@ AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION")
 # ----------------------
 
 def clean_confluence_html(html_content):
-    """
-    Replaces complex Confluence macros (Draw.io, PlantUML) with clean text.
-    """
+    """Replaces complex macros with clean markdown placeholders."""
     print("   Cleaning Draw.io and PlantUML macros from HTML...")
     
-    # 1. Handle Draw.io (Extract Name)
-    # Regex matches the macro structure and finds the <ac:parameter> for "diagramName"
+    # Regex patterns
     pattern_drawio = re.compile(
         r'<ac:structured-macro ac:name="drawio"[^>]*>.*?' + 
         r'<ac:parameter ac:name="diagramName">(.*?)</ac:parameter>' + 
-        r'.*?</ac:structured-macro>', 
-        re.DOTALL
+        r'.*?</ac:structured-macro>', re.DOTALL
     )
 
     def replace_drawio(match):
@@ -50,14 +50,10 @@ def clean_confluence_html(html_content):
 
     cleaned_html = pattern_drawio.sub(replace_drawio, html_content)
 
-    # 2. Handle PlantUML (Extract Title if present)
-    # PlantUML macros often have a "title" parameter.
-    # We check for that first to make the placeholder specific.
     pattern_plantuml_title = re.compile(
         r'<ac:structured-macro ac:name="plantUML"[^>]*>.*?' + 
         r'<ac:parameter ac:name="title">(.*?)</ac:parameter>' + 
-        r'.*?</ac:structured-macro>', 
-        re.DOTALL
+        r'.*?</ac:structured-macro>', re.DOTALL
     )
 
     def replace_plantuml_title(match):
@@ -66,16 +62,12 @@ def clean_confluence_html(html_content):
 
     cleaned_html = pattern_plantuml_title.sub(replace_plantuml_title, cleaned_html)
 
-    # 3. Fallback for PlantUML (No title found, or different structure)
-    # This matches any remaining PlantUML macro and replaces it with a generic marker
     pattern_plantuml_generic = re.compile(
-        r'<ac:structured-macro ac:name="plantUML"[^>]*>.*?</ac:structured-macro>', 
-        re.DOTALL
+        r'<ac:structured-macro ac:name="plantUML"[^>]*>.*?</ac:structured-macro>', re.DOTALL
     )
     cleaned_html = pattern_plantuml_generic.sub("\n\n**[PlantUML Diagram]**\n\n", cleaned_html)
 
-    # 4. General Cleanup (Remove any other structured macros preventing noise)
-    # This is a catch-all to ensure no garbage like 'true{...}falsetext' appears
+    # General cleanup
     fallback_pattern = re.compile(r'<ac:structured-macro[^>]*>.*?</ac:structured-macro>', re.DOTALL)
     cleaned_html = fallback_pattern.sub("\n\n**[Confluence Macro]**\n\n", cleaned_html)
 
@@ -91,42 +83,59 @@ def get_confluence_content(base_url, email, token, page_id):
         raise Exception(f"Confluence API Error: {response.status_code}")
     
     raw_html = response.json()['body']['storage']['value']
-    
-    # Clean the HTML before Markdown conversion
     clean_html = clean_confluence_html(raw_html)
-    
-    # Convert to Markdown
     return md(clean_html)
 
-def find_top_header_level(markdown_text):
+def find_local_diagram(diagram_name, local_path):
     """
-    Scans the text to find the highest level header present (e.g., 1 for #, 2 for ##).
+    Searches local_path for a .puml/.pu file matching diagram_name.
+    Performs fuzzy matching (spaces <-> underscores, case insensitive).
     """
-    lines = markdown_text.split('\n')
-    min_level = 100 # Start high
+    if not local_path or not os.path.exists(local_path):
+        return None
+        
+    # Normalize target name: "Order Flow" -> "order_flow"
+    target_name_normalized = diagram_name.replace(" ", "_").replace("-", "_").lower()
+    target_stem = target_name_normalized.rsplit(".", 1)[0] # remove extension if passed
     
+    # Common extensions
+    extensions = ['.puml', '.pu', '.plantuml']
+    
+    # Iterate files
+    path_obj = Path(local_path)
+    for ext in extensions:
+        # Try exact match first
+        potential_file = path_obj / f"{target_name_normalized}{ext}"
+        if potential_file.exists():
+            return potential_file.read_text(encoding='utf-8')
+        
+        # Try stem match (in case file is "Order_Flow.puml" and name is "Order Flow")
+        for file in path_obj.glob(f"*{ext}"):
+            file_stem = file.stem.lower().replace(" ", "_").replace("-", "_")
+            if file_stem == target_stem:
+                print(f"      🗂️  Found matching diagram: {file.name}")
+                return file.read_text(encoding='utf-8')
+                
+    return None
+
+def find_top_header_level(markdown_text):
+    lines = markdown_text.split('\n')
+    min_level = 100 
     for line in lines:
         if line.strip().startswith('#'):
             stripped = line.strip().split()[0]
             level = len(stripped)
             if level < min_level:
                 min_level = level
-                
-    # If no headers found, default to 1
     return 1 if min_level == 100 else min_level
 
 def chunk_confluence_hierarchical(markdown_text):
-    """
-    Splits markdown into chunks based on detected top header level.
-    """
     print("Detecting top header level...")
     split_level = find_top_header_level(markdown_text)
-    print(f"Splitting Confluence content (Auto-detected Level {split_level} as main section header)...")
+    print(f"Splitting Confluence content (Auto-detected Level {split_level})...")
     
     lines = markdown_text.split('\n')
     chunks = []
-    
-    # Initialize as None
     current_header = None
     current_content = []
     
@@ -136,25 +145,19 @@ def chunk_confluence_hierarchical(markdown_text):
             header_marker = stripped_line.split()[0] 
             header_level = len(header_marker)
             
-            # Only split if we hit the target level
             if header_level <= split_level:
-                # Save previous chunk
                 if current_content:
                     chunks.append({
                         'header': current_header if current_header else 'Preamble',
                         'content': "\n".join(current_content)
                     })
-                
-                # Start new chunk
                 current_header = stripped_line
                 current_content = []
             else:
-                # It is a subheader, keep it as content
                 current_content.append(line)
         else:
             current_content.append(line)
             
-    # Save last chunk
     if current_content:
         chunks.append({
             'header': current_header if current_header else 'Preamble',
@@ -165,7 +168,6 @@ def chunk_confluence_hierarchical(markdown_text):
     return chunks
 
 def get_full_github_diff(owner, repo, base_tag, head_tag, token):
-    """Fetches the complete diff."""
     headers = {
         "Authorization": f"token {token}",
         "Accept": "application/vnd.github.v3+json"
@@ -181,45 +183,73 @@ def get_full_github_diff(owner, repo, base_tag, head_tag, token):
     print(f"✅ Diff retrieved (Length: {len(diff_content)} chars).")
     return diff_content
 
-def analyze_single_section(client, deployment_name, section_header, section_content, full_diff):
+def analyze_single_section(client, deployment_name, section_header, section_content, full_diff, local_diag_path):
     """
-    Invokes LLM for a SINGLE section of documentation against the FULL diff.
-    Uses strict variable injection to ensure correct reporting.
+    Invokes LLM with Text AND Diagram context.
     """
+    
+    # 1. Detect Diagram Placeholders in content
+    # We look for **[PlantUML Diagram: Name]** or **[Draw.io Diagram: Name]**
+    diagram_contexts = []
+    # Regex to find diagram names
+    pattern = re.compile(r'\*\*\[(PlantUML|Draw.io) Diagram: (.*?)\]\*\*')
+    
+    matches = pattern.findall(section_content)
+    
+    for match in matches:
+        diag_type, diag_name = match
+        # Only load PlantUML locally (Draw.io is often binary/XML complex)
+        if diag_type == "PlantUML":
+            diag_content = find_local_diagram(diag_name, local_diag_path)
+            if diag_content:
+                diagram_contexts.append(f"\n--- DIAGRAM CONTEXT: {diag_name} ---\n{diag_content}\n")
+    
+    # 2. Build Prompt
+    prompt_diagrams = "\n".join(diagram_contexts) if diagram_contexts else "No local diagrams found for this section."
     
     system_prompt = """
     You are an ASPICE SWE.2 Auditor.
     You are analyzing ONE specific section of documentation against a Software Release Code Diff.
     
+    **Context Provided:**
+    1. Confluence Text Content.
+    2. (Optional) Local PlantUML Diagrams. These diagrams represent System Logic, State Flows, or Architectural Contracts. Treat the text INSIDE these diagrams as equivalent to written specifications.
+    
     **Instructions:**
-    1. Read the "Confluence Section".
-    2. Read the "GitHub Code Diff".
-    3. Determine if the changes in the Diff affect this specific Section.
+    1. Read the "Confluence Text Content".
+    2. Read "Local Diagrams" (if present).
+    3. Read the "GitHub Code Diff".
+    4. Determine if the changes in the Diff affect this Section OR the Logic defined in the Diagrams.
     
     **Output Rules:**
-    - If the code diff is FULLY ALIGNED with the section and no documentation updates are needed, return exactly: `NO_IMPACT`.
-    - If there IS a gap, return ONLY a Markdown table row (do not include table headers).
+    - If aligned and no updates needed, return exactly: `NO_IMPACT`.
+    - If there IS a gap, return ONLY a Markdown table row.
     
     **Severity Definitions:**
-    - 🔴 **NON-CONFORMANT:** Code contradicts doc.
-    - 🟠 **GAP IDENTIFIED:** Code adds new feature.
-    - 🔴 **NON-CONFORMANT / GAP:** Complex change.
+    - 🔴 **NON-CONFORMANT:** Code contradicts doc or diagram logic.
+    - 🟠 **GAP IDENTIFIED:** Code adds new feature missing from docs/diagrams.
+    - 🔴 **NON-CONFORMANT / GAP:** Complex change violating spec.
     - 🟡 **INCONSISTENCY:** Minor mismatch.
     
-    **CRITICAL OUTPUT REQUIREMENT:**
-    - The "Confluence Section" column in your output table MUST contain the value enclosed in <SECTION_TITLE> tags exactly.
+    **CRITICAL:**
+    - The "Confluence Section" column MUST use the value from <SECTION_TITLE> tags.
+    - If a gap is found in the diagram logic, mention it in the Observation (e.g., "Diagram shows state X, but code implements state Y").
     
     **Row Format:**
     | ID | Severity | Confluence Section | Impact Scope | SWE.2 Observation (Functional) | Corrective Action |
     | 1 | 🔴 **NON-CONFORMANT** | <SECTION_TITLE> | UI/Logic/Data/API | [Observation] | [Action] |
     """
 
-    # Inject the variable explicitly to prevent LLM confusion with preamble content
     user_prompt = f"""
     <SECTION_TITLE>{section_header}</SECTION_TITLE>
     
-    CONFLUENCE CONTENT TO ANALYZE:
+    CONFLUENCE TEXT CONTENT:
     {section_content}
+
+    --- 
+    
+    LOCAL DIAGRAMS (PlantUML Logic):
+    {prompt_diagrams}
 
     ---
     
@@ -262,10 +292,10 @@ def main():
         # 2. Fetch Docs
         doc_text = get_confluence_content(CONFLUENCE_BASE_URL, CONFLUENCE_EMAIL, CONFLUENCE_API_TOKEN, PAGE_ID)
         
-        # 3. Chunk Docs (Auto-Detects Header Level)
+        # 3. Chunk Docs
         sections = chunk_confluence_hierarchical(doc_text)
         
-        # 4. Fetch GitHub Diff (Full Context)
+        # 4. Fetch GitHub Diff
         full_diff = get_full_github_diff(GITHUB_REPO_OWNER, GITHUB_REPO_NAME, GITHUB_BASE_TAG, GITHUB_HEAD_TAG, GITHUB_TOKEN)
         
         if not full_diff:
@@ -284,10 +314,11 @@ def main():
                 AZURE_OPENAI_DEPLOYMENT, 
                 section['header'], 
                 section['content'], 
-                full_diff
+                full_diff,
+                LOCAL_DIAGRAMS_PATH
             )
             
-            # 6. Filter Logic: Skip NO_IMPACT
+            # 6. Filter Logic
             if result and result != "NO_IMPACT":
                 accumulated_rows.append(result)
                 print(f"      → Impact Found.")
@@ -298,15 +329,15 @@ def main():
         if not accumulated_rows:
             print("✅ No gaps found across all sections. Report not generated.")
         else:
-            with open("Clean_Plantuml_Report.md", "w", encoding="utf-8") as f:
-                f.write("# ASPICE SWE.2 Sectional Impact Analysis\n\n")
+            with open("Diagram_Aware_Report.md", "w", encoding="utf-8") as f:
+                f.write("# ASPICE SWE.2 Sectional Impact Analysis (Including Diagrams)\n\n")
                 f.write(f"**Release Comparison:** `{GITHUB_BASE_TAG}` → `{GITHUB_HEAD_TAG}`\n\n")
                 f.write("---\n\n")
                 f.write("## Assessment Criteria & Definitions\n\n")
                 f.write("| Option | Definition |\n")
                 f.write("| :--- | :--- |\n")
-                f.write("| 🔴 **NON-CONFORMANT** | Code behavior contradicts the existing Functional Specification. |\n")
-                f.write("| 🟠 **GAP IDENTIFIED** | Code implements new functionality that is missing from the Specification. |\n")
+                f.write("| 🔴 **NON-CONFORMANT** | Code behavior contradicts the existing Functional Specification or Diagram Logic. |\n")
+                f.write("| 🟠 **GAP IDENTIFIED** | Code implements new functionality that is missing from the Specification or Diagram. |\n")
                 f.write("| 🔴 **NON-CONFORMANT / GAP** | A complex change that **both** violates the existing specification AND introduces new undocumented behavior. |\n")
                 f.write("| 🟡 **INCONSISTENCY** | Minor discrepancies in parameter definitions or descriptions. |\n")
                 f.write("\n---\n\n")
@@ -319,7 +350,7 @@ def main():
                     clean_row = row.replace("\n", "<br/>")
                     f.write(clean_row + "\n")
             
-            print(f"✅ Report generated: Clean_Plantuml_Report.md")
+            print(f"✅ Report generated: Diagram_Aware_Report.md")
 
     except Exception as e:
         print(f"❌ Execution Error: {e}")

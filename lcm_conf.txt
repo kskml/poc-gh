@@ -35,12 +35,12 @@ AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION")
 
 def clean_confluence_html(html_content):
     """
-    Replaces complex macros with clean text.
-    Handles Namespaced Macros (e.g., com.mycompany.plugins.plantUML)
+    Uses Custom ASCII Delimiters to prevent Markdown conversion issues.
+    Replaces macros with <<< DIAGRAM_START: Name >>> format.
     """
-    print("   Cleaning Draw.io and PlantUML macros...")
+    print("   Cleaning macros with Custom Delimiters...")
     
-    # 1. Draw.io (Handle namespaces like my.plugins.draw.io)
+    # 1. Draw.io
     pattern_drawio = re.compile(
         r'<ac:structured-macro ac:name=".*?drawio.*?"[^>]*>.*?' + 
         r'<ac:parameter ac:name="diagramName">(.*?)</ac:parameter>' + 
@@ -50,12 +50,11 @@ def clean_confluence_html(html_content):
 
     def replace_drawio(match):
         name = match.group(1).strip()
-        return f"\n\n**[Draw.io Diagram: {name}]**\n\n"
+        return f"\n\n<<< DRAWIO DIAGRAM: {name} >>>\n\n"
 
     cleaned_html = pattern_drawio.sub(replace_drawio, html_content)
 
-    # 2. PlantUML (Handle namespaces like custom.plantuml)
-    # Also, try multiple parameters for the name
+    # 2. PlantUML (Handle namespaces and multiple parameters)
     params_to_try = ['diagramName', 'title', 'filename', 'name']
     
     for param in params_to_try:
@@ -66,28 +65,25 @@ def clean_confluence_html(html_content):
             re.DOTALL | re.IGNORECASE
         )
         
-        # Use a lambda to pass the capture group to replace function
-        cleaned_html = pattern_plantuml.sub(lambda m: f"\n\n**[PlantUML Diagram: {m.group(1).strip()}]**\n\n", cleaned_html)
+        # We only run sub() if we find a match to avoid overwriting
+        if pattern_plantuml.search(cleaned_html):
+            cleaned_html = pattern_plantuml.sub(lambda m: f"\n\n<<< PLANTUML DIAGRAM: {m.group(1).strip()} >>>\n\n", cleaned_html)
+            # Stop looking for other params if we found one
+            break 
 
-    # 3. Fallback for PlantUML (If no specific parameter found, remove macro entirely with generic tag)
-    # This prevents garbage like 'true{...}falsetext'
-    pattern_plantuml_fallback = re.compile(
+    # 3. Fallback for PlantUML (No name found)
+    pattern_plantuml_generic = re.compile(
         r'<ac:structured-macro ac:name=".*?plantuml.*?"[^>]*>.*?</ac:structured-macro>', 
         re.DOTALL | re.IGNORECASE
     )
     
-    # Debug: If we have a fallback match, print a snippet
-    if pattern_plantuml_fallback.search(cleaned_html):
-        # Print snippet for debugging
-        snippet = pattern_plantuml_fallback.search(cleaned_html).group(0)[:200]
-        print(f"      ⚠️  Using Fallback for PlantUML (No standard parameter found)")
-        print(f"      HTML Snippet: {snippet}...")
+    if pattern_plantuml_generic.search(cleaned_html):
+        print("      ⚠️  Using Fallback for unnamed PlantUML diagram.")
+        cleaned_html = pattern_plantuml_generic.sub("\n\n<<< PLANTUML DIAGRAM >>>\n\n", cleaned_html)
 
-    cleaned_html = pattern_plantuml_fallback.sub("\n\n**[PlantUML Diagram]**\n\n", cleaned_html)
-
-    # 4. General Cleanup (Any other macro causing noise)
+    # 4. General Cleanup
     fallback_pattern = re.compile(r'<ac:structured-macro[^>]*>.*?</ac:structured-macro>', re.DOTALL)
-    cleaned_html = fallback_pattern.sub("\n\n**[Confluence Macro]**\n\n", cleaned_html)
+    cleaned_html = fallback_pattern.sub("\n\n<<< CONFLUENCE MACRO >>>\n\n", cleaned_html)
 
     return cleaned_html
 
@@ -106,19 +102,20 @@ def find_local_diagram(diagram_name, local_path):
     if not local_path or not os.path.exists(local_path):
         return None
     target_name_normalized = diagram_name.replace(" ", "_").replace("-", "_").lower()
-    target_stem = target_name_normalized.rsplit(".", 1)[0]
     
     extensions = ['.puml', '.pu', '.plantuml']
     path_obj = Path(local_path)
     
     for ext in extensions:
+        # Try exact match
         potential_file = path_obj / f"{target_name_normalized}{ext}"
         if potential_file.exists():
             return potential_file.read_text(encoding='utf-8')
         
+        # Try stem match
         for file in path_obj.glob(f"*{ext}"):
             file_stem = file.stem.lower().replace(" ", "_").replace("-", "_")
-            if file_stem == target_stem:
+            if file_stem == target_name_normalized:
                 print(f"      🗂️  Found matching diagram: {file.name}")
                 return file.read_text(encoding='utf-8')
     return None
@@ -187,42 +184,36 @@ def get_full_github_diff(owner, repo, base_tag, head_tag, token):
 def analyze_single_section(client, deployment_name, section_header, section_content, full_diff, local_diag_path):
     """
     Invokes LLM with Text AND Diagram context.
-    Simplified Regex for Markdown matching.
+    Uses Custom Delimiter Regex.
     """
     
-    # SIMPLIFIED ROBUST REGEX
-    # Matches **[PlantUML Diagram: Name]** or [Draw.io Diagram: Anything]
-    # \s* allows spaces/newlines. (.*) captures everything until the bracket.
-    pattern = re.compile(
-        r'\*?\*?\[(PlantUML|Draw\.io)\s*Diagram\s*:\s*(.*?)\]\*?\*', 
-        re.IGNORECASE
-    )
+    # CUSTOM DELIMITER REGEX
+    # Matches <<< TYPE DIAGRAM: Name >>> 
+    # (.*?) is a non-greedy match for the name.
+    # Matches PLANTUML or DRAWIO or DRAW (fallback)
+    pattern = re.compile(r'<<<\s*(PLANTUML|DRAWIO|DRAW)\s*DIAGRAM(.*?)\s*>>>', re.IGNORECASE)
     
     matches = pattern.findall(section_content)
     
+    # AGGRESSIVE DEBUG
     if len(matches) == 0:
-        if "Diagram" in section_content:
-            print(f"      ⚠️  Word 'Diagram' found but regex didn't match.")
-            idx = section_content.find("Diagram")
-            snippet = section_content[max(0, idx-50):min(len(section_content), idx+50)]
-            # Clean snippet for console
-            clean_snippet = snippet.replace("\n", "\\n")
-            print(f"      Snippet: ...{clean_snippet}...")
-            print(f"      🛠️  Checking if Markdown formatting is causing issues...")
-            # Try to find any line with "Diagram" and print it raw
-            for line in section_content.split('\n'):
-                if "Diagram" in line:
-                    print(f"      Raw Line: {line}")
+        if "DIAGRAM" in section_content:
+            print(f"      ⚠️  Word 'DIAGRAM' found but regex didn't match.")
+            # Print first 500 chars to see formatting
+            snippet = section_content[:500]
+            print(f"      Section Start Snippet: {snippet}...")
+        else:
+            print(f"      ℹ️  No diagrams detected.")
 
     diagram_contexts = []
     
     for match in matches:
-        diag_name = match
+        diag_type, diag_name = match
+        diag_name = diag_name.strip(" :") # Clean up delimiters
         if not diag_name:
             diag_name = "Unknown"
         
-        # Check for PlantUML to load local file
-        if "plantuml" in section_content.lower():
+        if "plantuml" in diag_type.lower():
             diag_content = find_local_diagram(diag_name, local_diag_path)
             if diag_content:
                 diagram_contexts.append(f"\n--- DIAGRAM CONTEXT: {diag_name} ---\n{diag_content}\n")
@@ -254,7 +245,7 @@ def analyze_single_section(client, deployment_name, section_header, section_cont
 
     --- 
     
-    LOCAL DIAGRAMS (PlantUML Logic):
+    LOCAL DIAGRAMS:
     {prompt_diagrams}
 
     ---
@@ -326,7 +317,7 @@ def main():
         if not accumulated_rows:
             print("✅ No gaps found.")
         else:
-            with open("Namespace_Aware_Report.md", "w", encoding="utf-8") as f:
+            with open("Custom_Delimiter_Report.md", "w", encoding="utf-8") as f:
                 f.write("# ASPICE SWE.2 Analysis\n\n")
                 f.write(f"**Release:** `{GITHUB_BASE_TAG}` → `{GITHUB_HEAD_TAG}`\n\n")
                 f.write("## Analysis\n\n")

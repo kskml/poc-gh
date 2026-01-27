@@ -31,32 +31,53 @@ AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION")
 
 def clean_confluence_html(html_content):
     """
-    Replaces complex Confluence Draw.io macros with clean text.
-    Extracts the diagram name if possible, otherwise uses a generic placeholder.
+    Replaces complex Confluence macros (Draw.io, PlantUML) with clean text.
     """
-    print("   Cleaning Draw.io macros from HTML...")
+    print("   Cleaning Draw.io and PlantUML macros from HTML...")
     
-    # Regex to find Draw.io macros and extract the diagram name parameter
-    # Structure typically: <ac:structured-macro ac:name="drawio">...<ac:parameter ac:name="diagramName">Name</ac:parameter>...</ac:structured-macro>
-    # We use non-greedy (.*?) to capture content efficiently
-    pattern = re.compile(
+    # 1. Handle Draw.io (Extract Name)
+    # Regex matches the macro structure and finds the <ac:parameter> for "diagramName"
+    pattern_drawio = re.compile(
         r'<ac:structured-macro ac:name="drawio"[^>]*>.*?' + 
         r'<ac:parameter ac:name="diagramName">(.*?)</ac:parameter>' + 
         r'.*?</ac:structured-macro>', 
         re.DOTALL
     )
 
-    def replace_with_name(match):
+    def replace_drawio(match):
         name = match.group(1).strip()
         return f"\n\n**[Draw.io Diagram: {name}]**\n\n"
 
-    # First pass: Try to extract the specific name
-    cleaned_html = pattern.sub(replace_with_name, html_content)
+    cleaned_html = pattern_drawio.sub(replace_drawio, html_content)
 
-    # Second pass (Fallback): Remove any remaining drawio macros that didn't match the name extraction
-    # This prevents the "true{...}falsetext" garbage artifacts from appearing in markdown
-    fallback_pattern = re.compile(r'<ac:structured-macro ac:name="drawio"[^>]*>.*?</ac:structured-macro>', re.DOTALL)
-    cleaned_html = fallback_pattern.sub("\n\n**[Draw.io Image]**\n\n", cleaned_html)
+    # 2. Handle PlantUML (Extract Title if present)
+    # PlantUML macros often have a "title" parameter.
+    # We check for that first to make the placeholder specific.
+    pattern_plantuml_title = re.compile(
+        r'<ac:structured-macro ac:name="plantUML"[^>]*>.*?' + 
+        r'<ac:parameter ac:name="title">(.*?)</ac:parameter>' + 
+        r'.*?</ac:structured-macro>', 
+        re.DOTALL
+    )
+
+    def replace_plantuml_title(match):
+        title = match.group(1).strip()
+        return f"\n\n**[PlantUML Diagram: {title}]**\n\n"
+
+    cleaned_html = pattern_plantuml_title.sub(replace_plantuml_title, cleaned_html)
+
+    # 3. Fallback for PlantUML (No title found, or different structure)
+    # This matches any remaining PlantUML macro and replaces it with a generic marker
+    pattern_plantuml_generic = re.compile(
+        r'<ac:structured-macro ac:name="plantUML"[^>]*>.*?</ac:structured-macro>', 
+        re.DOTALL
+    )
+    cleaned_html = pattern_plantuml_generic.sub("\n\n**[PlantUML Diagram]**\n\n", cleaned_html)
+
+    # 4. General Cleanup (Remove any other structured macros preventing noise)
+    # This is a catch-all to ensure no garbage like 'true{...}falsetext' appears
+    fallback_pattern = re.compile(r'<ac:structured-macro[^>]*>.*?</ac:structured-macro>', re.DOTALL)
+    cleaned_html = fallback_pattern.sub("\n\n**[Confluence Macro]**\n\n", cleaned_html)
 
     return cleaned_html
 
@@ -277,7 +298,7 @@ def main():
         if not accumulated_rows:
             print("✅ No gaps found across all sections. Report not generated.")
         else:
-            with open("Clean_Drawio_Report.md", "w", encoding="utf-8") as f:
+            with open("Clean_Plantuml_Report.md", "w", encoding="utf-8") as f:
                 f.write("# ASPICE SWE.2 Sectional Impact Analysis\n\n")
                 f.write(f"**Release Comparison:** `{GITHUB_BASE_TAG}` → `{GITHUB_HEAD_TAG}`\n\n")
                 f.write("---\n\n")
@@ -298,7 +319,7 @@ def main():
                     clean_row = row.replace("\n", "<br/>")
                     f.write(clean_row + "\n")
             
-            print(f"✅ Report generated: Clean_Drawio_Report.md")
+            print(f"✅ Report generated: Clean_Plantuml_Report.md")
 
     except Exception as e:
         print(f"❌ Execution Error: {e}")

@@ -36,13 +36,13 @@ AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION")
 def clean_confluence_html(html_content):
     """
     Replaces complex macros with clean text.
-    IMPROVED: Tries multiple parameters for PlantUML name extraction to ensure consistency.
+    Handles Namespaced Macros (e.g., com.mycompany.plugins.plantUML)
     """
     print("   Cleaning Draw.io and PlantUML macros...")
     
-    # 1. Draw.io
+    # 1. Draw.io (Handle namespaces like my.plugins.draw.io)
     pattern_drawio = re.compile(
-        r'<ac:structured-macro ac:name="drawio"[^>]*>.*?' + 
+        r'<ac:structured-macro ac:name=".*?drawio.*?"[^>]*>.*?' + 
         r'<ac:parameter ac:name="diagramName">(.*?)</ac:parameter>' + 
         r'.*?</ac:structured-macro>', 
         re.DOTALL | re.IGNORECASE
@@ -54,43 +54,38 @@ def clean_confluence_html(html_content):
 
     cleaned_html = pattern_drawio.sub(replace_drawio, html_content)
 
-    # 2. PlantUML - Try 'diagramName' first (Confluence standard)
-    # Then fallback to 'title'
-    pattern_plantuml_name = re.compile(
-        r'<ac:structured-macro ac:name="plantUML"[^>]*>.*?' + 
-        r'<ac:parameter ac:name="diagramName">(.*?)</ac:parameter>' + 
-        r'.*?</ac:structured-macro>', 
-        re.DOTALL | re.IGNORECASE
-    )
-
-    def replace_plantuml_name(match):
-        name = match.group(1).strip()
-        return f"\n\n**[PlantUML Diagram: {name}]**\n\n"
-
-    cleaned_html = pattern_plantuml_name.sub(replace_plantuml_name, cleaned_html)
+    # 2. PlantUML (Handle namespaces like custom.plantuml)
+    # Also, try multiple parameters for the name
+    params_to_try = ['diagramName', 'title', 'filename', 'name']
     
-    # 3. PlantUML - Try 'title' (Fallback)
-    pattern_plantuml_title = re.compile(
-        r'<ac:structured-macro ac:name="plantUML"[^>]*>.*?' + 
-        r'<ac:parameter ac:name="title">(.*?)</ac:parameter>' + 
-        r'.*?</ac:structured-macro>', 
+    for param in params_to_try:
+        pattern_plantuml = re.compile(
+            r'<ac:structured-macro ac:name=".*?plantuml.*?"[^>]*>.*?' + 
+            f'<ac:parameter ac:name="{param}">(.*?)</ac:parameter>' + 
+            r'.*?</ac:structured-macro>', 
+            re.DOTALL | re.IGNORECASE
+        )
+        
+        # Use a lambda to pass the capture group to replace function
+        cleaned_html = pattern_plantuml.sub(lambda m: f"\n\n**[PlantUML Diagram: {m.group(1).strip()}]**\n\n", cleaned_html)
+
+    # 3. Fallback for PlantUML (If no specific parameter found, remove macro entirely with generic tag)
+    # This prevents garbage like 'true{...}falsetext'
+    pattern_plantuml_fallback = re.compile(
+        r'<ac:structured-macro ac:name=".*?plantuml.*?"[^>]*>.*?</ac:structured-macro>', 
         re.DOTALL | re.IGNORECASE
     )
+    
+    # Debug: If we have a fallback match, print a snippet
+    if pattern_plantuml_fallback.search(cleaned_html):
+        # Print snippet for debugging
+        snippet = pattern_plantuml_fallback.search(cleaned_html).group(0)[:200]
+        print(f"      ⚠️  Using Fallback for PlantUML (No standard parameter found)")
+        print(f"      HTML Snippet: {snippet}...")
 
-    def replace_plantuml_title(match):
-        name = match.group(1).strip()
-        return f"\n\n**[PlantUML Diagram: {name}]**\n\n"
+    cleaned_html = pattern_plantuml_fallback.sub("\n\n**[PlantUML Diagram]**\n\n", cleaned_html)
 
-    cleaned_html = pattern_plantuml_title.sub(replace_plantuml_title, cleaned_html)
-
-    # 4. Fallback for PlantUML (Generic)
-    pattern_plantuml_generic = re.compile(
-        r'<ac:structured-macro ac:name="plantUML"[^>]*>.*?</ac:structured-macro>', 
-        re.DOTALL | re.IGNORECASE
-    )
-    cleaned_html = pattern_plantuml_generic.sub("\n\n**[PlantUML Diagram]**\n\n", cleaned_html)
-
-    # 5. General Cleanup
+    # 4. General Cleanup (Any other macro causing noise)
     fallback_pattern = re.compile(r'<ac:structured-macro[^>]*>.*?</ac:structured-macro>', re.DOTALL)
     cleaned_html = fallback_pattern.sub("\n\n**[Confluence Macro]**\n\n", cleaned_html)
 
@@ -192,23 +187,14 @@ def get_full_github_diff(owner, repo, base_tag, head_tag, token):
 def analyze_single_section(client, deployment_name, section_header, section_content, full_diff, local_diag_path):
     """
     Invokes LLM with Text AND Diagram context.
-    ROBUST REGEX: Handles newlines and spacing issues.
+    Simplified Regex for Markdown matching.
     """
     
-    # ROBUST REGEX
-    # Explanation:
-    # \*?\*?\[    : Matches optional bold start and opening bracket
-    # (PlantUML|Draw\.io) : Matches Type
-    # .*?Diagram   : Matches text "Diagram" (allows spaces/newlines)
-    # [\s\r\n]*   : Matches any amount of whitespace or newlines (crucial for multi-line placeholders)
-    # :            : Matches colon
-    # [\s\r\n]*   : Matches whitespace/newlines after colon
-    # (.*?)       : Captures Name
-    # [^\]]*?    : Matches non-bracket characters until close
-    # \]\*?\*?    : Matches closing bracket and optional bold
-    
+    # SIMPLIFIED ROBUST REGEX
+    # Matches **[PlantUML Diagram: Name]** or [Draw.io Diagram: Anything]
+    # \s* allows spaces/newlines. (.*) captures everything until the bracket.
     pattern = re.compile(
-        r'\*?\*?\[(PlantUML|Draw\.io).*?Diagram[\s\r\n]*:[\s\r\n]*(.*?)[^\]]*?\]\*?\*', 
+        r'\*?\*?\[(PlantUML|Draw\.io)\s*Diagram\s*:\s*(.*?)\]\*?\*', 
         re.IGNORECASE
     )
     
@@ -218,12 +204,15 @@ def analyze_single_section(client, deployment_name, section_header, section_cont
         if "Diagram" in section_content:
             print(f"      ⚠️  Word 'Diagram' found but regex didn't match.")
             idx = section_content.find("Diagram")
-            snippet = section_content[max(0, idx-40):min(len(section_content), idx+40)]
-            # Normalize newlines for console print visibility
-            clean_snippet = snippet.replace("\n", "\\n").replace("\r", "\\r")
-            print(f"      Raw Snippet: ...{clean_snippet}...")
-        else:
-            print(f"      ℹ️  No diagrams detected.")
+            snippet = section_content[max(0, idx-50):min(len(section_content), idx+50)]
+            # Clean snippet for console
+            clean_snippet = snippet.replace("\n", "\\n")
+            print(f"      Snippet: ...{clean_snippet}...")
+            print(f"      🛠️  Checking if Markdown formatting is causing issues...")
+            # Try to find any line with "Diagram" and print it raw
+            for line in section_content.split('\n'):
+                if "Diagram" in line:
+                    print(f"      Raw Line: {line}")
 
     diagram_contexts = []
     
@@ -232,10 +221,8 @@ def analyze_single_section(client, deployment_name, section_header, section_cont
         if not diag_name:
             diag_name = "Unknown"
         
-        # Only load PlantUML
-        if "plantuml" in section_content.lower(): # Check section text context to ensure type match
-            # We can infer type from the captured group or just check local files
-            # Assuming the regex capture found the name, try to find it locally
+        # Check for PlantUML to load local file
+        if "plantuml" in section_content.lower():
             diag_content = find_local_diagram(diag_name, local_diag_path)
             if diag_content:
                 diagram_contexts.append(f"\n--- DIAGRAM CONTEXT: {diag_name} ---\n{diag_content}\n")
@@ -247,7 +234,7 @@ def analyze_single_section(client, deployment_name, section_header, section_cont
     
     **Context:**
     1. Confluence Text Content.
-    2. (Optional) Local PlantUML Diagrams. These define System Logic Flows.
+    2. (Optional) Local PlantUML Diagrams.
     
     **Instructions:**
     1. Check if Code Diff affects Text OR Diagram Logic.
@@ -255,7 +242,7 @@ def analyze_single_section(client, deployment_name, section_header, section_cont
     3. If gap found, return ONLY a Markdown table row.
     
     **Row Format:**
-    | ID | Severity | Confluence Section | Impact Scope | SWE.2 Observation (Functional) | Corrective Action |
+    | ID | Severity | Confluence Section | Impact Scope | SWE.2 Observation | Corrective Action |
     | 1 | 🔴 **NON-CONFORMANT** | <SECTION_TITLE> | UI/Logic/Data/API | [Observation] | [Action] |
     """
 
@@ -339,15 +326,9 @@ def main():
         if not accumulated_rows:
             print("✅ No gaps found.")
         else:
-            with open("Ultimate_Fix_Report.md", "w", encoding="utf-8") as f:
+            with open("Namespace_Aware_Report.md", "w", encoding="utf-8") as f:
                 f.write("# ASPICE SWE.2 Analysis\n\n")
                 f.write(f"**Release:** `{GITHUB_BASE_TAG}` → `{GITHUB_HEAD_TAG}`\n\n")
-                f.write("## Assessment Criteria\n\n")
-                f.write("| Option | Definition |\n| :--- | :--- |\n")
-                f.write("| 🔴 **NON-CONFORMANT** | Code contradicts doc or diagram. |\n")
-                f.write("| 🟠 **GAP IDENTIFIED** | Code adds missing feature. |\n")
-                f.write("| 🔴 **NON-CONFORMANT / GAP** | Complex change. |\n")
-                f.write("| 🟡 **INCONSISTENCY** | Minor mismatch. |\n\n")
                 f.write("## Analysis\n\n")
                 f.write("| ID | Severity | Confluence Section | Impact Scope | SWE.2 Observation | Corrective Action |\n")
                 f.write("| :--- | :--- | :--- | :--- | :--- | :--- |\n")

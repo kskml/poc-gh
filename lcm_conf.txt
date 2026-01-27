@@ -1,5 +1,6 @@
 import os
 import requests
+import re
 from dotenv import load_dotenv
 from openai import AzureOpenAI
 from markdownify import markdownify as md
@@ -28,76 +29,118 @@ AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION")
 # ----------------------
 
+def clean_confluence_html(html_content):
+    """
+    Replaces complex Confluence Draw.io macros with clean text.
+    Extracts the diagram name if possible, otherwise uses a generic placeholder.
+    """
+    print("   Cleaning Draw.io macros from HTML...")
+    
+    # Regex to find Draw.io macros and extract the diagram name parameter
+    # Structure typically: <ac:structured-macro ac:name="drawio">...<ac:parameter ac:name="diagramName">Name</ac:parameter>...</ac:structured-macro>
+    # We use non-greedy (.*?) to capture content efficiently
+    pattern = re.compile(
+        r'<ac:structured-macro ac:name="drawio"[^>]*>.*?' + 
+        r'<ac:parameter ac:name="diagramName">(.*?)</ac:parameter>' + 
+        r'.*?</ac:structured-macro>', 
+        re.DOTALL
+    )
+
+    def replace_with_name(match):
+        name = match.group(1).strip()
+        return f"\n\n**[Draw.io Diagram: {name}]**\n\n"
+
+    # First pass: Try to extract the specific name
+    cleaned_html = pattern.sub(replace_with_name, html_content)
+
+    # Second pass (Fallback): Remove any remaining drawio macros that didn't match the name extraction
+    # This prevents the "true{...}falsetext" garbage artifacts from appearing in markdown
+    fallback_pattern = re.compile(r'<ac:structured-macro ac:name="drawio"[^>]*>.*?</ac:structured-macro>', re.DOTALL)
+    cleaned_html = fallback_pattern.sub("\n\n**[Draw.io Image]**\n\n", cleaned_html)
+
+    return cleaned_html
+
 def get_confluence_content(base_url, email, token, page_id):
-    """Fetches documentation and converts to Markdown."""
+    """Fetches documentation, cleans HTML artifacts, and converts to Markdown."""
     auth = (email, token)
     url = f"{base_url}/rest/api/content/{page_id}?expand=body.storage"
     print(f"Fetching Confluence page ID: {page_id}...")
     response = requests.get(url, auth=auth)
     if response.status_code != 200:
         raise Exception(f"Confluence API Error: {response.status_code}")
-    return md(response.json()['body']['storage']['value'])
+    
+    raw_html = response.json()['body']['storage']['value']
+    
+    # Clean the HTML before Markdown conversion
+    clean_html = clean_confluence_html(raw_html)
+    
+    # Convert to Markdown
+    return md(clean_html)
 
-def chunk_confluence_hierarchical(markdown_text, split_level=1):
+def find_top_header_level(markdown_text):
     """
-    Splits markdown into chunks based on header levels.
-    split_level=1 means we ONLY break on Level 1 Headers (#).
-    Subheaders (##, ###) are kept inside the content of their parent chunk.
+    Scans the text to find the highest level header present (e.g., 1 for #, 2 for ##).
     """
-    print(f"Splitting Confluence content (Splitting only on Level {split_level} Headers)...")
+    lines = markdown_text.split('\n')
+    min_level = 100 # Start high
+    
+    for line in lines:
+        if line.strip().startswith('#'):
+            stripped = line.strip().split()[0]
+            level = len(stripped)
+            if level < min_level:
+                min_level = level
+                
+    # If no headers found, default to 1
+    return 1 if min_level == 100 else min_level
+
+def chunk_confluence_hierarchical(markdown_text):
+    """
+    Splits markdown into chunks based on detected top header level.
+    """
+    print("Detecting top header level...")
+    split_level = find_top_header_level(markdown_text)
+    print(f"Splitting Confluence content (Auto-detected Level {split_level} as main section header)...")
     
     lines = markdown_text.split('\n')
     chunks = []
     
-    # Initialize as None so we can detect the first header dynamically
+    # Initialize as None
     current_header = None
     current_content = []
     
     for line in lines:
         if line.strip().startswith('#'):
-            # Calculate exact header level (e.g., 1 for '#', 2 for '##')
             stripped_line = line.strip()
             header_marker = stripped_line.split()[0] 
             header_level = len(header_marker)
             
             # Only split if we hit the target level
             if header_level <= split_level:
-                # If this is the first header we encountered
-                if current_header is None:
-                    # Check if there was content before the first header (Preamble)
-                    if current_content:
-                        chunks.append({
-                            'header': 'Preamble', # Dynamic fallback for text before first header
-                            'content': "\n".join(current_content)
-                        })
-                    # Now set the header to the actual one found
-                    current_header = stripped_line
-                    current_content = []
-                else:
-                    # Normal Flow: Save previous chunk and start new one
-                    if current_content:
-                        chunks.append({
-                            'header': current_header,
-                            'content': "\n".join(current_content)
-                        })
-                    
-                    # Start new chunk with the found header
-                    current_header = stripped_line
-                    current_content = []
+                # Save previous chunk
+                if current_content:
+                    chunks.append({
+                        'header': current_header if current_header else 'Preamble',
+                        'content': "\n".join(current_content)
+                    })
+                
+                # Start new chunk
+                current_header = stripped_line
+                current_content = []
             else:
-                # It is a subheader (##, ###), keep it as content
+                # It is a subheader, keep it as content
                 current_content.append(line)
         else:
             current_content.append(line)
             
-    # Save the last chunk (if it exists)
+    # Save last chunk
     if current_content:
         chunks.append({
             'header': current_header if current_header else 'Preamble',
             'content': "\n".join(current_content)
         })
         
-    print(f"✅ Created {len(chunks)} sections (Major Chunks).")
+    print(f"✅ Created {len(chunks)} sections.")
     return chunks
 
 def get_full_github_diff(owner, repo, base_tag, head_tag, token):
@@ -120,7 +163,7 @@ def get_full_github_diff(owner, repo, base_tag, head_tag, token):
 def analyze_single_section(client, deployment_name, section_header, section_content, full_diff):
     """
     Invokes LLM for a SINGLE section of documentation against the FULL diff.
-    Returns a table row if a gap exists, or "NO_IMPACT" if aligned.
+    Uses strict variable injection to ensure correct reporting.
     """
     
     system_prompt = """
@@ -142,16 +185,19 @@ def analyze_single_section(client, deployment_name, section_header, section_cont
     - 🔴 **NON-CONFORMANT / GAP:** Complex change.
     - 🟡 **INCONSISTENCY:** Minor mismatch.
     
+    **CRITICAL OUTPUT REQUIREMENT:**
+    - The "Confluence Section" column in your output table MUST contain the value enclosed in <SECTION_TITLE> tags exactly.
+    
     **Row Format:**
     | ID | Severity | Confluence Section | Impact Scope | SWE.2 Observation (Functional) | Corrective Action |
-    | 1 | 🔴 **NON-CONFORMANT** | {Use the provided Section Header} | UI/Logic/Data/API | [Observation] | [Action] |
-    
-    **CRITICAL:** Ensure the "Confluence Section" column uses the EXACT header provided in the prompt.
+    | 1 | 🔴 **NON-CONFORMANT** | <SECTION_TITLE> | UI/Logic/Data/API | [Observation] | [Action] |
     """
 
+    # Inject the variable explicitly to prevent LLM confusion with preamble content
     user_prompt = f"""
-    CONFLUENCE SECTION:
-    {section_header}
+    <SECTION_TITLE>{section_header}</SECTION_TITLE>
+    
+    CONFLUENCE CONTENT TO ANALYZE:
     {section_content}
 
     ---
@@ -195,8 +241,8 @@ def main():
         # 2. Fetch Docs
         doc_text = get_confluence_content(CONFLUENCE_BASE_URL, CONFLUENCE_EMAIL, CONFLUENCE_API_TOKEN, PAGE_ID)
         
-        # 3. Chunk Docs (SPLIT LEVEL 1 - Only #)
-        sections = chunk_confluence_hierarchical(doc_text, split_level=1)
+        # 3. Chunk Docs (Auto-Detects Header Level)
+        sections = chunk_confluence_hierarchical(doc_text)
         
         # 4. Fetch GitHub Diff (Full Context)
         full_diff = get_full_github_diff(GITHUB_REPO_OWNER, GITHUB_REPO_NAME, GITHUB_BASE_TAG, GITHUB_HEAD_TAG, GITHUB_TOKEN)
@@ -231,7 +277,7 @@ def main():
         if not accumulated_rows:
             print("✅ No gaps found across all sections. Report not generated.")
         else:
-            with open("Dynamic_Header_Report.md", "w", encoding="utf-8") as f:
+            with open("Clean_Drawio_Report.md", "w", encoding="utf-8") as f:
                 f.write("# ASPICE SWE.2 Sectional Impact Analysis\n\n")
                 f.write(f"**Release Comparison:** `{GITHUB_BASE_TAG}` → `{GITHUB_HEAD_TAG}`\n\n")
                 f.write("---\n\n")
@@ -252,7 +298,7 @@ def main():
                     clean_row = row.replace("\n", "<br/>")
                     f.write(clean_row + "\n")
             
-            print(f"✅ Report generated: Dynamic_Header_Report.md")
+            print(f"✅ Report generated: Clean_Drawio_Report.md")
 
     except Exception as e:
         print(f"❌ Execution Error: {e}")

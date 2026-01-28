@@ -1,16 +1,47 @@
+# ... (previous imports and helper functions) ...
+
+def find_top_header_level(markdown_text):
+    """
+    Scans text to find the most dominant header level for splitting.
+    FIX: Skips the very first line (usually Confluence Page Title) to avoid level hijacking.
+    """
+    lines = markdown_text.split('\n')
+    
+    # Frequency map: {1: 10, 2: 5, 3: 20}
+    level_counts = {}
+    
+    # Iterate lines
+    for i, line in enumerate(lines):
+        if i == 0:
+            continue # Skip the very first line (Page Title)
+            
+        if line.strip().startswith('#'):
+            stripped = line.strip().split()[0]
+            level = len(stripped)
+            level_counts[level] = level_counts.get(level, 0) + 1
+    
+    if not level_counts:
+        return 1 # Default to 1 if no headers found
+        
+    # Return the level that appears most frequently (The "Major Heading")
+    # This handles cases where # is just a title, but ## is the actual structure
+    top_level = max(level_counts, key=level_counts.get)
+    
+    print(f"   Detected Top Level: {top_level} (Count: {level_counts[top_level]})")
+    return top_level
+
 def chunk_confluence_hierarchical(markdown_text):
     """
     Splits markdown into chunks based on header levels.
-    FIX: Removes the 'if current_content' check to prevent skipping empty sections.
     """
-    print("Detecting top header level...")
+    print("Detecting major header structure...")
     split_level = find_top_header_level(markdown_text)
-    print(f"Splitting Confluence content (Auto-detected Level {split_level})...")
+    print(f"Splitting Confluence content at Level {split_level}...")
     
     lines = markdown_text.split('\n')
     chunks = []
     
-    # Initialize as None to distinguish from the first actual header
+    # Initialize as None
     current_header = None
     current_content = []
     
@@ -20,10 +51,9 @@ def chunk_confluence_hierarchical(markdown_text):
             header_marker = stripped_line.split()[0] 
             header_level = len(header_marker)
             
-            # Only split if we hit the target level
+            # Only split if we hit the target level (e.g., ##)
             if header_level <= split_level:
-                # FIX: Save the previous chunk if we have already set a header
-                # We check 'current_header is not None' to handle the very first iteration (preamble)
+                # Save previous chunk
                 if current_header is not None:
                     chunks.append({
                         'header': current_header,
@@ -33,15 +63,15 @@ def chunk_confluence_hierarchical(markdown_text):
                 # Start new chunk
                 current_header = stripped_line
                 current_content = []
-                # Add the header line itself to the content so LLM sees the title
+                # Include header line in content
                 current_content.append(line)
             else:
-                # It is a subheader, keep it as content
+                # It is a subheader (e.g., ###), keep it as content
                 current_content.append(line)
         else:
             current_content.append(line)
             
-    # Save the last chunk (if it exists)
+    # Save last chunk
     if current_header is not None:
         chunks.append({
             'header': current_header,
@@ -50,3 +80,5 @@ def chunk_confluence_hierarchical(markdown_text):
         
     print(f"✅ Created {len(chunks)} sections.")
     return chunks
+
+# ... (rest of the script: analyze_single_section, main, etc) ...

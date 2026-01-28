@@ -1,13 +1,13 @@
 def clean_confluence_html(html_content):
     """
     Replaces complex macros with clean text.
-    FIX: Added Negative Lookahead `(?!.*<ac:structured-macro>)` to prevent
-    greedy matches that consume headers between adjacent or malformed macros.
+    FIX: Modified General Cleanup to ignore macros containing content (headers, paragraphs).
+    This prevents consuming text headers wrapped in panel/container macros.
     """
-    print("   Cleaning macros with Anti-Greedy Regex...")
+    print("   Cleaning macros (Preserving content)...")
     
     # 1. Draw.io
-    # Added: `(?!.*<ac:structured-macro>)` to prevent eating next macro
+    # Using anti-greedy lookahead
     pattern_drawio = re.compile(
         r'<ac:structured-macro ac:name=".*?drawio.*?"[^>]*>(?!.*<ac:structured-macro>).*?' + 
         r'<ac:parameter ac:name="diagramName">(.*?)</ac:parameter>' + 
@@ -46,14 +46,16 @@ def clean_confluence_html(html_content):
         print("      ⚠️  Using Fallback for unnamed PlantUML diagram.")
         cleaned_html = pattern_plantuml_generic.sub("\n\n**[PlantUML Diagram]**\n\n", cleaned_html)
 
-    # 4. General Cleanup (ONLY if absolutely necessary, usually safe to leave others)
-    # If headers are still disappearing, you might need to remove this, 
-    # but it's helpful for cleaning up other noisy macros.
-    # Using strict boundary to prevent massive consumption:
+    # 4. General Cleanup (ONLY for noise, Preserves Content)
+    # Logic: Match a macro, UNLESS it contains structural HTML tags like <h1>, <p>, <div>
+    # This ensures headers wrapped in panels/containers are NOT deleted.
     fallback_pattern = re.compile(
-        r'<ac:structured-macro[^>]*>(?!.*<ac:structured-macro>).*?</ac:structured-macro>', 
+        r'<ac:structured-macro[^>]*>(?!.*<(?:h[1-6]|p|div)).*?</ac:structured-macro>', 
         re.DOTALL
     )
+    
+    # We only apply this if we want to remove generic noise macros.
+    # If headers were skipped before, it was likely this regex removing their parent container.
     cleaned_html = fallback_pattern.sub("\n\n**[Confluence Macro]**\n\n", cleaned_html)
 
     return cleaned_html

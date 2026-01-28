@@ -1,150 +1,53 @@
-def chunk_confluence_hierarchical(markdown_text, split_level):
+def clean_confluence_html(html_content):
     """
-    Splits markdown into chunks based on explicitly passed split level.
-    Removed auto-detection to prevent skipping/errors.
+    Replaces complex macros with clean text.
+    FIX: Removed generic macro fallback to prevent deleting headers inside other macros.
     """
-    print(f"Splitting Confluence content at Level {split_level} (Passed via Argument)...")
+    print("   Cleaning macros (Draw.io & PlantUML)...")
     
-    lines = markdown_text.split('\n')
-    chunks = []
-    
-    # Initialize as None
-    current_header = None
-    current_content = []
-    
-    for line in lines:
-        if line.strip().startswith('#'):
-            stripped_line = line.strip()
-            header_marker = stripped_line.split()[0] 
-            header_level = len(header_marker)
-            
-            # Logic: Split if header level matches or is higher number than requested split level
-            # Example: Split on 3. 
-            # Level 1 (<= 3) -> Split.
-            # Level 2 (<= 3) -> Split.
-            # Level 3 (<= 3) -> Split.
-            # Level 4 (> 3)  -> Content.
-            if header_level <= split_level:
-                # Save previous chunk (if exists)
-                if current_header is not None:
-                    chunks.append({
-                        'header': current_header,
-                        'content': "\n".join(current_content)
-                    })
-                
-                # Start new chunk
-                current_header = stripped_line
-                current_content = []
-                # Include header line in content
-                current_content.append(line)
-            else:
-                # It is a subheader, keep it as content
-                current_content.append(line)
-        else:
-            current_content.append(line)
-            
-    # Save last chunk (if it exists)
-    if current_header is not None:
-        chunks.append({
-            'header': current_header,
-            'content': "\n".join(current_content)
-        })
-        
-    print(f"✅ Created {len(chunks)} sections.")
-    return chunks
+    # 1. Draw.io
+    pattern_drawio = re.compile(
+        r'<ac:structured-macro ac:name=".*?drawio.*?"[^>]*>.*?' + 
+        r'<ac:parameter ac:name="diagramName">(.*?)</ac:parameter>' + 
+        r'.*?</ac:structured-macro>', 
+        re.DOTALL | re.IGNORECASE
+    )
 
-def main():
-    # --- ARGUMENT PARSING ---
-    parser = argparse.ArgumentParser(description="ASPICE SWE.2 Confluence vs Code Analyzer")
-    
-    # Dynamic Inputs
-    parser.add_argument("--base-tag", required=True, help="Base Git Tag (e.g., v1.0.0)")
-    parser.add_argument("--head-tag", required=True, help="Head Git Tag (e.g., v1.1.0)")
-    parser.add_argument("--page-id", required=True, help="Confluence Page ID")
-    parser.add_argument("--module-path", required=True, help="Local Path to Diagrams (Module Path)")
-    
-    # NEW: Split Level Input (Defaulting to 3)
-    parser.add_argument("--split-level", type=int, default=3, help="Header Level to split on (e.g., 3 for ###)")
-    
-    # Optional Repo Info
-    parser.add_argument("--repo-owner", default=os.getenv("GITHUB_REPO_OWNER"), help="GitHub Repo Owner")
-    parser.add_argument("--repo-name", default=os.getenv("GITHUB_REPO_NAME"), help="GitHub Repo Name")
-    
-    args = parser.parse_args()
+    def replace_drawio(match):
+        name = match.group(1).strip()
+        return f"\n\n**[Draw.io Diagram: {name}]**\n\n"
 
-    # --- SETUP ---
-    try:
-        client = AzureOpenAI(
-            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
-            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
-        )
-    except Exception as e:
-        print(f"❌ Initialization Error: {e}")
-        return
+    cleaned_html = pattern_drawio.sub(replace_drawio, html_content)
 
-    # Get Secrets from Environment
-    confl_base = os.getenv("CONFLUENCE_BASE_URL")
-    confl_email = os.getenv("CONFLUENCE_EMAIL")
-    confl_token = os.getenv("CONFLUENCE_API_TOKEN")
-    github_token = os.getenv("GITHUB_TOKEN")
-    deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT")
-
-    if not all([confl_base, confl_email, confl_token, github_token, deployment_name]):
-        print("❌ Error: Missing Secrets in Environment Variables.")
-        return
-
-    try:
-        # Use Args for inputs
-        doc_text = get_confluence_content(confl_base, confl_email, confl_token, args.page_id)
-        
-        # Use Arg for split level (Passing 3 by default or whatever user sets)
-        sections = chunk_confluence_hierarchical(doc_text, args.split_level)
-        
-        # Use Args for tags
-        full_diff = get_full_github_diff(
-            args.repo_owner, args.repo_name, 
-            args.base_tag, args.head_tag, 
-            github_token
+    # 2. PlantUML (Handle namespaces and multiple parameters)
+    params_to_try = ['diagramName', 'title', 'filename', 'name']
+    
+    for param in params_to_try:
+        pattern_plantuml = re.compile(
+            r'<ac:structured-macro ac:name=".*?plantuml.*?"[^>]*>.*?' + 
+                f'<ac:parameter ac:name="{param}">(.*?)</ac:parameter>' + 
+                r'.*?</ac:structured-macro>', 
+            re.DOTALL | re.IGNORECASE
         )
         
-        if not full_diff:
-            print("⚠️  No Diff found.")
-            return
+        if pattern_plantuml.search(cleaned_html):
+            cleaned_html = pattern_plantuml.sub(lambda m: f"\n\n<<< PLANTUML DIAGRAM: {m.group(1).strip()} >>>\n\n", cleaned_html)
+            break 
 
-        print(f"🔄 Starting Analysis across {len(sections)} sections...")
-        accumulated_rows = []
-        
-        for idx, section in enumerate(sections):
-            print(f"   Analyzing Section {idx+1}/{len(sections)}: {section['header']}")
-            
-            result = analyze_single_section(
-                client, 
-                deployment_name, 
-                section['header'], 
-                section['content'], 
-                full_diff,
-                args.module_path
-            )
-            
-            if result and result != "NO_IMPACT":
-                accumulated_rows.append(result)
-                print(f"      → Impact Found.")
-            else:
-                print(f"      → No Impact. Skipping.")
+    # 3. Fallback for PlantUML (No name found)
+    pattern_plantuml_generic = re.compile(
+        r'<ac:structured-macro ac:name=".*?plantuml.*?"[^>]*>.*?</ac:structured-macro>', 
+        re.DOTALL | re.IGNORECASE
+    )
+    
+    if pattern_plantuml_generic.search(cleaned_html):
+        print("      ⚠️  Using Fallback for unnamed PlantUML diagram.")
+        cleaned_html = pattern_plantuml_generic.sub("\n\n<<< PLANTUML DIAGRAM >>>\n\n", cleaned_html)
 
-        if not accumulated_rows:
-            print("✅ No gaps found.")
-        else:
-            with open("Arg_Analyzer_Report.md", "w", encoding="utf-8") as f:
-                f.write("# ASPICE SWE.2 Analysis\n\n")
-                f.write(f"**Release:** `{args.base_tag}` → `{args.head_tag}`\n\n")
-                f.write("## Analysis\n\n")
-                f.write("| ID | Severity | Confluence Section | Impact Scope | SWE.2 Observation | Corrective Action |\n")
-                f.write("| :--- | :--- | :--- | :--- | :--- | :--- |\n")
-                for row in accumulated_rows:
-                    f.write(row.replace("\n", "<br/>") + "\n")
-            print(f"✅ Report generated.")
-
-    except Exception as e:
-        print(f"❌ Error: {e}")
+    # --- REMOVED: Generic Fallback Cleanup ---
+    # Previous code:
+    # fallback_pattern = re.compile(r'<ac:structured-macro[^>]*>.*?</ac:structured-macro>', re.DOTALL)
+    # cleaned_html = fallback_pattern.sub("\n\n**[Confluence Macro]**\n\n", cleaned_html)
+    # This was deleting headers inside other macros.
+    
+    return cleaned_html

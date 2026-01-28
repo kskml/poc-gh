@@ -1,0 +1,52 @@
+def chunk_confluence_hierarchical(markdown_text):
+    """
+    Splits markdown into chunks based on header levels.
+    FIX: Removes the 'if current_content' check to prevent skipping empty sections.
+    """
+    print("Detecting top header level...")
+    split_level = find_top_header_level(markdown_text)
+    print(f"Splitting Confluence content (Auto-detected Level {split_level})...")
+    
+    lines = markdown_text.split('\n')
+    chunks = []
+    
+    # Initialize as None to distinguish from the first actual header
+    current_header = None
+    current_content = []
+    
+    for line in lines:
+        if line.strip().startswith('#'):
+            stripped_line = line.strip()
+            header_marker = stripped_line.split()[0] 
+            header_level = len(header_marker)
+            
+            # Only split if we hit the target level
+            if header_level <= split_level:
+                # FIX: Save the previous chunk if we have already set a header
+                # We check 'current_header is not None' to handle the very first iteration (preamble)
+                if current_header is not None:
+                    chunks.append({
+                        'header': current_header,
+                        'content': "\n".join(current_content)
+                    })
+                
+                # Start new chunk
+                current_header = stripped_line
+                current_content = []
+                # Add the header line itself to the content so LLM sees the title
+                current_content.append(line)
+            else:
+                # It is a subheader, keep it as content
+                current_content.append(line)
+        else:
+            current_content.append(line)
+            
+    # Save the last chunk (if it exists)
+    if current_header is not None:
+        chunks.append({
+            'header': current_header,
+            'content': "\n".join(current_content)
+        })
+        
+    print(f"✅ Created {len(chunks)} sections.")
+    return chunks

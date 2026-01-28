@@ -1,42 +1,9 @@
-# ... (previous imports and helper functions) ...
-
-def find_top_header_level(markdown_text):
+def chunk_confluence_hierarchical(markdown_text, split_level):
     """
-    Scans text to find the most dominant header level for splitting.
-    FIX: Skips the very first line (usually Confluence Page Title) to avoid level hijacking.
+    Splits markdown into chunks based on explicitly passed split level.
+    Removed auto-detection to prevent skipping/errors.
     """
-    lines = markdown_text.split('\n')
-    
-    # Frequency map: {1: 10, 2: 5, 3: 20}
-    level_counts = {}
-    
-    # Iterate lines
-    for i, line in enumerate(lines):
-        if i == 0:
-            continue # Skip the very first line (Page Title)
-            
-        if line.strip().startswith('#'):
-            stripped = line.strip().split()[0]
-            level = len(stripped)
-            level_counts[level] = level_counts.get(level, 0) + 1
-    
-    if not level_counts:
-        return 1 # Default to 1 if no headers found
-        
-    # Return the level that appears most frequently (The "Major Heading")
-    # This handles cases where # is just a title, but ## is the actual structure
-    top_level = max(level_counts, key=level_counts.get)
-    
-    print(f"   Detected Top Level: {top_level} (Count: {level_counts[top_level]})")
-    return top_level
-
-def chunk_confluence_hierarchical(markdown_text):
-    """
-    Splits markdown into chunks based on header levels.
-    """
-    print("Detecting major header structure...")
-    split_level = find_top_header_level(markdown_text)
-    print(f"Splitting Confluence content at Level {split_level}...")
+    print(f"Splitting Confluence content at Level {split_level} (Passed via Argument)...")
     
     lines = markdown_text.split('\n')
     chunks = []
@@ -51,9 +18,14 @@ def chunk_confluence_hierarchical(markdown_text):
             header_marker = stripped_line.split()[0] 
             header_level = len(header_marker)
             
-            # Only split if we hit the target level (e.g., ##)
+            # Logic: Split if header level matches or is higher number than requested split level
+            # Example: Split on 3. 
+            # Level 1 (<= 3) -> Split.
+            # Level 2 (<= 3) -> Split.
+            # Level 3 (<= 3) -> Split.
+            # Level 4 (> 3)  -> Content.
             if header_level <= split_level:
-                # Save previous chunk
+                # Save previous chunk (if exists)
                 if current_header is not None:
                     chunks.append({
                         'header': current_header,
@@ -66,12 +38,12 @@ def chunk_confluence_hierarchical(markdown_text):
                 # Include header line in content
                 current_content.append(line)
             else:
-                # It is a subheader (e.g., ###), keep it as content
+                # It is a subheader, keep it as content
                 current_content.append(line)
         else:
             current_content.append(line)
             
-    # Save last chunk
+    # Save last chunk (if it exists)
     if current_header is not None:
         chunks.append({
             'header': current_header,
@@ -81,4 +53,98 @@ def chunk_confluence_hierarchical(markdown_text):
     print(f"✅ Created {len(chunks)} sections.")
     return chunks
 
-# ... (rest of the script: analyze_single_section, main, etc) ...
+def main():
+    # --- ARGUMENT PARSING ---
+    parser = argparse.ArgumentParser(description="ASPICE SWE.2 Confluence vs Code Analyzer")
+    
+    # Dynamic Inputs
+    parser.add_argument("--base-tag", required=True, help="Base Git Tag (e.g., v1.0.0)")
+    parser.add_argument("--head-tag", required=True, help="Head Git Tag (e.g., v1.1.0)")
+    parser.add_argument("--page-id", required=True, help="Confluence Page ID")
+    parser.add_argument("--module-path", required=True, help="Local Path to Diagrams (Module Path)")
+    
+    # NEW: Split Level Input (Defaulting to 3)
+    parser.add_argument("--split-level", type=int, default=3, help="Header Level to split on (e.g., 3 for ###)")
+    
+    # Optional Repo Info
+    parser.add_argument("--repo-owner", default=os.getenv("GITHUB_REPO_OWNER"), help="GitHub Repo Owner")
+    parser.add_argument("--repo-name", default=os.getenv("GITHUB_REPO_NAME"), help="GitHub Repo Name")
+    
+    args = parser.parse_args()
+
+    # --- SETUP ---
+    try:
+        client = AzureOpenAI(
+            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
+        )
+    except Exception as e:
+        print(f"❌ Initialization Error: {e}")
+        return
+
+    # Get Secrets from Environment
+    confl_base = os.getenv("CONFLUENCE_BASE_URL")
+    confl_email = os.getenv("CONFLUENCE_EMAIL")
+    confl_token = os.getenv("CONFLUENCE_API_TOKEN")
+    github_token = os.getenv("GITHUB_TOKEN")
+    deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+
+    if not all([confl_base, confl_email, confl_token, github_token, deployment_name]):
+        print("❌ Error: Missing Secrets in Environment Variables.")
+        return
+
+    try:
+        # Use Args for inputs
+        doc_text = get_confluence_content(confl_base, confl_email, confl_token, args.page_id)
+        
+        # Use Arg for split level (Passing 3 by default or whatever user sets)
+        sections = chunk_confluence_hierarchical(doc_text, args.split_level)
+        
+        # Use Args for tags
+        full_diff = get_full_github_diff(
+            args.repo_owner, args.repo_name, 
+            args.base_tag, args.head_tag, 
+            github_token
+        )
+        
+        if not full_diff:
+            print("⚠️  No Diff found.")
+            return
+
+        print(f"🔄 Starting Analysis across {len(sections)} sections...")
+        accumulated_rows = []
+        
+        for idx, section in enumerate(sections):
+            print(f"   Analyzing Section {idx+1}/{len(sections)}: {section['header']}")
+            
+            result = analyze_single_section(
+                client, 
+                deployment_name, 
+                section['header'], 
+                section['content'], 
+                full_diff,
+                args.module_path
+            )
+            
+            if result and result != "NO_IMPACT":
+                accumulated_rows.append(result)
+                print(f"      → Impact Found.")
+            else:
+                print(f"      → No Impact. Skipping.")
+
+        if not accumulated_rows:
+            print("✅ No gaps found.")
+        else:
+            with open("Arg_Analyzer_Report.md", "w", encoding="utf-8") as f:
+                f.write("# ASPICE SWE.2 Analysis\n\n")
+                f.write(f"**Release:** `{args.base_tag}` → `{args.head_tag}`\n\n")
+                f.write("## Analysis\n\n")
+                f.write("| ID | Severity | Confluence Section | Impact Scope | SWE.2 Observation | Corrective Action |\n")
+                f.write("| :--- | :--- | :--- | :--- | :--- | :--- |\n")
+                for row in accumulated_rows:
+                    f.write(row.replace("\n", "<br/>") + "\n")
+            print(f"✅ Report generated.")
+
+    except Exception as e:
+        print(f"❌ Error: {e}")

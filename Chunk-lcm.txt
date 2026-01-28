@@ -1,13 +1,15 @@
 def clean_confluence_html(html_content):
     """
     Replaces complex macros with clean text.
-    FIX: Removed generic macro fallback to prevent deleting headers inside other macros.
+    FIX: Added Negative Lookahead `(?!.*<ac:structured-macro>)` to prevent
+    greedy matches that consume headers between adjacent or malformed macros.
     """
-    print("   Cleaning macros (Draw.io & PlantUML)...")
+    print("   Cleaning macros with Anti-Greedy Regex...")
     
     # 1. Draw.io
+    # Added: `(?!.*<ac:structured-macro>)` to prevent eating next macro
     pattern_drawio = re.compile(
-        r'<ac:structured-macro ac:name=".*?drawio.*?"[^>]*>.*?' + 
+        r'<ac:structured-macro ac:name=".*?drawio.*?"[^>]*>(?!.*<ac:structured-macro>).*?' + 
         r'<ac:parameter ac:name="diagramName">(.*?)</ac:parameter>' + 
         r'.*?</ac:structured-macro>', 
         re.DOTALL | re.IGNORECASE
@@ -19,35 +21,39 @@ def clean_confluence_html(html_content):
 
     cleaned_html = pattern_drawio.sub(replace_drawio, html_content)
 
-    # 2. PlantUML (Handle namespaces and multiple parameters)
+    # 2. PlantUML
     params_to_try = ['diagramName', 'title', 'filename', 'name']
     
     for param in params_to_try:
         pattern_plantuml = re.compile(
-            r'<ac:structured-macro ac:name=".*?plantuml.*?"[^>]*>.*?' + 
+            r'<ac:structured-macro ac:name=".*?plantuml.*?"[^>]*>(?!.*<ac:structured-macro>).*?' + 
                 f'<ac:parameter ac:name="{param}">(.*?)</ac:parameter>' + 
                 r'.*?</ac:structured-macro>', 
             re.DOTALL | re.IGNORECASE
         )
         
         if pattern_plantuml.search(cleaned_html):
-            cleaned_html = pattern_plantuml.sub(lambda m: f"\n\n<<< PLANTUML DIAGRAM: {m.group(1).strip()} >>>\n\n", cleaned_html)
+            cleaned_html = pattern_plantuml.sub(lambda m: f"\n\n**[PlantUML Diagram: {m.group(1).strip()}]**\n\n", cleaned_html)
             break 
 
     # 3. Fallback for PlantUML (No name found)
     pattern_plantuml_generic = re.compile(
-        r'<ac:structured-macro ac:name=".*?plantuml.*?"[^>]*>.*?</ac:structured-macro>', 
+        r'<ac:structured-macro ac:name=".*?plantuml.*?"[^>]*>(?!.*<ac:structured-macro>).*?</ac:structured-macro>', 
         re.DOTALL | re.IGNORECASE
     )
     
     if pattern_plantuml_generic.search(cleaned_html):
         print("      ⚠️  Using Fallback for unnamed PlantUML diagram.")
-        cleaned_html = pattern_plantuml_generic.sub("\n\n<<< PLANTUML DIAGRAM >>>\n\n", cleaned_html)
+        cleaned_html = pattern_plantuml_generic.sub("\n\n**[PlantUML Diagram]**\n\n", cleaned_html)
 
-    # --- REMOVED: Generic Fallback Cleanup ---
-    # Previous code:
-    # fallback_pattern = re.compile(r'<ac:structured-macro[^>]*>.*?</ac:structured-macro>', re.DOTALL)
-    # cleaned_html = fallback_pattern.sub("\n\n**[Confluence Macro]**\n\n", cleaned_html)
-    # This was deleting headers inside other macros.
-    
+    # 4. General Cleanup (ONLY if absolutely necessary, usually safe to leave others)
+    # If headers are still disappearing, you might need to remove this, 
+    # but it's helpful for cleaning up other noisy macros.
+    # Using strict boundary to prevent massive consumption:
+    fallback_pattern = re.compile(
+        r'<ac:structured-macro[^>]*>(?!.*<ac:structured-macro>).*?</ac:structured-macro>', 
+        re.DOTALL
+    )
+    cleaned_html = fallback_pattern.sub("\n\n**[Confluence Macro]**\n\n", cleaned_html)
+
     return cleaned_html

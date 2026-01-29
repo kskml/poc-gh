@@ -1,334 +1,53 @@
-import os
-import requests
-import re
-from dotenv import load_dotenv
-from openai import AzureOpenAI
-from markdownify import markdownify as md
-from pathlib import Path
+# Add to imports at top
+from bs4 import BeautifulSoup
 
-# Load environment variables
-load_dotenv()
-
-# --- CONFIGURATION ---
-# Confluence
-CONFLUENCE_BASE_URL = os.getenv("CONFLUENCE_BASE_URL")
-CONFLUENCE_EMAIL = os.getenv("CONFLUENCE_EMAIL")
-CONFLUENCE_API_TOKEN = os.getenv("CONFLUENCE_API_TOKEN")
-PAGE_ID = os.getenv("PAGE_ID")
-
-# GitHub
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-GITHUB_REPO_OWNER = os.getenv("GITHUB_REPO_OWNER")
-GITHUB_REPO_NAME = os.getenv("GITHUB_REPO_NAME")
-GITHUB_BASE_TAG = os.getenv("GITHUB_BASE_TAG")
-GITHUB_HEAD_TAG = os.getenv("GITHUB_HEAD_TAG")
-
-# Local Diagrams
-LOCAL_DIAGRAMS_PATH = os.getenv("LOCAL_DIAGRAMS_PATH")
-
-# Azure
-AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
-AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
-AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
-AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION")
-# ----------------------
+# ... (keep other imports and code) ...
 
 def clean_confluence_html(html_content):
     """
-    Uses Custom ASCII Delimiters to prevent Markdown conversion issues.
-    Replaces macros with <<< DIAGRAM_START: Name >>> format.
+    Uses BeautifulSoup to safely remove macros and inject placeholders.
+    This guarantees headers and text are NOT deleted or skipped.
     """
-    print("   Cleaning macros with Custom Delimiters...")
+    print("   Cleaning macros with BeautifulSoup (Safe Mode)...")
     
-    # 1. Draw.io
-    pattern_drawio = re.compile(
-        r'<ac:structured-macro ac:name=".*?drawio.*?"[^>]*>.*?' + 
-        r'<ac:parameter ac:name="diagramName">(.*?)</ac:parameter>' + 
-        r'.*?</ac:structured-macro>', 
-        re.DOTALL | re.IGNORECASE
-    )
-
-    def replace_drawio(match):
-        name = match.group(1).strip()
-        return f"\n\n<<< DRAWIO DIAGRAM: {name} >>>\n\n"
-
-    cleaned_html = pattern_drawio.sub(replace_drawio, html_content)
-
-    # 2. PlantUML (Handle namespaces and multiple parameters)
-    params_to_try = ['diagramName', 'title', 'filename', 'name']
+    soup = BeautifulSoup(html_content, 'html.parser')
     
-    for param in params_to_try:
-        pattern_plantuml = re.compile(
-            r'<ac:structured-macro ac:name=".*?plantuml.*?"[^>]*>.*?' + 
-            f'<ac:parameter ac:name="{param}">(.*?)</ac:parameter>' + 
-            r'.*?</ac:structured-macro>', 
-            re.DOTALL | re.IGNORECASE
-        )
+    # Find all structured macros
+    macros = soup.find_all('ac:structured-macro')
+    
+    if not macros:
+        print("      No macros found in HTML.")
+        return str(soup)
         
-        # We only run sub() if we find a match to avoid overwriting
-        if pattern_plantuml.search(cleaned_html):
-            cleaned_html = pattern_plantuml.sub(lambda m: f"\n\n<<< PLANTUML DIAGRAM: {m.group(1).strip()} >>>\n\n", cleaned_html)
-            # Stop looking for other params if we found one
-            break 
-
-    # 3. Fallback for PlantUML (No name found)
-    pattern_plantuml_generic = re.compile(
-        r'<ac:structured-macro ac:name=".*?plantuml.*?"[^>]*>.*?</ac:structured-macro>', 
-        re.DOTALL | re.IGNORECASE
-    )
+    print(f"      Found {len(macros)} macros to process.")
     
-    if pattern_plantuml_generic.search(cleaned_html):
-        print("      ⚠️  Using Fallback for unnamed PlantUML diagram.")
-        cleaned_html = pattern_plantuml_generic.sub("\n\n<<< PLANTUML DIAGRAM >>>\n\n", cleaned_html)
-
-    # 4. General Cleanup
-    fallback_pattern = re.compile(r'<ac:structured-macro[^>]*>.*?</ac:structured-macro>', re.DOTALL)
-    cleaned_html = fallback_pattern.sub("\n\n<<< CONFLUENCE MACRO >>>\n\n", cleaned_html)
-
-    return cleaned_html
-
-def get_confluence_content(base_url, email, token, page_id):
-    auth = (email, token)
-    url = f"{base_url}/rest/api/content/{page_id}?expand=body.storage"
-    print(f"Fetching Confluence page ID: {page_id}...")
-    response = requests.get(url, auth=auth)
-    if response.status_code != 200:
-        raise Exception(f"Confluence API Error: {response.status_code}")
-    raw_html = response.json()['body']['storage']['value']
-    clean_html = clean_confluence_html(raw_html)
-    return md(clean_html)
-
-def find_local_diagram(diagram_name, local_path):
-    if not local_path or not os.path.exists(local_path):
-        return None
-    target_name_normalized = diagram_name.replace(" ", "_").replace("-", "_").lower()
-    
-    extensions = ['.puml', '.pu', '.plantuml']
-    path_obj = Path(local_path)
-    
-    for ext in extensions:
-        # Try exact match
-        potential_file = path_obj / f"{target_name_normalized}{ext}"
-        if potential_file.exists():
-            return potential_file.read_text(encoding='utf-8')
+    for macro in macros:
+        macro_name = macro.get('ac:name', '').lower()
         
-        # Try stem match
-        for file in path_obj.glob(f"*{ext}"):
-            file_stem = file.stem.lower().replace(" ", "_").replace("-", "_")
-            if file_stem == target_name_normalized:
-                print(f"      🗂️  Found matching diagram: {file.name}")
-                return file.read_text(encoding='utf-8')
-    return None
-
-def find_top_header_level(markdown_text):
-    lines = markdown_text.split('\n')
-    min_level = 100 
-    for line in lines:
-        if line.strip().startswith('#'):
-            stripped = line.strip().split()[0]
-            level = len(stripped)
-            if level < min_level:
-                min_level = level
-    return 1 if min_level == 100 else min_level
-
-def chunk_confluence_hierarchical(markdown_text):
-    print("Detecting top header level...")
-    split_level = find_top_header_level(markdown_text)
-    print(f"Splitting Confluence content (Level {split_level})...")
-    
-    lines = markdown_text.split('\n')
-    chunks = []
-    current_header = None
-    current_content = []
-    
-    for line in lines:
-        if line.strip().startswith('#'):
-            stripped_line = line.strip()
-            header_marker = stripped_line.split()[0] 
-            header_level = len(header_marker)
-            if header_level <= split_level:
-                if current_content:
-                    chunks.append({
-                        'header': current_header if current_header else 'Preamble',
-                        'content': "\n".join(current_content)
-                    })
-                current_header = stripped_line
-                current_content = []
-            else:
-                current_content.append(line)
-        else:
-            current_content.append(line)
-            
-    if current_content:
-        chunks.append({
-            'header': current_header if current_header else 'Preamble',
-            'content': "\n".join(current_content)
-        })
-    print(f"✅ Created {len(chunks)} sections.")
-    return chunks
-
-def get_full_github_diff(owner, repo, base_tag, head_tag, token):
-    headers = {
-        "Authorization": f"token {token}",
-        "Accept": "application/vnd.github.v3+json"
-    }
-    url = f"https://api.github.com/repos/{owner}/{repo}/compare/{base_tag}...{head_tag}"
-    print(f"Fetching GitHub Diff: {base_tag} -> {head_tag}...")
-    response = requests.get(url, headers=headers)
-    if response.status_code != 200:
-        raise Exception(f"GitHub API Error: {response.status_code} - {response.text}")
-    diff_content = response.json().get('diff', '')
-    print(f"✅ Diff retrieved.")
-    return diff_content
-
-def analyze_single_section(client, deployment_name, section_header, section_content, full_diff, local_diag_path):
-    """
-    Invokes LLM with Text AND Diagram context.
-    Uses Custom Delimiter Regex.
-    """
-    
-    # CUSTOM DELIMITER REGEX
-    # Matches <<< TYPE DIAGRAM: Name >>> 
-    # (.*?) is a non-greedy match for the name.
-    # Matches PLANTUML or DRAWIO or DRAW (fallback)
-    pattern = re.compile(r'<<<\s*(PLANTUML|DRAWIO|DRAW)\s*DIAGRAM(.*?)\s*>>>', re.IGNORECASE)
-    
-    matches = pattern.findall(section_content)
-    
-    # AGGRESSIVE DEBUG
-    if len(matches) == 0:
-        if "DIAGRAM" in section_content:
-            print(f"      ⚠️  Word 'DIAGRAM' found but regex didn't match.")
-            # Print first 500 chars to see formatting
-            snippet = section_content[:500]
-            print(f"      Section Start Snippet: {snippet}...")
-        else:
-            print(f"      ℹ️  No diagrams detected.")
-
-    diagram_contexts = []
-    
-    for match in matches:
-        diag_type, diag_name = match
-        diag_name = diag_name.strip(" :") # Clean up delimiters
-        if not diag_name:
+        # Check if it is a diagram macro
+        if 'plantuml' in macro_name or 'drawio' in macro_name or 'draw.io' in macro_name:
             diag_name = "Unknown"
-        
-        if "plantuml" in diag_type.lower():
-            diag_content = find_local_diagram(diag_name, local_diag_path)
-            if diag_content:
-                diagram_contexts.append(f"\n--- DIAGRAM CONTEXT: {diag_name} ---\n{diag_content}\n")
-    
-    prompt_diagrams = "\n".join(diagram_contexts) if diagram_contexts else "No local diagrams found."
-    
-    system_prompt = """
-    You are an ASPICE SWE.2 Auditor analyzing a Documentation Section against Code Changes.
-    
-    **Context:**
-    1. Confluence Text Content.
-    2. (Optional) Local PlantUML Diagrams.
-    
-    **Instructions:**
-    1. Check if Code Diff affects Text OR Diagram Logic.
-    2. Return `NO_IMPACT` if aligned.
-    3. If gap found, return ONLY a Markdown table row.
-    
-    **Row Format:**
-    | ID | Severity | Confluence Section | Impact Scope | SWE.2 Observation | Corrective Action |
-    | 1 | 🔴 **NON-CONFORMANT** | <SECTION_TITLE> | UI/Logic/Data/API | [Observation] | [Action] |
-    """
-
-    user_prompt = f"""
-    <SECTION_TITLE>{section_header}</SECTION_TITLE>
-    
-    CONFLUENCE TEXT CONTENT:
-    {section_content}
-
-    --- 
-    
-    LOCAL DIAGRAMS:
-    {prompt_diagrams}
-
-    ---
-    
-    GITHUB CODE DIFF:
-    {full_diff}
-    """
-    
-    try:
-        response = client.chat.completions.create(
-            model=deployment_name,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.1
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        print(f"Error analyzing section '{section_header}': {e}")
-        return "NO_IMPACT"
-
-def main():
-    try:
-        client = AzureOpenAI(
-            api_key=AZURE_OPENAI_API_KEY,
-            api_version=AZURE_OPENAI_API_VERSION,
-            azure_endpoint=AZURE_OPENAI_ENDPOINT
-        )
-    except Exception as e:
-        print(f"❌ Initialization Error: {e}")
-        return
-
-    if not all([CONFLUENCE_BASE_URL, CONFLUENCE_EMAIL, CONFLUENCE_API_TOKEN, PAGE_ID, 
-                GITHUB_TOKEN, GITHUB_REPO_OWNER, GITHUB_REPO_NAME, GITHUB_BASE_TAG, GITHUB_HEAD_TAG]):
-        print("❌ Error: Missing configuration.")
-        return
-
-    try:
-        doc_text = get_confluence_content(CONFLUENCE_BASE_URL, CONFLUENCE_EMAIL, CONFLUENCE_API_TOKEN, PAGE_ID)
-        sections = chunk_confluence_hierarchical(doc_text)
-        full_diff = get_full_github_diff(GITHUB_REPO_OWNER, GITHUB_REPO_NAME, GITHUB_BASE_TAG, GITHUB_HEAD_TAG, GITHUB_TOKEN)
-        
-        if not full_diff:
-            print("⚠️  No Diff found.")
-            return
-
-        print(f"🔄 Starting Analysis across {len(sections)} sections...")
-        accumulated_rows = []
-        
-        for idx, section in enumerate(sections):
-            print(f"   Analyzing Section {idx+1}/{len(sections)}: {section['header']}")
             
-            result = analyze_single_section(
-                client, 
-                AZURE_OPENAI_DEPLOYMENT, 
-                section['header'], 
-                section['content'], 
-                full_diff,
-                LOCAL_DIAGRAMS_PATH
-            )
+            # Try to find name in parameters
+            params = macro.find_all('ac:parameter')
+            for param in params:
+                param_name = param.get('ac:name', '').lower()
+                # Check various possible parameter names
+                if param_name in ['diagramname', 'title', 'filename', 'name']:
+                    diag_name = param.get_text(strip=True)
+                    break
             
-            if result and result != "NO_IMPACT":
-                accumulated_rows.append(result)
-                print(f"      → Impact Found.")
+            # Create placeholder comment node
+            # We use a string node for simplicity
+            if 'plantuml' in macro_name:
+                placeholder = f"\n\n<<< PLANTUML DIAGRAM: {diag_name} >>>\n\n"
             else:
-                print(f"      → No Impact. Skipping.")
-
-        if not accumulated_rows:
-            print("✅ No gaps found.")
-        else:
-            with open("Custom_Delimiter_Report.md", "w", encoding="utf-8") as f:
-                f.write("# ASPICE SWE.2 Analysis\n\n")
-                f.write(f"**Release:** `{GITHUB_BASE_TAG}` → `{GITHUB_HEAD_TAG}`\n\n")
-                f.write("## Analysis\n\n")
-                f.write("| ID | Severity | Confluence Section | Impact Scope | SWE.2 Observation | Corrective Action |\n")
-                f.write("| :--- | :--- | :--- | :--- | :--- | :--- |\n")
-                for row in accumulated_rows:
-                    f.write(row.replace("\n", "<br/>") + "\n")
-            print(f"✅ Report generated.")
-
-    except Exception as e:
-        print(f"❌ Error: {e}")
-
-if __name__ == "__main__":
-    main()
+                placeholder = f"\n\n**[Draw.io Diagram: {diag_name}]**\n\n"
+            
+            # Replace the macro tag with the placeholder text
+            # This deletes the whole <ac:structured-macro> node safely
+            # preventing it from consuming surrounding headers/text
+            macro.replace_with(placeholder)
+    
+    # Convert back to string for markdownify
+    return str(soup)

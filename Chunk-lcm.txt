@@ -1,7 +1,7 @@
 def analyze_single_section(client, deployment_name, section_header, section_content, full_diff, local_diag_path):
     """
     Invokes LLM with Text AND Diagram context.
-    UPDATE: Forces LLM to return corrected diagram code if gap is found.
+    FIXED: Forces LLM to place corrected PlantUML code in table column with valid syntax.
     """
     
     # REFINED REGEX
@@ -44,13 +44,15 @@ def analyze_single_section(client, deployment_name, section_header, section_cont
     2. Return `NO_IMPACT` if aligned.
     3. If gap found, return ONLY a Markdown table row.
     
-    **Corrective Action Requirement:**
-    - If the gap is related to a **PlantUML Diagram**, you MUST output the **FULL CORRECTED PLANTUML CODE** inside the Corrective Action column.
-    - Provide the corrected code block directly in the cell. Do not place it outside the table.
+    **CORRECTIVE ACTION REQUIREMENT (Crucial):**
+    - If the gap is related to a PlantUML Diagram:
+      - You MUST output the **FULL CORRECTED PLANTUML CODE** inside the "Corrective Action" column.
+      - **Modifiy Logic:** Take the provided "LOCAL DIAGRAMS", modify the specific lines to fix the logic, and output the FULL code.
+      - **Syntax:** Ensure strict valid PlantUML syntax (@startuml ... @enduml).
+      - **Formatting:** Do NOT use markdown code fences (```) inside the table cell. Use <br/> for newlines.
     
-    **Row Format:**
-    | ID | Severity | Confluence Section | Impact Scope | SWE.2 Observation | Corrective Action |
-    | 1 | 🔴 **NON-CONFORMANT** | <SECTION_TITLE> | UI/Logic/Data/API | [Observation] | [Correction + Corrected Code if applicable] |
+    **Row Format Example:**
+    | 1 | 🔴 **NON-CONFORMANT** | <SECTION_TITLE> | UI/Logic/Data/API | [Observation] | @startuml<br/>State A -> State B<br/>@enduml |
     """
 
     user_prompt = f"""

@@ -1,84 +1,25 @@
-# ... (previous imports) ...
-from bs4 import BeautifulSoup
-
-def clean_confluence_html(html_content):
-    """
-    Uses BeautifulSoup to safely remove macros.
-    FIX: Forces consistent '<<< TYPE DIAGRAM: Name >>>' format for ALL diagrams.
-    This ensures Regex in analyze_single_section can match them.
-    """
-    print("   Cleaning macros with BeautifulSoup (Consistent Format)...")
-    
-    soup = BeautifulSoup(html_content, 'html.parser')
-    
-    # Find all structured macros
-    macros = soup.find_all('ac:structured-macro')
-    
-    if not macros:
-        print("      No macros found in HTML.")
-        return str(soup)
-        
-    print(f"      Found {len(macros)} macros to process.")
-    
-    for macro in macros:
-        macro_name = macro.get('ac:name', '').lower()
-        
-        # Check if it is a diagram macro
-        if 'plantuml' in macro_name or 'drawio' in macro_name or 'draw.io' in macro_name:
-            diag_name = "Unknown"
-            
-            # Try to find name in parameters
-            params = macro.find_all('ac:parameter')
-            for param in params:
-                param_name = param.get('ac:name', '').lower()
-                if param_name in ['diagramname', 'title', 'filename', 'name']:
-                    diag_name = param.get_text(strip=True)
-                    break
-            
-            # --- FIX: Use consistent ASCII format for BOTH ---
-            # Format: <<< TYPE DIAGRAM: Name >>>
-            # This matches the Regex in analyze_single_section
-            
-            if 'plantuml' in macro_name:
-                placeholder = f"\n\n<<< PLANTUML DIAGRAM: {diag_name} >>>\n\n"
-            else: # Draw.io
-                placeholder = f"\n\n<<< DRAWIO DIAGRAM: {diag_name} >>>\n\n"
-            
-            # Replace the macro tag with the placeholder
-            macro.replace_with(placeholder)
-    
-    return str(soup)
-
-# ... (other functions: get_confluence_content, find_local_diagram, etc.) ...
-
 def analyze_single_section(client, deployment_name, section_header, section_content, full_diff, local_diag_path):
     """
     Invokes LLM with Text AND Diagram context.
-    FIX: Refined Regex to strictly match <<< TYPE DIAGRAM: Name >>> format.
+    UPDATED: Enforces C4 style, crisp action text, and minimal changes.
     """
     
     # REFINED REGEX
-    # Matches: <<< PLANTUML DIAGRAM: Name >>> or <<< DRAWIO DIAGRAM: Name >>>
-    # \s* allows whitespace. \s*:\s* handles the colon clearly.
-    pattern = re.compile(r'<<<\s*(PLANTUML|DRAWIO)\s*DIAGRAM\s*:\s*(.*?)\s*>>>', re.IGNORECASE)
+    pattern = re.compile(r'<<<\s*(PLANTUML|DRAWIO|DRAW)\s*DIAGRAM(.*?)\s*>>>', re.IGNORECASE)
     
     matches = pattern.findall(section_content)
     
     if len(matches) == 0:
         if "DIAGRAM" in section_content:
             print(f"      ⚠️  Word 'DIAGRAM' found but regex didn't match.")
-            # Print snippet to debug
-            idx = section_content.find("DIAGRAM")
-            snippet = section_content[max(0, idx-50):min(len(section_content), idx+50)]
-            clean_snippet = snippet.replace("\n", "\\n")
-            print(f"      Snippet: ...{clean_snippet}...")
+            snippet = section_content[:500]
+            print(f"      Section Start Snippet: {snippet}...")
         else:
             print(f"      ℹ️  No diagrams detected in this section.")
 
     diagram_contexts = []
     
     for match in matches:
-        # Group 1: Type, Group 2: Name
         diag_type, diag_name = match
         diag_name = diag_name.strip(" :")
         if not diag_name:
@@ -103,9 +44,24 @@ def analyze_single_section(client, deployment_name, section_header, section_cont
     2. Return `NO_IMPACT` if aligned.
     3. If gap found, return ONLY a Markdown table row.
     
+    **DIAGRAM CORRECTION RULES (Crucial):**
+    - **Minimal Change:** Only modify the specific states, transitions, or elements mentioned in the Code Diff. Do not rewrite the entire diagram or change its structural style (e.g., if it is C4, keep it C4).
+    - **Alignment:** Ensure the updated diagram is **functionally aligned** with the Code Diff. Do not introduce misleading logic.
+    - **Syntax:** Preserve the exact PlantUML syntax/style of the provided "LOCAL DIAGRAMS".
+    
+    **CORRECTIVE ACTION REQUIREMENTS:**
+    - **Format:** Must be two parts.
+      Part 1: A **short, crisp functional text** instruction (e.g., "Add 'Rejected' state").
+      Part 2: The **Corrected PlantUML Code Block** (inside ```plantuml ... ```).
+    - **Example:** "Add 'Rejected' state. <br/> ```plantuml ... ``` "
+    
     **Row Format:**
     | ID | Severity | Confluence Section | Impact Scope | SWE.2 Observation (Functional) | Corrective Action |
-    | 1 | 🔴 **NON-CONFORMANT** | <SECTION_TITLE> | UI/Logic/Data/API | [Observation] | [Action] |
+    | 1 | 🔴 **NON-CONFORMANT** | <SECTION_TITLE> | UI/Logic/Data/API | [Observation] | [Instruction] <br/> [Corrected Code] |
+    
+    **NOTE ON RENDERING:**
+    - Use Markdown code blocks (` ```plantuml ... ``` ).
+    - Confluence requires the PlantUML app/plugin to render code blocks as visual diagrams.
     """
 
     user_prompt = f"""
@@ -138,5 +94,3 @@ def analyze_single_section(client, deployment_name, section_header, section_cont
     except Exception as e:
         print(f"Error analyzing section '{section_header}': {e}")
         return "NO_IMPACT"
-
-# ... (rest of script: chunk_confluence_hierarchical, main, etc.) ...

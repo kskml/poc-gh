@@ -1,0 +1,15 @@
+Subject: Issue with GitHub Workflow: 404 Error on Write Actions (Branch/PR Creation)
+​Hi Team,
+​I’m currently troubleshooting an issue with one of our GitHub workflows where write actions (specifically creating branches and pull requests) are failing with a 404 error.
+​Problem Overview
+​While the workflow executes, the gh CLI or API calls return a "404 Not Found" when attempting to push a new branch or open a PR. Interestingly, when testing with the same token on a different repository, or using a different token entirely, the actions succeed. This suggests the issue isn't with the script logic, but likely with the permissions or scope of the GITHUB_TOKEN within this specific repository.
+​Investigation & Potential Root Causes
+​A 404 error in GitHub Actions often masks a "403 Forbidden" to prevent private repository metadata from leaking, or it simply means the token doesn't have the authorization to "see" the write path. I suspect one of the following is the culprit:
+​Workflow Permissions: The default GITHUB_TOKEN permissions for the repository might be set to "Read repository contents and packages" instead of "Read and write permissions."
+​Workflow YAML Overrides: The workflow file might have a permissions: block that explicitly restricts the scope.
+​Protected Branches: If the action is trying to interact with a branch that has strict protection rules (and the token lacks bypass privileges), it can sometimes throw an error.
+​Proposed Solution
+​I’d like to verify and update the repository settings. If you have admin access, please check:
+​Settings > Actions > General > Workflow permissions: Ensure it is set to "Read and write permissions".
+​Allow GitHub Actions to create and approve pull requests: Ensure this checkbox is ticked.
+​If the settings look correct, I will need to explicitly define the scopes in the .github/workflows/*.yml file like this:

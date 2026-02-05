@@ -1,34 +1,144 @@
+import os
+import requests
+import re
+import argparse
+import json
+from dotenv import load_dotenv
+from openai import AzureOpenAI
+from markdownify import markdownify as md
+from bs4 import BeautifulSoup
+from pathlib import Path
+
+# Load environment variables
+load_dotenv()
+
+def clean_confluence_html(html_content):
+    """Uses BeautifulSoup to safely remove macros."""
+    print("   Cleaning macros with BeautifulSoup...")
+    soup = BeautifulSoup(html_content, 'html.parser')
+    macros = soup.find_all('ac:structured-macro')
+    
+    if not macros:
+        return str(soup)
+        
+    for macro in macros:
+        macro_name = macro.get('ac:name', '').lower()
+        if 'plantuml' in macro_name or 'drawio' in macro_name or 'draw.io' in macro_name:
+            diag_name = "Unknown"
+            params = macro.find_all('ac:parameter')
+            for param in params:
+                param_name = param.get('ac:name', '').lower()
+                if param_name in ['diagramname', 'title', 'filename', 'name']:
+                    diag_name = param.get_text(strip=True)
+                    break
+            
+            if 'plantuml' in macro_name:
+                placeholder = f"\n\n<<< PLANTUML DIAGRAM: {diag_name} >>>\n\n"
+            else:
+                placeholder = f"\n\n**[Draw.io Diagram: {diag_name}]**\n\n"
+            
+            macro.replace_with(placeholder)
+    
+    return str(soup)
+
+def get_confluence_content(base_url, email, token, page_id):
+    auth = (email, token)
+    url = f"{base_url}/rest/api/content/{page_id}?expand=body.storage"
+    print(f"Fetching Confluence page ID: {page_id}...")
+    response = requests.get(url, auth=auth)
+    if response.status_code != 200:
+        raise Exception(f"Confluence API Error: {response.status_code}")
+    raw_html = response.json()['body']['storage']['value']
+    clean_html = clean_confluence_html(raw_html)
+    return md(clean_html)
+
+def find_local_diagram(diagram_name, local_path):
+    if not local_path or not os.path.exists(local_path):
+        return None
+    target_name_normalized = diagram_name.replace(" ", "_").replace("-", "_").lower()
+    extensions = ['.puml', '.pu', '.plantuml']
+    path_obj = Path(local_path)
+    
+    for ext in extensions:
+        potential_file = path_obj / f"{target_name_normalized}{ext}"
+        if potential_file.exists():
+            return potential_file.read_text(encoding='utf-8')
+        for file in path_obj.glob(f"*{ext}"):
+            file_stem = file.stem.lower().replace(" ", "_").replace("-", "_")
+            if file_stem == target_name_normalized:
+                print(f"      🗂️  Found matching diagram: {file.name}")
+                return file.read_text(encoding='utf-8')
+    return None
+
+def chunk_confluence_hierarchical(markdown_text, split_level):
+    print(f"Splitting Confluence content at Level {split_level}...")
+    lines = markdown_text.split('\n')
+    chunks = []
+    current_header = None
+    current_content = []
+    
+    for line in lines:
+        if line.strip().startswith('#'):
+            stripped_line = line.strip()
+            header_marker = stripped_line.split()[0] 
+            header_level = len(header_marker)
+            if header_level <= split_level:
+                if current_header is not None:
+                    chunks.append({
+                        'header': current_header,
+                        'content': "\n".join(current_content)
+                    })
+                current_header = stripped_line
+                current_content = []
+                current_content.append(line)
+            else:
+                current_content.append(line)
+        else:
+            current_content.append(line)
+            
+    if current_header is not None:
+        chunks.append({
+            'header': current_header,
+            'content': "\n".join(current_content)
+        })
+    print(f"✅ Created {len(chunks)} sections.")
+    return chunks
+
+def get_full_github_diff(owner, repo, base_tag, head_tag, token):
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    url = f"https://api.github.com/repos/{owner}/{repo}/compare/{base_tag}...{head_tag}"
+    print(f"Fetching GitHub Diff: {base_tag} -> {head_tag}...")
+    response = requests.get(url, headers=headers)
+    if response.status_code != 200:
+        raise Exception(f"GitHub API Error: {response.status_code} - {response.text}")
+    diff_content = response.json().get('diff', '')
+    print(f"✅ Diff retrieved.")
+    return diff_content
+
 def analyze_single_section(client, deployment_name, section_header, section_content, full_diff, local_diag_path, exclude_list):
     """
-    Invokes LLM with Text AND Diagram context.
-    STRATEGY SWITCH: LLM generates Data (CSV), Python generates HTML Table.
+    Invokes LLM with JSON Output Strategy.
+    LLM returns pure data (JSON), Script builds the HTML Table.
     """
     
     # 1. Check Exclusions
     for exclude_term in exclude_list:
         if exclude_term.lower() in section_header.lower():
-            print(f"      ⏭️  Section excluded (Matches '{exclude_term}').")
             return "NO_IMPACT"
     
     # 2. Regex for Diagrams
     pattern = re.compile(r'<<<\s*(PLANTUML|DRAWIO|DRAW)\s*DIAGRAM(.*?)\s*>>>', re.IGNORECASE)
     matches = pattern.findall(section_content)
     
-    if len(matches) == 0:
-        if "DIAGRAM" in section_content:
-            snippet = section_content[:500]
-            print(f"      ⚠️  Word 'DIAGRAM' found but regex didn't match. Snippet: {snippet}...")
-        else:
-            print(f"      ℹ️  No diagrams detected in this section.")
-
     diagram_contexts = []
-    
     for match in matches:
         diag_type, diag_name = match
         diag_name = diag_name.strip(" :")
         if not diag_name:
             diag_name = "Unknown"
-        
         if "plantuml" in diag_type.lower():
             diag_content = find_local_diagram(diag_name, local_diag_path)
             if diag_content:
@@ -37,26 +147,27 @@ def analyze_single_section(client, deployment_name, section_header, section_cont
     prompt_diagrams = "\n".join(diagram_contexts) if diagram_contexts else "No local diagrams found for this section."
     
     system_prompt = """
-    You are an ASPICE SWE.2 Auditor analyzing a Documentation Section against Code Changes.
-    
-    **Context:**
-    1. Confluence Text Content.
-    2. (Optional) Local PlantUML Diagrams.
+    You are an ASPICE SWE.2 Auditor.
     
     **Instructions:**
     1. Check if Code Diff affects Text OR Diagram Logic.
-    2. Return `NO_IMPACT` if aligned.
-    3. If gap found, return ONLY a **Pipe-Separated Data Line**.
+    2. If aligned, return JSON: { "status": "no_impact" }.
+    3. If gap found, return a JSON object with exact keys below.
     
-    **OUTPUT FORMAT (Crucial):**
-    - Do NOT output HTML tags (<table>, <tr>, etc.).
-    - Return a single line of data separated by `||`.
-    - Format: Severity || Section || Scope || Observation || Action || Diagram
-    - **Diagram Column:** If updating a diagram, include the FULL CODE BLOCK in this column. Use `<br/>` for line breaks in code.
+    **JSON FORMAT (Strict):**
+    {
+      "status": "gap_found",
+      "severity": "NON-CONFORMANT" or "GAP IDENTIFIED" or "INCONSISTENCY",
+      "section_header": "The exact section title",
+      "observation": "Short functional observation",
+      "corrective_action_text": "Short functional instruction (e.g., 'Add state X').",
+      "updated_diagram_code": "FULL CODE BLOCK here OR null (if no diagram change needed)"
+    }
     
-    **Strict Order:**
-    1 | 🔴 **NON-CONFORMANT** | <SECTION_TITLE> | UI/Logic/Data/API | [Observation] | [Text Only] |
-    1 | 🔴 **NON-CONFORMANT** | <SECTION_TITLE> | UI/Logic/Data/API | [Observation] | [Text Only] || <br/>```plantuml<br/>code<br/>```
+    **Diagram Rules:**
+    - Only include 'updated_diagram_code' key if a diagram needs modification.
+    - Use standard Markdown code block syntax (```plantuml ... ``` ).
+    - Do NOT include extra text in the code block key, only the code.
     """
 
     user_prompt = f"""
@@ -90,74 +201,82 @@ def analyze_single_section(client, deployment_name, section_header, section_cont
         print(f"Error analyzing section '{section_header}': {e}")
         return "NO_IMPACT"
 
-def generate_html_report(rows, base_tag, head_tag):
+def build_html_table(gap_data):
     """
-    Constructs a robust HTML table from the data rows.
-    This ensures valid HTML structure every time.
+    Generates a robust HTML Table string from a list of JSON dictionaries.
+    This guarantees the table structure is never broken.
     """
+    if not gap_data:
+        return "<p>No gaps found.</p>"
+
     html_parts = []
-    
-    # 1. Start Table
     html_parts.append("<table class='wrapped'><tbody>")
     
-    for row_string in rows:
-        # Split by double pipe
-        cells = row_string.split("||")
+    # Define Headers (CSS classes optional, kept simple for now)
+    headers = ["ID", "Severity", "Confluence Section", "Impact Scope", "SWE.2 Observation", "Corrective Action", "Updated PlantUML Diagram"]
+    
+    # Header Row
+    header_html = "<thead><tr>"
+    for h in headers:
+        header_html += f"<th>{h}</th>"
+    header_html += "</tr></thead>"
+    html_parts.append(header_html)
+
+    # Data Rows
+    for idx, item in enumerate(gap_data):
+        # Get values
+        severity = item.get("severity", "").upper()
+        section = item.get("section_header", "")
+        scope = item.get("scope", "Logic/Data/API") # Fallback if LLM misses, though we requested it
+        obs = item.get("observation", "")
+        action_text = item.get("corrective_action_text", "")
+        diag_code = item.get("updated_diagram_code")
         
-        # Ensure we have enough cells (pad with empty if necessary)
-        # Expected: ID, Severity, Section, Scope, Observation, Action, Diagram
-        while len(cells) < 6:
-            cells.append("")
+        # HTML Escaping
+        # Replace | with &#124; to prevent table breaks
+        section_escaped = section.replace("|", "&#124;")
+        obs_escaped = obs.replace("|", "&#124;")
+        action_escaped = action_text.replace("|", "&#124;")
+        diag_escaped = diag_code.replace("|", "&#124;") if diag_code else ""
         
-        row_html = "<tr>"
-        
-        # Process each cell
-        for cell_content in cells:
-            # Escape HTML entities in the text
-            safe_content = cell_content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        # Format Diagram Cell
+        diag_cell_content = ""
+        if diag_code:
+            # Replace newlines in diagram with <br/> so it fits in cell
+            diag_code_clean = diag_code.replace("\n", "<br/>")
+            diag_cell_content = f"<pre><code class='language-plantuml'>{diag_code_clean}</code></pre>"
+        else:
+            diag_cell_content = "<em>N/A</em>"
             
-            # Detect if this cell is the Diagram column (index 5)
-            # and contains code block syntax
-            if "```plantuml" in safe_content:
-                # Convert markdown code block to HTML pre/code block
-                # Remove backticks
-                code_body = safe_content.replace("```plantuml", "").replace("```", "")
-                # Replace newlines with <br/>
-                clean_code = code_body.replace("\n", "<br/>")
-                cell_data = f"<pre><code class='language-plantuml'>{clean_code}</code></pre>"
-            else:
-                # Standard text cell - replace newlines with break
-                cell_data = safe_content.replace("\n", "<br/>")
-            
-            row_html += f"<td>{cell_data}</td>"
-        
+        row_html = f"<tr>"
+        row_html += f"<td>{idx + 1}</td>"
+        row_html += f"<td>{severity}</td>"
+        row_html += f"<td>{section_escaped}</td>"
+        row_html += f"<td>{scope}</td>"
+        row_html += f"<td>{obs_escaped}</td>"
+        row_html += f"<td>{action_escaped}</td>"
+        row_html += f"<td>{diag_cell_content}</td>"
         row_html += "</tr>"
         html_parts.append(row_html)
         
-    # 2. End Table
     html_parts.append("</tbody></table>")
     return "".join(html_parts)
 
 def main():
-    # --- ARGUMENT PARSING ---
-    parser = argparse.ArgumentParser(description="ASPICE SWE.2 Confluence vs Code Analyzer")
+    parser = argparse.ArgumentParser(description="ASPICE SWE.2 Confluence vs Code Analyzer (JSON Mode)")
     
-    parser.add_argument("--base-tag", required=True, help="Base Git Tag (e.g., v1.0.0)")
-    parser.add_argument("--head-tag", required=True, help="Head Git Tag (e.g., v1.1.0)")
+    parser.add_argument("--base-tag", required=True, help="Base Git Tag")
+    parser.add_argument("--head-tag", required=True, help="Head Git Tag")
     parser.add_argument("--page-id", required=True, help="Confluence Page ID")
-    parser.add_argument("--module-path", required=True, help="Local Path to Diagrams (Module Path)")
-    parser.add_argument("--split-level", type=int, default=3, help="Header Level to split on (e.g., 3 for ###)")
-    parser.add_argument("--exclude-sections", default="", help="Comma separated keywords to skip (e.g., 'Use Case, Example')")
-    
+    parser.add_argument("--module-path", required=True, help="Local Path to Diagrams")
+    parser.add_argument("--split-level", type=int, default=3, help="Split Level")
+    parser.add_argument("--exclude-sections", default="", help="Comma separated keywords to skip")
     parser.add_argument("--repo-owner", default=os.getenv("GITHUB_REPO_OWNER"), help="GitHub Repo Owner")
     parser.add_argument("--repo-name", default=os.getenv("GITHUB_REPO_NAME"), help="GitHub Repo Name")
     
     args = parser.parse_args()
-
-    # Process Exclude List
     exclude_list = [x.strip().lower() for x in args.exclude_sections.split(",")] if args.exclude_sections else []
 
-    # --- SETUP ---
     try:
         client = AzureOpenAI(
             api_key=os.getenv("AZURE_OPENAI_API_KEY"),
@@ -179,7 +298,6 @@ def main():
         return
 
     try:
-        # Use Args for inputs
         doc_text = get_confluence_content(confl_base, confl_email, confl_token, args.page_id)
         sections = chunk_confluence_hierarchical(doc_text, args.split_level)
         
@@ -194,12 +312,12 @@ def main():
             return
 
         print(f"🔄 Starting Analysis across {len(sections)} sections...")
-        accumulated_rows = []
+        accumulated_gaps = []
         
         for idx, section in enumerate(sections):
             print(f"   Analyzing Section {idx+1}/{len(sections)}: {section['header']}")
             
-            result = analyze_single_section(
+            result_str = analyze_single_section(
                 client, 
                 deployment_name, 
                 section['header'], 
@@ -209,20 +327,28 @@ def main():
                 exclude_list
             )
             
-            # ROBUST FILTER LOGIC
-            if result and result != "NO_IMPACT":
-                # Check for table rows (starts with ID, Severity etc.)
-                # Pipe-separated rows will typically start with "1 |" or "1 ||"
-                if result.startswith("1") or result.startswith("1 ||"):
-                    accumulated_rows.append(result)
-                    print(f"      → Impact Found.")
+            # Parse JSON
+            if result_str and result_str != "NO_IMPACT":
+                try:
+                    # Use regex to extract JSON in case LLM adds backticks
+                    match = re.search(r'\{.*\}', result_str, re.DOTALL)
+                    if match:
+                        json_str = match.group(0)
+                        data = json.loads(json_str)
+                        
+                        # Only add if LLM status is not no_impact
+                        if data.get("status") != "no_impact":
+                            accumulated_gaps.append(data)
+                            print(f"      → Gap Found.")
+                        else:
+                            print(f"      ✅ Aligned.")
+                    except Exception as e:
+                        print(f"      ⚠️  Failed to parse JSON: {e}")
                 else:
-                    print(f"      ⚠️  Skipping (Not a data row).")
-            else:
-                print(f"      → No Impact. Skipping.")
+                    print(f"      ✅ No Impact.")
 
         # Generate Report
-        if not accumulated_rows:
+        if not accumulated_gaps:
             print("✅ No gaps found.")
         else:
             with open("Arg_Analyzer_Report.md", "w", encoding="utf-8") as f:
@@ -236,11 +362,11 @@ def main():
                 f.write("| 🟡 **INCONSISTENCY** | Minor mismatch. |\n\n")
                 f.write("## Analysis\n\n")
                 
-                # Call HTML generation function
-                table_html = generate_html_report(accumulated_rows, args.base_tag, args.head_tag)
+                # Build Table
+                table_html = build_html_table(accumulated_gaps)
                 f.write(table_html)
-                
-            print(f"✅ Report generated (Python-Generated HTML Table).")
+            
+            print(f"✅ Report generated (HTML Table via JSON).")
 
     except Exception as e:
         print(f"❌ Error: {e}")

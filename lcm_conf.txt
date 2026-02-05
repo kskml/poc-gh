@@ -1,7 +1,7 @@
 def analyze_single_section(client, deployment_name, section_header, section_content, full_diff, local_diag_path, exclude_list):
     """
     Invokes LLM with Text AND Diagram context.
-    STRATEGY SWITCH: HTML Tables for robustness.
+    STRATEGY SWITCH: LLM generates Data (CSV), Python generates HTML Table.
     """
     
     # 1. Check Exclusions
@@ -45,37 +45,18 @@ def analyze_single_section(client, deployment_name, section_header, section_cont
     
     **Instructions:**
     1. Check if Code Diff affects Text OR Diagram Logic.
-    2. If aligned, return exactly: `NO_IMPACT`.
-    3. If gap found, return ONLY a **HTML Table Row**.
+    2. Return `NO_IMPACT` if aligned.
+    3. If gap found, return ONLY a **Pipe-Separated Data Line**.
     
-    **CORRECTIVE ACTION REQUIREMENTS:**
-    - **Column Separation:** The "Corrective Action" and "Updated PlantUML Diagram" columns must be separated. Do not mix code and text in the same cell.
-    - **Corrective Action Cell:** Only short functional text (e.g., "Add 'Rejected' state").
-    - **Diagram Cell:** Contains the FULL CORRECTED PLANTUML CODE block.
-    - **Diagram Formatting:** Use Markdown Code Blocks (```plantuml ... ```) inside the HTML cell. 
-    - **Line Breaks:** Use <br/> for newlines inside code blocks.
+    **OUTPUT FORMAT (Crucial):**
+    - Do NOT output HTML tags (<table>, <tr>, etc.).
+    - Return a single line of data separated by `||`.
+    - Format: Severity || Section || Scope || Observation || Action || Diagram
+    - **Diagram Column:** If updating a diagram, include the FULL CODE BLOCK in this column. Use `<br/>` for line breaks in code.
     
-    **HTML ROW FORMAT (Strict):**
-    <tr>
-      <td>ID</td>
-      <td>Severity</td>
-      <td>Confluence Section</td>
-      <td>Impact Scope</td>
-      <td>SWE.2 Observation</td>
-      <td>Corrective Action</td>
-      <td>Updated PlantUML Diagram</td>
-    </tr>
-    
-    **Example:**
-    <tr>
-      <td>1</td>
-      <td>🔴 **NON-CONFORMANT**</td>
-      <td><SECTION_TITLE></td>
-      <td>UI/Logic/Data/API</td>
-      <td>[Observation]</td>
-      <td>[Short Text]</td>
-      <td>```plantuml<br/>@startuml<br/>...<br/>@enduml<br/>```</td>
-    </tr>
+    **Strict Order:**
+    1 | 🔴 **NON-CONFORMANT** | <SECTION_TITLE> | UI/Logic/Data/API | [Observation] | [Text Only] |
+    1 | 🔴 **NON-CONFORMANT** | <SECTION_TITLE> | UI/Logic/Data/API | [Observation] | [Text Only] || <br/>```plantuml<br/>code<br/>```
     """
 
     user_prompt = f"""
@@ -108,6 +89,54 @@ def analyze_single_section(client, deployment_name, section_header, section_cont
     except Exception as e:
         print(f"Error analyzing section '{section_header}': {e}")
         return "NO_IMPACT"
+
+def generate_html_report(rows, base_tag, head_tag):
+    """
+    Constructs a robust HTML table from the data rows.
+    This ensures valid HTML structure every time.
+    """
+    html_parts = []
+    
+    # 1. Start Table
+    html_parts.append("<table class='wrapped'><tbody>")
+    
+    for row_string in rows:
+        # Split by double pipe
+        cells = row_string.split("||")
+        
+        # Ensure we have enough cells (pad with empty if necessary)
+        # Expected: ID, Severity, Section, Scope, Observation, Action, Diagram
+        while len(cells) < 6:
+            cells.append("")
+        
+        row_html = "<tr>"
+        
+        # Process each cell
+        for cell_content in cells:
+            # Escape HTML entities in the text
+            safe_content = cell_content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            
+            # Detect if this cell is the Diagram column (index 5)
+            # and contains code block syntax
+            if "```plantuml" in safe_content:
+                # Convert markdown code block to HTML pre/code block
+                # Remove backticks
+                code_body = safe_content.replace("```plantuml", "").replace("```", "")
+                # Replace newlines with <br/>
+                clean_code = code_body.replace("\n", "<br/>")
+                cell_data = f"<pre><code class='language-plantuml'>{clean_code}</code></pre>"
+            else:
+                # Standard text cell - replace newlines with break
+                cell_data = safe_content.replace("\n", "<br/>")
+            
+            row_html += f"<td>{cell_data}</td>"
+        
+        row_html += "</tr>"
+        html_parts.append(row_html)
+        
+    # 2. End Table
+    html_parts.append("</tbody></table>")
+    return "".join(html_parts)
 
 def main():
     # --- ARGUMENT PARSING ---
@@ -150,6 +179,7 @@ def main():
         return
 
     try:
+        # Use Args for inputs
         doc_text = get_confluence_content(confl_base, confl_email, confl_token, args.page_id)
         sections = chunk_confluence_hierarchical(doc_text, args.split_level)
         
@@ -181,12 +211,13 @@ def main():
             
             # ROBUST FILTER LOGIC
             if result and result != "NO_IMPACT":
-                # Check if it's an HTML Row (starts with <tr>)
-                if result.startswith("<tr>"):
+                # Check for table rows (starts with ID, Severity etc.)
+                # Pipe-separated rows will typically start with "1 |" or "1 ||"
+                if result.startswith("1") or result.startswith("1 ||"):
                     accumulated_rows.append(result)
                     print(f"      → Impact Found.")
                 else:
-                    print(f"      ✅ No Impact (Filtered).")
+                    print(f"      ⚠️  Skipping (Not a data row).")
             else:
                 print(f"      → No Impact. Skipping.")
 
@@ -205,28 +236,14 @@ def main():
                 f.write("| 🟡 **INCONSISTENCY** | Minor mismatch. |\n\n")
                 f.write("## Analysis\n\n")
                 
-                # START HTML TABLE
-                f.write("<table>\n")
-                f.write("<thead>\n")
-                f.write("<tr>\n")
-                f.write("<th>ID</th>\n")
-                f.write("<th>Severity</th>\n")
-                f.write("<th>Confluence Section</th>\n")
-                f.write("<th>Impact Scope</th>\n")
-                f.write("<th>SWE.2 Observation</th>\n")
-                f.write("<th>Corrective Action</th>\n")
-                f.write("<th>Updated PlantUML Diagram</th>\n")
-                f.write("</tr>\n")
-                f.write("</thead>\n")
-                f.write("<tbody>\n")
+                # Call HTML generation function
+                table_html = generate_html_report(accumulated_rows, args.base_tag, args.head_tag)
+                f.write(table_html)
                 
-                for row in accumulated_rows:
-                    f.write(row + "\n")
-                    
-                f.write("</tbody>\n")
-                f.write("</table>\n")
-            
-            print(f"✅ Report generated (HTML Table Format).")
+            print(f"✅ Report generated (Python-Generated HTML Table).")
 
     except Exception as e:
         print(f"❌ Error: {e}")
+
+if __name__ == "__main__":
+    main()

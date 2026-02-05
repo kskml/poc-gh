@@ -1,19 +1,22 @@
-def analyze_single_section(client, deployment_name, section_header, section_content, full_diff, local_diag_path):
+def analyze_single_section(client, deployment_name, section_header, section_content, full_diff, local_diag_path, exclude_list):
     """
     Invokes LLM with Text AND Diagram context.
-    UPDATED: Enforces C4 style, crisp action text, and minimal changes.
+    FIXED: Strict Single-Cell Output and Pipe Escaping for table stability.
     """
     
-    # REFINED REGEX
-    pattern = re.compile(r'<<<\s*(PLANTUML|DRAWIO|DRAW)\s*DIAGRAM(.*?)\s*>>>', re.IGNORECASE)
+    # 1. Check Exclusions
+    for exclude_term in exclude_list:
+        if exclude_term.lower() in section_header.lower():
+            print(f"      ⏭️  Section excluded (Matches '{exclude_term}').")
+            return "NO_IMPACT"
     
+    # 2. Regex for Diagrams
+    pattern = re.compile(r'<<<\s*(PLANTUML|DRAWIO|DRAW)\s*DIAGRAM(.*?)\s*>>>', re.IGNORECASE)
     matches = pattern.findall(section_content)
     
     if len(matches) == 0:
         if "DIAGRAM" in section_content:
             print(f"      ⚠️  Word 'DIAGRAM' found but regex didn't match.")
-            snippet = section_content[:500]
-            print(f"      Section Start Snippet: {snippet}...")
         else:
             print(f"      ℹ️  No diagrams detected in this section.")
 
@@ -44,24 +47,19 @@ def analyze_single_section(client, deployment_name, section_header, section_cont
     2. Return `NO_IMPACT` if aligned.
     3. If gap found, return ONLY a Markdown table row.
     
-    **DIAGRAM CORRECTION RULES (Crucial):**
-    - **Minimal Change:** Only modify the specific states, transitions, or elements mentioned in the Code Diff. Do not rewrite the entire diagram or change its structural style (e.g., if it is C4, keep it C4).
-    - **Alignment:** Ensure the updated diagram is **functionally aligned** with the Code Diff. Do not introduce misleading logic.
-    - **Syntax:** Preserve the exact PlantUML syntax/style of the provided "LOCAL DIAGRAMS".
+    **CORRECTIVE ACTION RULES (Crucial):**
+    - **Single Cell:** The "Corrective Action" column MUST be ONE SINGLE CELL.
+      - Do NOT split text and diagram into separate rows or break the table line.
+      - If a diagram update is needed, embed the XML macro immediately after the description text using <br/>.
+      - Example: "Update flow. <br/> <ac:macro>..."
     
-    **CORRECTIVE ACTION REQUIREMENTS:**
-    - **Format:** Must be two parts.
-      Part 1: A **short, crisp functional text** instruction (e.g., "Add 'Rejected' state").
-      Part 2: The **Corrected PlantUML Code Block** (inside ```plantuml ... ```).
-    - **Example:** "Add 'Rejected' state. <br/> ```plantuml ... ``` "
+    - **Pipe Escaping:** The Confluence XML Macro contains pipes (|). You MUST replace all `|` characters in the macro with `&#124;` (HTML entity) to prevent the table from breaking.
     
-    **Row Format:**
-    | ID | Severity | Confluence Section | Impact Scope | SWE.2 Observation (Functional) | Corrective Action |
-    | 1 | 🔴 **NON-CONFORMANT** | <SECTION_TITLE> | UI/Logic/Data/API | [Observation] | [Instruction] <br/> [Corrected Code] |
+    - **Diagram Alignment:** Strictly verify the generated XML Macro reflects the code diff logic.
     
-    **NOTE ON RENDERING:**
-    - Use Markdown code blocks (` ```plantuml ... ``` ).
-    - Confluence requires the PlantUML app/plugin to render code blocks as visual diagrams.
+    **Strict Row Format:**
+    | ID | Severity | Confluence Section | Impact Scope | SWE.2 Observation | Corrective Action |
+    | 1 | 🔴 **NON-CONFORMANT** | <SECTION_TITLE> | UI/Logic/Data/API | [Observation] | [Description] <br/> [XML Macro with escaped pipes] |
     """
 
     user_prompt = f"""

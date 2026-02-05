@@ -1,7 +1,9 @@
-def analyze_single_section(client, deployment_name, section_header, section_content, full_diff, local_diag_path):
+# ... (imports and helper functions) ...
+
+def analyze_single_section(client, deployment_name, section_header, section_content, full_diff, local_diag_path, exclude_list):
     """
     Invokes LLM with Text AND Diagram context.
-    UPDATED: Brevity, Standard PlantUML, Strict Conformant Filtering.
+    UPDATED: Strict formatting to prevent broken tables and enforce NO_IMPACT returns.
     """
     
     # 1. Check Exclusions
@@ -47,17 +49,18 @@ def analyze_single_section(client, deployment_name, section_header, section_cont
     **Instructions:**
     1. Check if Code Diff affects Text OR Diagram Logic.
     2. **Strict Output Rule:**
-       - If changes are aligned with documentation (Severity: CONFORMANT), return exactly: `NO_IMPACT`. Do NOT generate a table row.
-       - If there IS a gap (NON-CONFORMANT, GAP, INCONSISTENCY), return ONLY a Markdown table row.
+       - If the code is fully aligned (No Gap), return EXACTLY: `NO_IMPACT`. Do not write a table row.
+       - If there IS a gap, return ONLY a Markdown table row.
+       - Do NOT include table headers (| ID | ...). Just the data row.
     
-    **CORRECTIVE ACTION REQUIREMENTS:**
-    - **Brevity:** The text part of the "Corrective Action" must be **very short and crisp** (e.g., "Add 'Rejected' state").
-    - **Diagram Format:** If generating a diagram, use **standard PlantUML code block** ( ```plantuml ... ``` ). 
-      Do NOT use Confluence XML macros. Ensure valid C4/standard syntax.
+    **TABLE FORMAT REQUIREMENTS (Crucial for Rendering):**
+    - **Single Line:** The entire Markdown table row must be on ONE LINE. Do NOT use the 'Enter' key (newlines `\\n`) for the table structure.
+    - **Line Breaks:** Use `<br/>` for newlines within a cell.
+    - **Code Blocks:** If you include PlantUML code, replace all newlines in the code with `<br/>` so it stays in one cell.
+    - **Corrective Action:** Must be short and crisp.
     
-    **Row Format (If Gap Found):**
-    | ID | Severity | Confluence Section | Impact Scope | SWE.2 Observation | Corrective Action |
-    | 1 | 🔴 **NON-CONFORMANT** | <SECTION_TITLE> | UI/Logic/Data/API | [Observation] | [Short Text] <br/> ```plantuml ... ``` |
+    **Row Format (Example):**
+    | 1 | 🔴 **NON-CONFORMANT** | <SECTION_TITLE> | UI/Logic/Data/API | [Observation] | [Short Text] <br/> ```plantuml code ``` |
     """
 
     user_prompt = f"""
@@ -90,3 +93,134 @@ def analyze_single_section(client, deployment_name, section_header, section_cont
     except Exception as e:
         print(f"Error analyzing section '{section_header}': {e}")
         return "NO_IMPACT"
+
+def sanitize_table_row(row_string):
+    """
+    Sanitizes the LLM output to fix broken tables.
+    1. Replaces all newlines with <br/>.
+    2. Removes empty lines.
+    """
+    # Replace newlines with <br/> to ensure one-line table row
+    # We do this globally on the row to be safe
+    clean_row = row_string.replace("\n", "<br/>")
+    # Remove double <br/> which might occur
+    clean_row = clean_row.replace("<br/><br/>", "<br/>")
+    return clean_row.strip()
+
+def main():
+    # --- ARGUMENT PARSING ---
+    parser = argparse.ArgumentParser(description="ASPICE SWE.2 Confluence vs Code Analyzer")
+    
+    parser.add_argument("--base-tag", required=True, help="Base Git Tag (e.g., v1.0.0)")
+    parser.add_argument("--head-tag", required=True, help="Head Git Tag (e.g., v1.1.0)")
+    parser.add_argument("--page-id", required=True, help="Confluence Page ID")
+    parser.add_argument("--module-path", required=True, help="Local Path to Diagrams (Module Path)")
+    parser.add_argument("--split-level", type=int, default=3, help="Header Level to split on (e.g., 3 for ###)")
+    parser.add_argument("--exclude-sections", default="", help="Comma separated keywords to skip (e.g., 'Use Case, Example')")
+    
+    parser.add_argument("--repo-owner", default=os.getenv("GITHUB_REPO_OWNER"), help="GitHub Repo Owner")
+    parser.add_argument("--repo-name", default=os.getenv("GITHUB_REPO_NAME"), help="GitHub Repo Name")
+    
+    args = parser.parse_args()
+    exclude_list = [x.strip().lower() for x in args.exclude_sections.split(",")] if args.exclude_sections else []
+
+    # --- SETUP ---
+    try:
+        client = AzureOpenAI(
+            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
+        )
+    except Exception as e:
+        print(f"❌ Initialization Error: {e}")
+        return
+
+    confl_base = os.getenv("CONFLUENCE_BASE_URL")
+    confl_email = os.getenv("CONFLUENCE_EMAIL")
+    confl_token = os.getenv("CONFLUENCE_API_TOKEN")
+    github_token = os.getenv("GITHUB_TOKEN")
+    deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+
+    if not all([confl_base, confl_email, confl_token, github_token, deployment_name]):
+        print("❌ Error: Missing Secrets in Environment Variables.")
+        return
+
+    try:
+        doc_text = get_confluence_content(confl_base, confl_email, confl_token, args.page_id)
+        sections = chunk_confluence_hierarchical(doc_text, args.split_level)
+        
+        full_diff = get_full_github_diff(
+            args.repo_owner, args.repo_name, 
+            args.base_tag, args.head_tag, 
+            github_token
+        )
+        
+        if not full_diff:
+            print("⚠️  No Diff found.")
+            return
+
+        print(f"🔄 Starting Analysis across {len(sections)} sections...")
+        accumulated_rows = []
+        
+        for idx, section in enumerate(sections):
+            print(f"   Analyzing Section {idx+1}/{len(sections)}: {section['header']}")
+            
+            result = analyze_single_section(
+                client, 
+                deployment_name, 
+                section['header'], 
+                section['content'], 
+                full_diff,
+                args.module_path,
+                exclude_list
+            )
+            
+            # STRICT FILTER LOGIC
+            # 1. Check for exact NO_IMPACT return
+            # 2. Sanitize the row (fixes broken tables)
+            # 3. Filter out junk (headers, etc.)
+            
+            if result and result != "NO_IMPACT":
+                # Sanitize to fix potential newlines
+                clean_result = sanitize_table_row(result)
+                
+                # Additional filtering: Don't save if it looks like a header row
+                if "| ID |" not in clean_result and "| 1 |" not in clean_result:
+                    # Check for variations of "no impact" text inside the cell
+                    # (In case LLM ignores the "return NO_IMPACT" rule and writes a row)
+                    clean_lower = clean_result.lower()
+                    no_action_keywords = ["no action", "no impact", "aligned", "conformant", "n/a", "none"]
+                    
+                    # Only add if NO keywords found
+                    if not any(keyword in clean_lower for keyword in no_action_keywords):
+                        accumulated_rows.append(clean_result)
+                        print(f"      → Impact Found.")
+                    else:
+                        print(f"      ✅ No Impact (Filtered).")
+                else:
+                    print(f"      ✅ No Impact (Filtered).")
+            else:
+                print(f"      → No Impact. Skipping.")
+
+        if not accumulated_rows:
+            print("✅ No gaps found.")
+        else:
+            with open("Arg_Analyzer_Report.md", "w", encoding="utf-8") as f:
+                f.write("# ASPICE SWE.2 Analysis\n\n")
+                f.write(f"**Release:** `{args.base_tag}` → `{args.head_tag}`\n\n")
+                f.write("## Assessment Criteria\n\n")
+                f.write("| Option | Definition |\n")
+                f.write("| :--- | :--- |\n")
+                f.write("| 🔴 **NON-CONFORMANT** | Code contradicts doc or diagram. |\n")
+                f.write("| 🟠 **GAP IDENTIFIED** | Code adds missing feature. |\n")
+                f.write("| 🔴 **NON-CONFORMANT / GAP** | Complex change. |\n")
+                f.write("| 🟡 **INCONSISTENCY** | Minor mismatch. |\n\n")
+                f.write("## Analysis\n\n")
+                f.write("| ID | Severity | Confluence Section | Impact Scope | SWE.2 Observation | Corrective Action |\n")
+                f.write("| :--- | :--- | :--- | :--- | :--- | :--- |\n")
+                for row in accumulated_rows:
+                    f.write(row + "\n")
+            print(f"✅ Report generated.")
+
+    except Exception as e:
+        print(f"❌ Error: {e}")

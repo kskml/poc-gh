@@ -1,9 +1,7 @@
-# ... (imports and helper functions) ...
-
 def analyze_single_section(client, deployment_name, section_header, section_content, full_diff, local_diag_path, exclude_list):
     """
     Invokes LLM with Text AND Diagram context.
-    UPDATED: Strict formatting to prevent broken tables and enforce NO_IMPACT returns.
+    STRATEGY SWITCH: Output HTML Table for robust rendering of Code/Diagrams.
     """
     
     # 1. Check Exclusions
@@ -18,7 +16,6 @@ def analyze_single_section(client, deployment_name, section_header, section_cont
     
     if len(matches) == 0:
         if "DIAGRAM" in section_content:
-            print(f"      ⚠️  Word 'DIAGRAM' found but regex didn't match.")
             snippet = section_content[:500]
             print(f"      Section Start Snippet: {snippet}...")
         else:
@@ -49,18 +46,23 @@ def analyze_single_section(client, deployment_name, section_header, section_cont
     **Instructions:**
     1. Check if Code Diff affects Text OR Diagram Logic.
     2. **Strict Output Rule:**
-       - If the code is fully aligned (No Gap), return EXACTLY: `NO_IMPACT`. Do not write a table row.
-       - If there IS a gap, return ONLY a Markdown table row.
-       - Do NOT include table headers (| ID | ...). Just the data row.
+       - If code is fully aligned (NO GAP), return exactly: `NO_IMPACT`. (No extra text).
+       - If there IS a gap, return ONLY a **HTML Table Row** (<tr>...</tr>).
+       - Do NOT output HTML table tags (<table> or headers).
     
-    **TABLE FORMAT REQUIREMENTS (Crucial for Rendering):**
-    - **Single Line:** The entire Markdown table row must be on ONE LINE. Do NOT use the 'Enter' key (newlines `\\n`) for the table structure.
-    - **Line Breaks:** Use `<br/>` for newlines within a cell.
-    - **Code Blocks:** If you include PlantUML code, replace all newlines in the code with `<br/>` so it stays in one cell.
-    - **Corrective Action:** Must be short and crisp.
+    **Corrective Action Requirements:**
+    - The "Corrective Action" column must have two parts: Short Functional Text + Valid PlantUML Code Block.
+    - For the code block, use standard HTML <pre><code> tags.
     
-    **Row Format (Example):**
-    | 1 | 🔴 **NON-CONFORMANT** | <SECTION_TITLE> | UI/Logic/Data/API | [Observation] | [Short Text] <br/> ```plantuml code ``` |
+    **HTML Row Format:**
+    <tr>
+      <td>ID</td>
+      <td>Severity</td>
+      <td>Confluence Section</td>
+      <td>Impact Scope</td>
+      <td>SWE.2 Observation</td>
+      <td>Corrective Action (Text + HTML Code Block)</td>
+    </tr>
     """
 
     user_prompt = f"""
@@ -94,19 +96,6 @@ def analyze_single_section(client, deployment_name, section_header, section_cont
         print(f"Error analyzing section '{section_header}': {e}")
         return "NO_IMPACT"
 
-def sanitize_table_row(row_string):
-    """
-    Sanitizes the LLM output to fix broken tables.
-    1. Replaces all newlines with <br/>.
-    2. Removes empty lines.
-    """
-    # Replace newlines with <br/> to ensure one-line table row
-    # We do this globally on the row to be safe
-    clean_row = row_string.replace("\n", "<br/>")
-    # Remove double <br/> which might occur
-    clean_row = clean_row.replace("<br/><br/>", "<br/>")
-    return clean_row.strip()
-
 def main():
     # --- ARGUMENT PARSING ---
     parser = argparse.ArgumentParser(description="ASPICE SWE.2 Confluence vs Code Analyzer")
@@ -122,6 +111,8 @@ def main():
     parser.add_argument("--repo-name", default=os.getenv("GITHUB_REPO_NAME"), help="GitHub Repo Name")
     
     args = parser.parse_args()
+
+    # Process Exclude List
     exclude_list = [x.strip().lower() for x in args.exclude_sections.split(",")] if args.exclude_sections else []
 
     # --- SETUP ---
@@ -135,6 +126,7 @@ def main():
         print(f"❌ Initialization Error: {e}")
         return
 
+    # Get Secrets from Environment
     confl_base = os.getenv("CONFLUENCE_BASE_URL")
     confl_email = os.getenv("CONFLUENCE_EMAIL")
     confl_token = os.getenv("CONFLUENCE_API_TOKEN")
@@ -175,33 +167,18 @@ def main():
                 exclude_list
             )
             
-            # STRICT FILTER LOGIC
-            # 1. Check for exact NO_IMPACT return
-            # 2. Sanitize the row (fixes broken tables)
-            # 3. Filter out junk (headers, etc.)
+            # ROBUST FILTER LOGIC
+            # 1. Strip whitespace/newlines aggressively
+            # 2. Check for "NO_IMPACT" case-insensitive as a substring
+            clean_result = result.strip().replace("\n", "").replace("\r", "")
             
-            if result and result != "NO_IMPACT":
-                # Sanitize to fix potential newlines
-                clean_result = sanitize_table_row(result)
-                
-                # Additional filtering: Don't save if it looks like a header row
-                if "| ID |" not in clean_result and "| 1 |" not in clean_result:
-                    # Check for variations of "no impact" text inside the cell
-                    # (In case LLM ignores the "return NO_IMPACT" rule and writes a row)
-                    clean_lower = clean_result.lower()
-                    no_action_keywords = ["no action", "no impact", "aligned", "conformant", "n/a", "none"]
-                    
-                    # Only add if NO keywords found
-                    if not any(keyword in clean_lower for keyword in no_action_keywords):
-                        accumulated_rows.append(clean_result)
-                        print(f"      → Impact Found.")
-                    else:
-                        print(f"      ✅ No Impact (Filtered).")
-                else:
-                    print(f"      ✅ No Impact (Filtered).")
+            if "NO_IMPACT" not in clean_result.upper():
+                accumulated_rows.append(result)
+                print(f"      → Impact Found.")
             else:
                 print(f"      → No Impact. Skipping.")
 
+        # Generate Report
         if not accumulated_rows:
             print("✅ No gaps found.")
         else:
@@ -209,18 +186,34 @@ def main():
                 f.write("# ASPICE SWE.2 Analysis\n\n")
                 f.write(f"**Release:** `{args.base_tag}` → `{args.head_tag}`\n\n")
                 f.write("## Assessment Criteria\n\n")
-                f.write("| Option | Definition |\n")
-                f.write("| :--- | :--- |\n")
+                f.write("| Option | Definition |\n| :--- | :--- |\n")
                 f.write("| 🔴 **NON-CONFORMANT** | Code contradicts doc or diagram. |\n")
                 f.write("| 🟠 **GAP IDENTIFIED** | Code adds missing feature. |\n")
                 f.write("| 🔴 **NON-CONFORMANT / GAP** | Complex change. |\n")
                 f.write("| 🟡 **INCONSISTENCY** | Minor mismatch. |\n\n")
                 f.write("## Analysis\n\n")
-                f.write("| ID | Severity | Confluence Section | Impact Scope | SWE.2 Observation | Corrective Action |\n")
-                f.write("| :--- | :--- | :--- | :--- | :--- | :--- |\n")
+                
+                # START HTML TABLE
+                f.write("<table>\n")
+                f.write("<thead>\n")
+                f.write("<tr>\n")
+                f.write("<th>ID</th>\n")
+                f.write("<th>Severity</th>\n")
+                f.write("<th>Confluence Section</th>\n")
+                f.write("<th>Impact Scope</th>\n")
+                f.write("<th>SWE.2 Observation</th>\n")
+                f.write("<th>Corrective Action</th>\n")
+                f.write("</tr>\n")
+                f.write("</thead>\n")
+                f.write("<tbody>\n")
+                
                 for row in accumulated_rows:
                     f.write(row + "\n")
-            print(f"✅ Report generated.")
+                    
+                f.write("</tbody>\n")
+                f.write("</table>\n")
+                
+            print(f"✅ Report generated (HTML Table Format).")
 
     except Exception as e:
         print(f"❌ Error: {e}")

@@ -2,71 +2,101 @@ import os
 import json
 import base64
 import requests
-from github import Github, GithubException
 from openai import OpenAI
 
 # --- Configuration & Clients ---
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-g = Github(GITHUB_TOKEN)
+# GitHub REST API Headers
+HEADERS = {
+    "Authorization": f"Bearer {GITHUB_TOKEN}",
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28"
+}
+
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-# --- Step 1: Data Ingestion Functions ---
+# --- Helper: Generic GitHub REST Calls ---
 
-def get_pr_diff(repo_name, pr_number):
-    """Fetches the .diff content for a specific PR."""
-    repo = g.get_repo(repo_name)
-    pr = repo.get_pull(pr_number)
-    response = requests.get(pr.diff_url)
-    return response.text, pr.base.ref, pr.head.ref
+def github_get(url):
+    """Generic GET request."""
+    response = requests.get(url, headers=HEADERS)
+    response.raise_for_status()
+    return response.json()
+
+def github_put(url, data):
+    """Generic PUT request."""
+    response = requests.put(url, headers=HEADERS, json=data)
+    response.raise_for_status()
+    return response.json()
+
+def github_post(url, data):
+    """Generic POST request."""
+    response = requests.post(url, headers=HEADERS, json=data)
+    response.raise_for_status()
+    return response.json()
+
+# --- Step 1: Data Ingestion (REST API) ---
+
+def get_pr_data(repo_name, pr_number):
+    """Fetches PR metadata (diff url, branches) and the diff content."""
+    url = f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}"
+    pr_data = github_get(url)
+    
+    # Get the diff content
+    diff_url = pr_data["diff_url"]
+    diff_response = requests.get(diff_url)
+    diff_response.raise_for_status()
+    
+    return {
+        "diff": diff_response.text,
+        "base_branch": pr_data["base"]["ref"],
+        "head_branch": pr_data["head"]["ref"],
+        "head_sha": pr_data["head"]["sha"] # Needed to create new branch
+    }
 
 def get_all_adoc_files(repo_name, branch_ref):
-    """Recursively fetches all .adoc files from the repo."""
-    repo = g.get_repo(repo_name)
+    """Fetches all .adoc files using Git Tree API."""
+    print(f"Fetching tree for branch {branch_ref}...")
+    # 1. Get the recursive tree
+    tree_url = f"https://api.github.com/repos/{repo_name}/git/trees/{branch_ref}?recursive=1"
+    tree_data = github_get(tree_url)
+    
     docs_map = {}
     
-    try:
-        # Get the recursive tree for the branch
-        tree = repo.get_git_tree(branch_ref, recursive=True)
-        for element in tree.tree:
-            if element.type == "blob" and element.path.endswith(".adoc"):
-                try:
-                    content_file = repo.get_contents(element.path, ref=branch_ref)
-                    decoded_content = base64.b64decode(content_file.content).decode('utf-8')
-                    docs_map[element.path] = decoded_content
-                except Exception as e:
-                    print(f"Warning: Could not read {element.path}: {e}")
-    except Exception as e:
-        print(f"Error fetching repo tree: {e}")
-        
+    # 2. Filter for .adoc files
+    for item in tree_data.get("tree", []):
+        if item["type"] == "blob" and item["path"].endswith(".adoc"):
+            # 3. Fetch file content via Contents API
+            # Note: Contents API returns base64 encoded content
+            content_url = f"https://api.github.com/repos/{repo_name}/contents/{item['path']}?ref={branch_ref}"
+            try:
+                file_data = github_get(content_url)
+                decoded_content = base64.b64decode(file_data["content"]).decode('utf-8')
+                docs_map[item["path"]] = decoded_content
+            except Exception as e:
+                print(f"Error reading {item['path']}: {e}")
+                
     return docs_map
 
 # --- Step 2: LLM Analysis (Batched) ---
 
 def chunk_dict(data, chunk_size=3):
-    """Helper to split a dictionary into chunks."""
     items = list(data.items())
     for i in range(0, len(items), chunk_size):
         yield dict(items[i:i + chunk_size])
 
 def analyze_diff_in_batches(code_diff, docs_map, batch_size=3):
-    """
-    Compares code diff with docs in batches to identify gaps.
-    Returns a consolidated list of proposed changes.
-    """
+    """Analyzes docs in batches to find gaps."""
     all_proposed_changes = []
-    
-    # Split docs into batches to avoid token limits
     batches = list(chunk_dict(docs_map, batch_size))
-    total_batches = len(batches)
     
-    print(f"Analyzing {len(docs_map)} files in {total_batches} batches...")
+    print(f"Analyzing {len(docs_map)} files in {len(batches)} batches...")
 
     for i, batch in enumerate(batches):
-        print(f"Processing Analysis Batch {i+1}/{total_batches}...")
+        print(f"Processing Analysis Batch {i+1}/{len(batches)}...")
         
-        # Format the batch docs for the prompt
         batch_context = "\n\n".join([f"File: {path}\nContent:\n{content}" for path, content in batch.items()])
 
         prompt = f"""
@@ -80,13 +110,12 @@ def analyze_diff_in_batches(code_diff, docs_map, batch_size=3):
         {batch_context}
 
         Task:
-        Identify gaps where the Code Diff contradicts or is not reflected in the documentation.
-        Return a JSON object with a key "updates" containing a list of objects.
+        Identify gaps. Return a JSON object with a key "updates" containing a list of objects.
         Each object must have:
-        1. "filename": The exact file path from the input.
-        2. "proposed_changes": A precise description of what needs to be updated.
+        1. "filename": The exact file path.
+        2. "proposed_changes": Description of changes.
         
-        If no updates are needed for these files, return {"updates": []}.
+        If no updates needed, return {{"updates": []}}.
         """
 
         try:
@@ -98,24 +127,32 @@ def analyze_diff_in_batches(code_diff, docs_map, batch_size=3):
             
             result = json.loads(response.choices[0].message.content)
             if "updates" in result:
-                # Filter out empty or None results
                 valid_updates = [u for u in result["updates"] if u.get("filename") and u.get("proposed_changes")]
                 all_proposed_changes.extend(valid_updates)
                 
         except Exception as e:
-            print(f"Error in LLM analysis batch {i+1}: {e}")
+            print(f"Error in LLM batch {i+1}: {e}")
 
     return all_proposed_changes
 
-# --- Step 3: LLM Refactoring ---
+# --- Step 3: Refactoring (REST API & LLM) ---
+
+def get_file_sha_and_content(repo_name, file_path, branch):
+    """
+    Helper to get file SHA (required for update) and content.
+    Uses GitHub Contents API.
+    """
+    url = f"https://api.github.com/repos/{repo_name}/contents/{file_path}?ref={branch}"
+    data = github_get(url)
+    
+    # data["content"] is base64 encoded. Decode it for LLM processing.
+    content = base64.b64decode(data["content"]).decode('utf-8')
+    return data["sha"], content
 
 def refactor_identified_file(original_content, proposed_changes, code_diff):
-    """
-    Uses LLM to rewrite a specific file based on the proposed changes.
-    Returns the FULL refactored file content.
-    """
+    """LLM rewrites the file."""
     prompt = f"""
-    You are an AsciiDoc specialist. Update the 'Original Document' based on the 'Proposed Changes'.
+    You are an AsciiDoc specialist. Rewrite the 'Original Document' based on 'Proposed Changes'.
     
     Original Document:
     {original_content}
@@ -127,11 +164,9 @@ def refactor_identified_file(original_content, proposed_changes, code_diff):
     {code_diff}
     
     Instructions:
-    1. Apply the proposed changes.
-    2. Return the COMPLETE updated file content.
-    3. Do NOT use markdown code blocks. Return raw text only.
+    Return the COMPLETE updated file content only. No markdown blocks.
     """
-
+    
     try:
         response = openai_client.chat.completions.create(
             model="gpt-4o",
@@ -139,15 +174,14 @@ def refactor_identified_file(original_content, proposed_changes, code_diff):
         )
         return response.choices[0].message.content
     except Exception as e:
-        print(f"Error refactoring file: {e}")
+        print(f"LLM Refactoring error: {e}")
         return None
 
 def process_refactoring(proposed_changes, repo_name, head_branch, code_diff):
     """
-    Iterates through identified gaps, fetches content, refactors it.
-    Returns a list of modified files ready for commit.
+    Orchestrates the refactoring of identified files.
+    Uses REST API to fetch current state and LLM to generate new state.
     """
-    repo = g.get_repo(repo_name)
     refactored_files = []
     
     print(f"\nRefactoring {len(proposed_changes)} identified files...")
@@ -156,119 +190,125 @@ def process_refactoring(proposed_changes, repo_name, head_branch, code_diff):
         filename = change['filename']
         instruction = change['proposed_changes']
         
-        print(f"Refactoring: {filename}")
+        print(f"Processing: {filename}")
         
         try:
-            # 1. Get current file SHA and Content
-            contents = repo.get_contents(filename, ref=head_branch)
-            original_content = base64.b64decode(contents.content).decode('utf-8')
+            # 1. REST API: Get current file SHA and Content
+            sha, original_content = get_file_sha_and_content(repo_name, filename, head_branch)
             
-            # 2. Call LLM to get refactored content
+            # 2. LLM: Generate new content
             new_content = refactor_identified_file(original_content, instruction, code_diff)
             
             if new_content:
-                # Store the data needed for the commit later
+                # Store data needed for the commit step
                 refactored_files.append({
                     "path": filename,
                     "new_content": new_content,
-                    "sha": contents.sha # SHA is required to update the file
+                    "sha": sha
                 })
         except Exception as e:
             print(f"Failed to process {filename}: {e}")
             
     return refactored_files
 
-# --- Step 4: GitHub PR Creation ---
+# --- Step 4: GitHub PR Creation (REST API) ---
 
-def raise_pull_request(repo_name, head_branch, base_branch, modified_files, original_pr_number):
-    """
-    Creates a new branch, commits all modified files, and opens a PR.
-    """
-    if not modified_files:
-        print("No files to commit. Skipping PR creation.")
-        return
-
-    repo = g.get_repo(repo_name)
-    new_branch_name = f"doc-update/pr-{original_pr_number}-auto"
-    
-    print(f"\nCreating branch '{new_branch_name}' and committing changes...")
-
-    # 1. Create new branch from the PR's head branch
+def create_branch(repo_name, new_branch_name, source_sha):
+    """Creates a new branch using Git Refs API."""
+    url = f"https://api.github.com/repos/{repo_name}/git/refs"
+    data = {
+        "ref": f"refs/heads/{new_branch_name}",
+        "sha": source_sha
+    }
     try:
-        source_ref = repo.get_git_ref(f"heads/{head_branch}")
-        repo.create_git_ref(f"refs/heads/{new_branch_name}", source_ref.object.sha)
-    except GithubException as e:
-        if e.status == 422:
-            print("Branch already exists. Updating existing branch.")
+        github_post(url, data)
+        print(f"Created branch: {new_branch_name}")
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 422:
+            print("Branch already exists. Continuing...")
         else:
             raise e
 
-    # 2. Commit changes loop
+def commit_file(repo_name, file_path, new_content, sha, branch_name):
+    """Updates a file using Contents API."""
+    url = f"https://api.github.com/repos/{repo_name}/contents/{file_path}"
+    data = {
+        "message": f"docs: auto-update {file_path}",
+        "content": base64.b64encode(new_content.encode('utf-8')).decode('utf-8'),
+        "sha": sha,
+        "branch": branch_name
+    }
+    github_put(url, data)
+    print(f"Committed: {file_path}")
+
+def raise_pull_request(repo_name, head_branch, modified_files, original_pr_number):
+    """Creates the PR using Pulls API."""
+    if not modified_files:
+        print("No files to commit.")
+        return
+
+    new_branch_name = f"doc-update/pr-{original_pr_number}-auto"
+    
+    # 1. Create Branch (We assume we need the head_sha of the PR to branch off)
+    # We fetch the PR data again just to be safe, or pass it down. 
+    # Let's fetch the ref to get the SHA.
+    ref_url = f"https://api.github.com/repos/{repo_name}/git/ref/heads/{head_branch}"
+    ref_data = github_get(ref_url)
+    head_sha = ref_data["object"]["sha"]
+    
+    create_branch(repo_name, new_branch_name, head_sha)
+
+    # 2. Commit Changes
     for file_data in modified_files:
-        try:
-            repo.update_file(
-                path=file_data["path"],
-                message=f"docs: auto-update {file_data['path']}",
-                content=file_data["new_content"],
-                sha=file_data["sha"],
-                branch=new_branch_name
-            )
-            print(f"Committed: {file_data['path']}")
-        except Exception as e:
-            print(f"Error committing {file_data['path']}: {e}")
+        commit_file(repo_name, file_data["path"], file_data["new_content"], file_data["sha"], new_branch_name)
 
     # 3. Create Pull Request
-    pr_title = f"[Auto-Generated] Documentation updates for PR #{original_pr_number}"
-    pr_body = f"Automated documentation updates triggered by changes in PR #{original_pr_number}.\n\n**Updated Files:**\n" + "\n".join([f"- {f['path']}" for f in modified_files])
+    pr_url = f"https://api.github.com/repos/{repo_name}/pulls"
+    pr_data = {
+        "title": f"[Auto-Generated] Documentation updates for PR #{original_pr_number}",
+        "body": f"Automated documentation updates triggered by changes in PR #{original_pr_number}.",
+        "head": new_branch_name,
+        "base": head_branch # Target the feature branch
+    }
     
-    pr = repo.create_pull(
-        title=pr_title,
-        body=pr_body,
-        head=new_branch_name,
-        base=head_branch # Target the feature branch (Stacked PR)
-    )
-    
-    print(f"\nSuccess! Pull Request created: {pr.html_url}")
+    pr_response = github_post(pr_url, pr_data)
+    print(f"\nSuccess! Pull Request created: {pr_response['html_url']}")
 
 # --- Main Orchestrator ---
 
 def main(repo_name, pr_number):
-    print(f"--- Starting Documentation Update Flow for {repo_name} PR #{pr_number} ---")
-    
-    # Step 1: Fetch Data
-    print("\nStep 1: Fetching Code Diff and AsciiDocs...")
-    code_diff, base_branch, head_branch = get_pr_diff(repo_name, pr_number)
-    docs_map = get_all_adoc_files(repo_name, head_branch)
+    print(f"--- Starting Flow for {repo_name} PR #{pr_number} ---")
+
+    # Step 1: Fetch Data (REST)
+    print("\nStep 1: Fetching Data...")
+    pr_info = get_pr_data(repo_name, pr_number)
+    docs_map = get_all_adoc_files(repo_name, pr_info["head_branch"])
     
     if not docs_map:
-        print("No AsciiDoc files found. Exiting.")
+        print("No AsciiDoc files found.")
         return
 
-    # Step 2: Batch Analysis
-    print("\nStep 2: Analyzing gaps in batches...")
-    proposed_changes = analyze_diff_in_batches(code_diff, docs_map, batch_size=3)
+    # Step 2: Analysis (LLM Batched)
+    print("\nStep 2: Analyzing Gaps...")
+    proposed_changes = analyze_diff_in_batches(pr_info["diff"], docs_map)
     
     if not proposed_changes:
-        print("No documentation gaps identified. Exiting.")
+        print("No gaps found.")
         return
-    
-    print(f"Identified {len(proposed_changes)} potential updates.")
 
-    # Step 3: Refactor Files
-    print("\nStep 3: Refactoring identified files...")
-    modified_files = process_refactoring(proposed_changes, repo_name, head_branch, code_diff)
+    # Step 3: Refactoring (REST + LLM)
+    print("\nStep 3: Refactoring Files...")
+    modified_files = process_refactoring(proposed_changes, repo_name, pr_info["head_branch"], pr_info["diff"])
     
-    # Step 4: Raise PR
-    print("\nStep 4: Raising Pull Request...")
-    raise_pull_request(repo_name, head_branch, base_branch, modified_files, pr_number)
+    # Step 4: Raise PR (REST)
+    print("\nStep 4: Creating PR...")
+    raise_pull_request(repo_name, pr_info["head_branch"], modified_files, pr_number)
 
 if __name__ == "__main__":
-    # Example Execution
     REPO = "owner/repo-name"
     PR_NUM = 12
     
-    # Ensure env vars are set before running
     if not GITHUB_TOKEN or not OPENAI_API_KEY:
-        print("Please set GITHUB_TOKEN and OPENAI_API_KEY environment variables.")
+        print("Set GITHUB_TOKEN and OPENAI_API_KEY env vars.")
     else:
         main(REPO, PR_NUM)

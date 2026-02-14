@@ -1,0 +1,274 @@
+import os
+import json
+import base64
+import requests
+from github import Github, GithubException
+from openai import OpenAI
+
+# --- Configuration & Clients ---
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+g = Github(GITHUB_TOKEN)
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
+
+# --- Step 1: Data Ingestion Functions ---
+
+def get_pr_diff(repo_name, pr_number):
+    """Fetches the .diff content for a specific PR."""
+    repo = g.get_repo(repo_name)
+    pr = repo.get_pull(pr_number)
+    response = requests.get(pr.diff_url)
+    return response.text, pr.base.ref, pr.head.ref
+
+def get_all_adoc_files(repo_name, branch_ref):
+    """Recursively fetches all .adoc files from the repo."""
+    repo = g.get_repo(repo_name)
+    docs_map = {}
+    
+    try:
+        # Get the recursive tree for the branch
+        tree = repo.get_git_tree(branch_ref, recursive=True)
+        for element in tree.tree:
+            if element.type == "blob" and element.path.endswith(".adoc"):
+                try:
+                    content_file = repo.get_contents(element.path, ref=branch_ref)
+                    decoded_content = base64.b64decode(content_file.content).decode('utf-8')
+                    docs_map[element.path] = decoded_content
+                except Exception as e:
+                    print(f"Warning: Could not read {element.path}: {e}")
+    except Exception as e:
+        print(f"Error fetching repo tree: {e}")
+        
+    return docs_map
+
+# --- Step 2: LLM Analysis (Batched) ---
+
+def chunk_dict(data, chunk_size=3):
+    """Helper to split a dictionary into chunks."""
+    items = list(data.items())
+    for i in range(0, len(items), chunk_size):
+        yield dict(items[i:i + chunk_size])
+
+def analyze_diff_in_batches(code_diff, docs_map, batch_size=3):
+    """
+    Compares code diff with docs in batches to identify gaps.
+    Returns a consolidated list of proposed changes.
+    """
+    all_proposed_changes = []
+    
+    # Split docs into batches to avoid token limits
+    batches = list(chunk_dict(docs_map, batch_size))
+    total_batches = len(batches)
+    
+    print(f"Analyzing {len(docs_map)} files in {total_batches} batches...")
+
+    for i, batch in enumerate(batches):
+        print(f"Processing Analysis Batch {i+1}/{total_batches}...")
+        
+        # Format the batch docs for the prompt
+        batch_context = "\n\n".join([f"File: {path}\nContent:\n{content}" for path, content in batch.items()])
+
+        prompt = f"""
+        You are a Technical Documentation Expert. 
+        Analyze the 'Code Diff' against the provided 'Documentation Files'.
+        
+        Code Diff:
+        {code_diff}
+
+        Documentation Files:
+        {batch_context}
+
+        Task:
+        Identify gaps where the Code Diff contradicts or is not reflected in the documentation.
+        Return a JSON object with a key "updates" containing a list of objects.
+        Each object must have:
+        1. "filename": The exact file path from the input.
+        2. "proposed_changes": A precise description of what needs to be updated.
+        
+        If no updates are needed for these files, return {"updates": []}.
+        """
+
+        try:
+            response = openai_client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"}
+            )
+            
+            result = json.loads(response.choices[0].message.content)
+            if "updates" in result:
+                # Filter out empty or None results
+                valid_updates = [u for u in result["updates"] if u.get("filename") and u.get("proposed_changes")]
+                all_proposed_changes.extend(valid_updates)
+                
+        except Exception as e:
+            print(f"Error in LLM analysis batch {i+1}: {e}")
+
+    return all_proposed_changes
+
+# --- Step 3: LLM Refactoring ---
+
+def refactor_identified_file(original_content, proposed_changes, code_diff):
+    """
+    Uses LLM to rewrite a specific file based on the proposed changes.
+    Returns the FULL refactored file content.
+    """
+    prompt = f"""
+    You are an AsciiDoc specialist. Update the 'Original Document' based on the 'Proposed Changes'.
+    
+    Original Document:
+    {original_content}
+    
+    Proposed Changes:
+    {proposed_changes}
+    
+    Context (Code Diff):
+    {code_diff}
+    
+    Instructions:
+    1. Apply the proposed changes.
+    2. Return the COMPLETE updated file content.
+    3. Do NOT use markdown code blocks. Return raw text only.
+    """
+
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"Error refactoring file: {e}")
+        return None
+
+def process_refactoring(proposed_changes, repo_name, head_branch, code_diff):
+    """
+    Iterates through identified gaps, fetches content, refactors it.
+    Returns a list of modified files ready for commit.
+    """
+    repo = g.get_repo(repo_name)
+    refactored_files = []
+    
+    print(f"\nRefactoring {len(proposed_changes)} identified files...")
+
+    for change in proposed_changes:
+        filename = change['filename']
+        instruction = change['proposed_changes']
+        
+        print(f"Refactoring: {filename}")
+        
+        try:
+            # 1. Get current file SHA and Content
+            contents = repo.get_contents(filename, ref=head_branch)
+            original_content = base64.b64decode(contents.content).decode('utf-8')
+            
+            # 2. Call LLM to get refactored content
+            new_content = refactor_identified_file(original_content, instruction, code_diff)
+            
+            if new_content:
+                # Store the data needed for the commit later
+                refactored_files.append({
+                    "path": filename,
+                    "new_content": new_content,
+                    "sha": contents.sha # SHA is required to update the file
+                })
+        except Exception as e:
+            print(f"Failed to process {filename}: {e}")
+            
+    return refactored_files
+
+# --- Step 4: GitHub PR Creation ---
+
+def raise_pull_request(repo_name, head_branch, base_branch, modified_files, original_pr_number):
+    """
+    Creates a new branch, commits all modified files, and opens a PR.
+    """
+    if not modified_files:
+        print("No files to commit. Skipping PR creation.")
+        return
+
+    repo = g.get_repo(repo_name)
+    new_branch_name = f"doc-update/pr-{original_pr_number}-auto"
+    
+    print(f"\nCreating branch '{new_branch_name}' and committing changes...")
+
+    # 1. Create new branch from the PR's head branch
+    try:
+        source_ref = repo.get_git_ref(f"heads/{head_branch}")
+        repo.create_git_ref(f"refs/heads/{new_branch_name}", source_ref.object.sha)
+    except GithubException as e:
+        if e.status == 422:
+            print("Branch already exists. Updating existing branch.")
+        else:
+            raise e
+
+    # 2. Commit changes loop
+    for file_data in modified_files:
+        try:
+            repo.update_file(
+                path=file_data["path"],
+                message=f"docs: auto-update {file_data['path']}",
+                content=file_data["new_content"],
+                sha=file_data["sha"],
+                branch=new_branch_name
+            )
+            print(f"Committed: {file_data['path']}")
+        except Exception as e:
+            print(f"Error committing {file_data['path']}: {e}")
+
+    # 3. Create Pull Request
+    pr_title = f"[Auto-Generated] Documentation updates for PR #{original_pr_number}"
+    pr_body = f"Automated documentation updates triggered by changes in PR #{original_pr_number}.\n\n**Updated Files:**\n" + "\n".join([f"- {f['path']}" for f in modified_files])
+    
+    pr = repo.create_pull(
+        title=pr_title,
+        body=pr_body,
+        head=new_branch_name,
+        base=head_branch # Target the feature branch (Stacked PR)
+    )
+    
+    print(f"\nSuccess! Pull Request created: {pr.html_url}")
+
+# --- Main Orchestrator ---
+
+def main(repo_name, pr_number):
+    print(f"--- Starting Documentation Update Flow for {repo_name} PR #{pr_number} ---")
+    
+    # Step 1: Fetch Data
+    print("\nStep 1: Fetching Code Diff and AsciiDocs...")
+    code_diff, base_branch, head_branch = get_pr_diff(repo_name, pr_number)
+    docs_map = get_all_adoc_files(repo_name, head_branch)
+    
+    if not docs_map:
+        print("No AsciiDoc files found. Exiting.")
+        return
+
+    # Step 2: Batch Analysis
+    print("\nStep 2: Analyzing gaps in batches...")
+    proposed_changes = analyze_diff_in_batches(code_diff, docs_map, batch_size=3)
+    
+    if not proposed_changes:
+        print("No documentation gaps identified. Exiting.")
+        return
+    
+    print(f"Identified {len(proposed_changes)} potential updates.")
+
+    # Step 3: Refactor Files
+    print("\nStep 3: Refactoring identified files...")
+    modified_files = process_refactoring(proposed_changes, repo_name, head_branch, code_diff)
+    
+    # Step 4: Raise PR
+    print("\nStep 4: Raising Pull Request...")
+    raise_pull_request(repo_name, head_branch, base_branch, modified_files, pr_number)
+
+if __name__ == "__main__":
+    # Example Execution
+    REPO = "owner/repo-name"
+    PR_NUM = 12
+    
+    # Ensure env vars are set before running
+    if not GITHUB_TOKEN or not OPENAI_API_KEY:
+        print("Please set GITHUB_TOKEN and OPENAI_API_KEY environment variables.")
+    else:
+        main(REPO, PR_NUM)

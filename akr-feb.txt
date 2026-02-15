@@ -88,23 +88,11 @@ def analyze_diff_in_batches(code_diff, docs_map, batch_size=3):
         batch_context = "\n\n".join([f"File: {path}\nContent:\n{content}" for path, content in batch.items()])
 
         prompt = f"""
-        You are a Technical Documentation Expert.
-        Analyze the 'Code Diff' against the 'Documentation Files'.
-        
-        Code Diff:
-        {code_diff}
-
-        Documentation Files:
-        {batch_context}
-
-        Task:
-        Identify gaps where the Code Diff contradicts or is not reflected in the documentation.
-        Return a JSON object with a key "updates" containing a list of objects.
-        Each object must have:
-        1. "filename": The exact file path.
-        2. "proposed_changes": A precise description of what needs to be updated.
-        
-        If no updates needed, return {{"updates": []}}.
+        Analyze Code Diff vs Documentation.
+        Code Diff: {code_diff}
+        Docs: {batch_context}
+        Return JSON {{"updates": [{{"filename": "...", "proposed_changes": "..."}}]}}.
+        If no changes, return empty list.
         """
 
         try:
@@ -124,14 +112,11 @@ def analyze_diff_in_batches(code_diff, docs_map, batch_size=3):
 
     return all_proposed_changes
 
-# --- Step 3: Refactoring (Fixed) ---
+# --- Step 3: Refactoring (New Flow) ---
 
 def clean_adoc_content(content):
-    """
-    Removes common LLM artifacts like Markdown code blocks.
-    """
+    """Removes common LLM artifacts like Markdown code blocks."""
     content = content.strip()
-    # Remove markdown code block wrappers if LLM added them
     if content.startswith("```asciidoc"):
         content = content[len("```asciidoc"):]
     if content.startswith("```"):
@@ -142,14 +127,14 @@ def clean_adoc_content(content):
 
 def refactor_identified_file(original_content, proposed_changes, code_diff):
     """
-    Instructs LLM to apply minimal updates to the existing content.
+    Instructs LLM to apply minimal updates.
     """
     prompt = f"""
-    You are an AsciiDoc specialist tasked with updating documentation.
+    You are an AsciiDoc specialist. Your task is to update an existing document based on specific instructions.
     
     # INSTRUCTIONS
     1.  Apply the 'Proposed Changes' to the 'Original Document'.
-    2.  **CRITICAL**: Preserve the existing structure, formatting, and content that is not affected by the changes. Do NOT rewrite the entire document from scratch. Only modify the necessary sections.
+    2.  **CRITICAL**: Do NOT rewrite the entire document. Keep the existing structure and unchanged parts exactly as they are. Only modify the parts necessary to satisfy the 'Proposed Changes'.
     3.  Output MUST be valid AsciiDoc syntax.
     4.  Do NOT use Markdown formatting (no ``` blocks). Return raw text only.
     
@@ -169,29 +154,32 @@ def refactor_identified_file(original_content, proposed_changes, code_diff):
         response = openai_client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.1 # Lower temperature for more deterministic/faithful copying
+            temperature=0.1
         )
-        
-        # Clean up potential markdown artifacts
         return clean_adoc_content(response.choices[0].message.content)
-        
     except Exception as e:
         print(f"LLM Refactoring error: {e}")
         return None
 
-def process_refactoring(proposed_changes, repo_name, head_branch, code_diff):
-    refactored_files = []
+def refactor_all_files(proposed_changes, repo_name, head_branch, code_diff):
+    """
+    New Flow Step:
+    1. Iterates through identified changes.
+    2. Fetches content and calls LLM for each.
+    3. Stores results in a dictionary: {filename: new_content}
+    """
+    refactored_files_dict = {}
     
-    print(f"\nRefactoring {len(proposed_changes)} identified files...")
+    print(f"\n--- Phase: Refactoring {len(proposed_changes)} Files ---")
 
     for change in proposed_changes:
         filename = change['filename']
         instruction = change['proposed_changes']
         
-        print(f"Processing: {filename}")
+        print(f"Refactoring: {filename}")
         
         try:
-            # Fetch content from source branch
+            # 1. Fetch current content from the PR branch
             url = f"https://api.github.com/repos/{repo_name}/contents/{filename}?ref={head_branch}"
             file_data = github_get(url)
             if not file_data:
@@ -200,18 +188,21 @@ def process_refactoring(proposed_changes, repo_name, head_branch, code_diff):
                 
             original_content = base64.b64decode(file_data["content"]).decode('utf-8')
             
-            # Get Refactored Content
+            # 2. Call LLM to get refactored content
             new_content = refactor_identified_file(original_content, instruction, code_diff)
             
+            # 3. Store in dictionary if valid
             if new_content:
-                refactored_files.append({
-                    "path": filename,
-                    "new_content": new_content
-                })
+                # Optional: Check if content actually changed to avoid unnecessary commits later
+                if new_content != original_content:
+                    refactored_files_dict[filename] = new_content
+                else:
+                    print(f"Skipping {filename}: LLM returned identical content.")
+                    
         except Exception as e:
             print(f"Failed to process {filename}: {e}")
             
-    return refactored_files
+    return refactored_files_dict
 
 # --- Step 4: GitHub PR Creation ---
 
@@ -233,21 +224,17 @@ def create_branch(repo_name, new_branch_name, source_sha):
             raise e
 
 def commit_file(repo_name, file_path, new_content, target_branch):
-    # Get SHA from the target branch (doc branch)
+    # Fetch SHA from the target branch (handles existing files or updates)
     url = f"https://api.github.com/repos/{repo_name}/contents/{file_path}?ref={target_branch}"
     file_data = github_get(url)
     
-    current_content = ""
     current_sha = None
-    
     if file_data and "content" in file_data:
         current_sha = file_data["sha"]
+        # Double check content isn't identical (Safety check)
         current_content = base64.b64decode(file_data["content"]).decode('utf-8')
-    
-    # Skip if identical
-    if new_content == current_content:
-        print(f"Skipping {file_path}: No changes detected.")
-        return False
+        if new_content == current_content:
+            return False
 
     commit_url = f"https://api.github.com/repos/{repo_name}/contents/{file_path}"
     data = {
@@ -257,31 +244,38 @@ def commit_file(repo_name, file_path, new_content, target_branch):
         "branch": target_branch
     }
     
-    try:
-        github_put(commit_url, data)
-        print(f"Committed: {file_path}")
-        return True
-    except Exception as e:
-        print(f"Failed to commit {file_path}: {e}")
-        return False
+    github_put(commit_url, data)
+    print(f"Committed: {file_path}")
+    return True
 
-def raise_pull_request(repo_name, head_branch, modified_files, original_pr_number):
+def raise_pull_request(repo_name, head_branch, refactored_files_dict, original_pr_number):
+    """
+    Step 2 of New Flow:
+    Takes the dictionary of refactored files and creates a PR.
+    """
+    if not refactored_files_dict:
+        print("No refactored files to commit. Exiting.")
+        return
+
     new_branch_name = f"doc-update/pr-{original_pr_number}-auto"
     
-    # 1. Create/Ensure Branch exists
+    # 1. Create Branch
     source_sha = get_ref_sha(repo_name, head_branch)
     create_branch(repo_name, new_branch_name, source_sha)
 
-    # 2. Commit Changes
+    # 2. Commit Changes from Dictionary
     commits_made = 0
-    for file_data in modified_files:
-        success = commit_file(repo_name, file_data["path"], file_data["new_content"], new_branch_name)
-        if success:
-            commits_made += 1
+    for file_path, new_content in refactored_files_dict.items():
+        try:
+            success = commit_file(repo_name, file_path, new_content, new_branch_name)
+            if success:
+                commits_made += 1
+        except Exception as e:
+            print(f"Error committing {file_path}: {e}")
 
     # 3. Create PR
     if commits_made == 0:
-        print("No new commits to raise PR for.")
+        print("No new commits made (files were identical). PR not created.")
         return
 
     pr_url = f"https://api.github.com/repos/{repo_name}/pulls"
@@ -306,6 +300,7 @@ def raise_pull_request(repo_name, head_branch, modified_files, original_pr_numbe
 def main(repo_name, pr_number):
     print(f"--- Starting Flow for {repo_name} PR #{pr_number} ---")
 
+    # Step 1: Fetch Data
     print("\nStep 1: Fetching Data...")
     pr_info = get_pr_data(repo_name, pr_number)
     docs_map = get_all_adoc_files(repo_name, pr_info["head_branch"])
@@ -314,6 +309,7 @@ def main(repo_name, pr_number):
         print("No AsciiDoc files found.")
         return
 
+    # Step 2: Analysis
     print("\nStep 2: Analyzing Gaps...")
     proposed_changes = analyze_diff_in_batches(pr_info["diff"], docs_map)
     
@@ -321,11 +317,13 @@ def main(repo_name, pr_number):
         print("No gaps found.")
         return
 
+    # Step 3: Refactor All Files (Store in Dict)
     print("\nStep 3: Refactoring Files...")
-    modified_files = process_refactoring(proposed_changes, repo_name, pr_info["head_branch"], pr_info["diff"])
+    refactored_files = refactor_all_files(proposed_changes, repo_name, pr_info["head_branch"], pr_info["diff"])
     
+    # Step 4: Raise PR (Use Dict)
     print("\nStep 4: Creating PR...")
-    raise_pull_request(repo_name, pr_info["head_branch"], modified_files, pr_number)
+    raise_pull_request(repo_name, pr_info["head_branch"], refactored_files, pr_number)
 
 if __name__ == "__main__":
     REPO = "owner/repo-name"

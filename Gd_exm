@@ -6,152 +6,168 @@ from openai import AzureOpenAI
 # Load environment variables
 load_dotenv()
 
-class PageStandardExtractor:
-    def __init__(self):
-        self.client = AzureOpenAI(
-            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
-            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
-        )
-        self.deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
+def get_azure_client():
+    """Initializes and returns the Azure OpenAI client."""
+    return AzureOpenAI(
+        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+        api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
+    )
 
-    def parse_page_content(self, page_content):
-        """
-        Parses a raw Confluence page (Markdown format) into a dictionary
-        of { 'Heading': 'Content' }.
-        """
-        # Split by lines
-        lines = page_content.split('\n')
-        
-        sections = {}
-        current_heading = "Overview"  # Default section if text starts before a header
-        current_content = []
+def extract_sections_from_page(page_content):
+    """
+    Parses a raw Confluence page string into a list of dictionaries.
+    Each dictionary has a 'heading' and 'content'.
+    """
+    lines = page_content.split('\n')
+    sections = []
+    
+    current_heading = "Overview" # Default for text before the first header
+    current_content_lines = []
+    
+    # Regex to match Markdown headers (h1, h2, h3)
+    header_pattern = re.compile(r'^(#{1,3})\s+(.*)$')
 
-        # Regex for Markdown headings (h1, h2, h3)
-        header_pattern = re.compile(r'^(#{1,3})\s+(.*)$')
-
-        for line in lines:
-            match = header_pattern.match(line)
-            if match:
-                # Save the previous section
-                if current_heading:
-                    # Join content and strip extra whitespace
-                    content_block = "\n".join(current_content).strip()
-                    if content_block: # Only save if there is content
-                        sections[current_heading] = content_block
-                
-                # Start a new section
-                current_heading = match.group(2)
-                current_content = []
-            else:
-                current_content.append(line)
-
-        # Don't forget the last section
-        if current_heading:
-            sections[current_heading] = "\n".join(current_content).strip()
-
-        return sections
-
-    def generate_section_instruction(self, heading, actual_content):
-        """
-        Takes the actual content from the approved page and asks the LLM
-        to abstract it into a generic instruction/example.
-        """
-        system_prompt = """
-        You are an expert Technical Documentation Analyst. 
-        I will provide you with a 'Heading' and the 'Actual Content' from a perfect, approved Confluence page.
-        
-        Your task is to analyze the content and generate a "Standard Instruction" or "Good Example" for that section.
-        
-        Rules:
-        1. Remove specific details (e.g., change "Server X-99" to "Server Name", change specific dates to "Date").
-        2. Preserve the structure, formatting (bullet points, tables), and tone.
-        3. Identify the core objective of this section.
-        4. The output should serve as a template or guide for someone writing a different page of the same type.
-        """
-
-        user_prompt = f"""
-        Section Heading: {heading}
-        
-        Actual Approved Content:
-        {actual_content}
-        
-        Please generate the generalized Good Example/Instruction for this section.
-        """
-
-        try:
-            response = self.client.chat.completions.create(
-                model=self.deployment_name,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.3, # Low temperature for consistency and structure
-                max_tokens=1000
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            return f"Error processing {heading}: {str(e)}"
-
-    def process_approved_page(self, raw_page_text):
-        sections = self.parse_page_content(raw_page_text)
-        verification_guidelines = {}
-
-        print(f"Analyzing {len(sections)} sections from the approved page...")
-
-        for heading, content in sections.items():
-            print(f"Extracting standard for: {heading}...")
+    for line in lines:
+        match = header_pattern.match(line)
+        if match:
+            # Save the previous section if it exists
+            full_content = "\n".join(current_content_lines).strip()
+            if full_content:
+                sections.append({
+                    "heading": current_heading,
+                    "content": full_content
+                })
             
-            # Skip very short sections (less than 20 chars) to save tokens
-            if len(content) < 20:
-                continue
-                
-            instruction = self.generate_section_instruction(heading, content)
-            verification_guidelines[heading] = instruction
+            # Start new section
+            current_heading = match.group(2)
+            current_content_lines = []
+        else:
+            current_content_lines.append(line)
+    
+    # Append the last section after the loop finishes
+    full_content = "\n".join(current_content_lines).strip()
+    if full_content:
+        sections.append({
+            "heading": current_heading,
+            "content": full_content
+        })
+            
+    return sections
 
-        return verification_guidelines
+def generate_instruction_for_section(heading, content, client, deployment_name):
+    """
+    Takes a specific section from the approved page and asks the LLM
+    to generate a generalized 'Good Example' or 'Instruction' for it.
+    """
+    system_prompt = """
+    You are an expert Technical Documentation Analyst.
+    I will give you the 'Heading' and 'Content' from a perfect, approved Confluence page.
+    
+    Your task is to generate a "Golden Standard" instruction for this section.
+    1. Remove specific names, dates, IDs, and technical jargon specific to this one instance.
+    2. Replace them with generic placeholders (e.g., [Service Name], [Date], [Owner]).
+    3. Preserve the structure, formatting, and logic.
+    4. The result should look like a template or a set of instructions that another user could follow to fill out this section correctly on a new page.
+    """
 
-# --- Mock Data: A Valid, Approved Confluence Page ---
-# This represents the specific page you want to learn from.
-approved_page_content = """
-# Payment Gateway Service Documentation
+    user_prompt = f"""
+    Heading: {heading}
+    
+    Actual Content from Approved Page:
+    {content}
+    
+    Generate the generalized Good Example/Instruction.
+    """
 
-## Service Overview
-The Payment Gateway Service is a microservice responsible for handling all credit card transactions. It interfaces with Stripe and PayPal APIs to ensure secure processing. The service is built on Java Spring Boot and runs on Kubernetes cluster A.
+    try:
+        response = client.chat.completions.create(
+            model=deployment_name,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.3,
+            max_tokens=1000
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"Error generating instruction for {heading}: {str(e)}"
 
-## API Endpoints
-The service exposes the following REST endpoints for transaction processing:
+def process_approved_page(page_text):
+    """
+    Main function to process the approved page and print the results.
+    """
+    client = get_azure_client()
+    deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
+    
+    # 1. Extract raw sections
+    sections = extract_sections_from_page(page_text)
+    
+    print(f"Found {len(sections)} sections. Generating standards...\n")
 
-*   `POST /v1/charge` - Initiates a credit card charge.
-*   `GET /v1/transaction/{id}` - Retrieves the status of a specific transaction.
-*   `POST /v1/refund` - Processes a refund for a given transaction ID.
+    # 2. Generate instructions for each
+    generated_standards = []
+    
+    for section in sections:
+        heading = section['heading']
+        content = section['content']
+        
+        # Skip very short snippets to save tokens
+        if len(content) < 50:
+            continue
 
-## Infrastructure Details
-*   **Cluster:** Kubernetes Cluster A (us-east-1)
-*   **Node Count:** 3 nodes (t3.medium)
-*   **Database:** PostgreSQL 14, read-replicas enabled.
-*   **Logging:** Logs are shipped to ELK Stack via Fluentd.
+        print(f"Processing section: {heading}...")
+        
+        standard_example = generate_instruction_for_section(
+            heading, content, client, deployment_name
+        )
+        
+        generated_standards.append({
+            "heading": heading,
+            "instruction": standard_example
+        })
+        
+    return generated_standards
 
-## On-Call Rotation
-The team managing this service follows a standard 1-week rotation. 
-Current Primary: John Doe (j.doe@company.com)
-Current Shadow: Jane Smith (j.smith@company.com)
-Escalation Manager: Mike Boss (m.boss@company.com)
+# --- Mock Data: Valid, Approved Confluence Page ---
+# This is the "Gold Standard" page you want to learn from.
+approved_page = """
+# User Authentication Service
+
+## Service Purpose
+The User Auth Service is responsible for managing user logins, password resets, and JWT token generation. It ensures that only authorized personnel can access the HR Portal and the Payroll System.
+
+## API Specification
+This service exposes RESTful endpoints for external consumption.
+*   `POST /api/v1/login` - Authenticates user credentials.
+*   `POST /api/v1/logout` - Invalidates the current session.
+*   `GET /api/v1/user/profile` - Returns user details based on the JWT token.
+
+## Configuration Parameters
+The service requires the following environment variables to start:
+*   `DB_CONNECTION_STRING`: PostgreSQL connection string.
+*   `JWT_SECRET_KEY`: The secret key used to sign tokens.
+*   `LOG_LEVEL`: Set to 'INFO' for production, 'DEBUG' for dev.
+
+## Support Contacts
+For issues related to authentication failures, contact the Identity Team.
+*   Team Lead: Alice (alice@company.com)
+*   On-Call: Bob (bob@company.com)
 """
 
 # --- Execution ---
 if __name__ == "__main__":
-    extractor = PageStandardExtractor()
+    # Run the main processing function
+    standards = process_approved_page(approved_page)
     
-    # 1. Process the approved page to get the "Golden Standards"
-    standards = extractor.process_approved_page(approved_page_content)
+    # Print the final instructions
+    print("\n" + "="*70)
+    print("GENERATED VERIFICATION STANDARDS")
+    print("="*70 + "\n")
     
-    # 2. Display the results (This is what you use to verify other pages)
-    print("\n" + "="*60)
-    print("GENERATED INSTRUCTIONS & TEMPLATES")
-    print("="*60 + "\n")
-    
-    for section, guide in standards.items():
-        print(f"--- HEADING: {section} ---")
-        print(guide)
-        print("-" * 60 + "\n")
+    for item in standards:
+        print(f"SECTION: {item['heading']}")
+        print("-" * 70)
+        print(item['instruction'])
+        print("\n")

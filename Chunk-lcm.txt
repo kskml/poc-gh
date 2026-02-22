@@ -1,11 +1,11 @@
 import os
+import json
 from openai import OpenAI
 
 # ==========================================
 # 1. YOUR INPUTS (Paste your data here)
 # ==========================================
 
-# The git diff string
 CODE_DIFF = """
 diff --git a/src/api.py b/src/api.py
 @@ -12,7 +12,7 @@ class ApiClient:
@@ -16,7 +16,6 @@ diff --git a/src/api.py b/src/api.py
 +        self.logger = setup_logging() if enable_logging else None
 """
 
-# The current content of the file
 ORIGINAL_CONTENT = """
 = API Client Configuration
 
@@ -35,7 +34,6 @@ client = ApiClient(host="localhost", port=8080)
 `port`:: The server port number.
 """
 
-# The proposed change description
 PROPOSED_CHANGE = """
 The __init__ method now supports an optional `enable_logging` parameter. 
 Update the initialization example and the parameters list to reflect this new boolean argument.
@@ -45,24 +43,31 @@ Update the initialization example and the parameters list to reflect this new bo
 # 2. LOGIC & LLM INTEGRATION
 # ==========================================
 
-def generate_updated_content(client, diff, original, change):
+def generate_update_json(client, diff, original, change):
     """
-    Sends the context to the LLM to generate the updated AsciiDoc file.
+    Calls LLM and expects a strict JSON response.
     """
     
+    # Refined System Prompt for JSON output
     system_prompt = """
-You are an expert technical writer maintaining an AsciiDoc repository. 
-Your goal is to update a documentation file based on specific code changes.
+You are an automated documentation update assistant. 
+You must respond ONLY with a valid JSON object. Do not wrap the output in markdown code blocks.
 
-RULES:
-1. Output ONLY the raw content of the updated AsciiDoc file. Do not use markdown code blocks.
-2. Preserve the existing structure and style of the original document.
-3. Implement the changes described in the 'Proposed Change' section.
-4. **CRITICAL**: For every line you modify or add, you must insert a comment on the line immediately before it.
+The JSON object must strictly follow this schema:
+{
+  "ok": boolean,          // true if updates were applied successfully, false if no changes were needed or error occurred
+  "updated_content": string, // the full, updated AsciiDoc file content
+  "notes": string,        // a brief summary of changes made or reason for failure
+  "change_count": integer // number of distinct sections modified
+}
+
+RULES FOR CONTENT GENERATION:
+1. In the 'updated_content' string, preserve existing formatting.
+2. **CRITICAL**: For every modification, insert an inline comment immediately before the change.
    - Format: // LLM-UPDATE: <Reason for change>
    - Example:
-     // LLM-UPDATE: Added new parameter 'timeout'.
-     `timeout`:: The timeout in seconds.
+     // LLM-UPDATE: Added parameter 'retries'.
+     `retries`:: Number of retry attempts.
 """
 
     user_prompt = f"""
@@ -75,32 +80,49 @@ RULES:
 ### Proposed Change:
 {change}
 
-Please generate the updated AsciiDoc file now.
+Process the request and return the JSON response.
 """
 
-    print("Sending request to LLM...")
-    
-    response = client.chat.completions.create(
-        model="gpt-4o", # Recommended for high-quality code/doc correlation
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-        temperature=0.1 
-    )
+    print("Sending request to LLM (expecting JSON)...")
 
-    return response.choices[0].message.content
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.1,
+            # This forces the model to output valid JSON
+            response_format={"type": "json_object"} 
+        )
+
+        raw_content = response.choices[0].message.content
+        
+        # Parse the JSON string into a Python dictionary
+        result = json.loads(raw_content)
+        return result
+
+    except json.JSONDecodeError:
+        return {
+            "ok": False,
+            "updated_content": original, # Fallback to original
+            "notes": "Error: LLM returned invalid JSON.",
+            "change_count": 0
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "updated_content": original,
+            "notes": f"API Error: {str(e)}",
+            "change_count": 0
+        }
 
 # ==========================================
 # 3. MAIN EXECUTION
 # ==========================================
 
 if __name__ == "__main__":
-    # Initialize client. 
-    # Make sure OPENAI_API_KEY is set in your environment variables.
-    # Mac/Linux: export OPENAI_API_KEY='sk-...'
-    # Windows: set OPENAI_API_KEY=sk-...
-    
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         print("ERROR: Please set the OPENAI_API_KEY environment variable.")
@@ -108,28 +130,23 @@ if __name__ == "__main__":
 
     client = OpenAI(api_key=api_key)
 
-    try:
-        # Generate the content
-        updated_file_content = generate_updated_content(
-            client, 
-            CODE_DIFF, 
-            ORIGINAL_CONTENT, 
-            PROPOSED_CHANGE
-        )
+    # Get the structured response
+    result = generate_update_json(client, CODE_DIFF, ORIGINAL_CONTENT, PROPOSED_CHANGE)
 
-        # Define output filename
+    # Pretty print the JSON result to console
+    print("\n--- LLM JSON RESPONSE ---")
+    print(json.dumps(result, indent=2))
+
+    # Logic for handling the result
+    if result.get("ok"):
+        print(f"\nNotes from LLM: {result.get('notes')}")
+        
+        # Save the file
         output_filename = "updated_docs.adoc"
-        
-        # Write to file
         with open(output_filename, "w", encoding="utf-8") as f:
-            f.write(updated_file_content)
-
-        print(f"\nSuccess! Updated content written to '{output_filename}'.")
-        print("You can now use this file content for your Pull Request.")
+            f.write(result.get("updated_content", ""))
         
-        # Optional: Print preview
-        print("\n--- PREVIEW ---")
-        print(updated_file_content)
-
-    except Exception as e:
-        print(f"An error occurred: {e}")
+        print(f"Saved updated content to '{output_filename}'.")
+    else:
+        print("\nUpdate failed or no changes were necessary.")
+        print(f"Reason: {result.get('notes')}")

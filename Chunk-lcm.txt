@@ -1,201 +1,135 @@
-def analyze_single_section(client, deployment_name, section_header, section_content, full_diff, local_diag_path, exclude_list):
+import os
+from openai import OpenAI
+
+# ==========================================
+# 1. YOUR INPUTS (Paste your data here)
+# ==========================================
+
+# The git diff string
+CODE_DIFF = """
+diff --git a/src/api.py b/src/api.py
+@@ -12,7 +12,7 @@ class ApiClient:
+-    def __init__(self, host, port):
++    def __init__(self, host, port, enable_logging=False):
+         self.host = host
+         self.port = port
++        self.logger = setup_logging() if enable_logging else None
+"""
+
+# The current content of the file
+ORIGINAL_CONTENT = """
+= API Client Configuration
+
+== Initialization
+
+To initialize the client, provide the `host` and `port`.
+
+[source, python]
+----
+client = ApiClient(host="localhost", port=8080)
+----
+
+=== Parameters
+
+`host`:: The server hostname.
+`port`:: The server port number.
+"""
+
+# The proposed change description
+PROPOSED_CHANGE = """
+The __init__ method now supports an optional `enable_logging` parameter. 
+Update the initialization example and the parameters list to reflect this new boolean argument.
+"""
+
+# ==========================================
+# 2. LOGIC & LLM INTEGRATION
+# ==========================================
+
+def generate_updated_content(client, diff, original, change):
     """
-    Invokes LLM with Text AND Diagram context.
-    UPDATED: Handles exclusions, Conformant filtering, and Confluence XML output for rendering.
+    Sends the context to the LLM to generate the updated AsciiDoc file.
     """
-    
-    # 1. Check Exclusions (Use Case, etc.)
-    for exclude_term in exclude_list:
-        if exclude_term.lower() in section_header.lower():
-            print(f"      ⏭️  Section excluded (Matches '{exclude_term}').")
-            return "NO_IMPACT"
-    
-    # 2. Regex for Diagrams
-    pattern = re.compile(r'<<<\s*(PLANTUML|DRAWIO|DRAW)\s*DIAGRAM(.*?)\s*>>>', re.IGNORECASE)
-    matches = pattern.findall(section_content)
-    
-    diagram_contexts = []
-    for match in matches:
-        diag_type, diag_name = match
-        diag_name = diag_name.strip(" :")
-        if not diag_name:
-            diag_name = "Unknown"
-        if "plantuml" in diag_type.lower():
-            diag_content = find_local_diagram(diag_name, local_diag_path)
-            if diag_content:
-                diagram_contexts.append(f"\n--- DIAGRAM CONTEXT: {diag_name} ---\n{diag_content}\n")
-    
-    prompt_diagrams = "\n".join(diagram_contexts) if diagram_contexts else "No local diagrams found for this section."
     
     system_prompt = """
-    You are an ASPICE SWE.2 Auditor analyzing a Documentation Section against Code Changes.
-    
-    **Context:**
-    1. Confluence Text Content.
-    2. (Optional) Local PlantUML Diagrams.
-    
-    **Instructions:**
-    1. **Alignment:** Strictly verify Code Diff against Text AND Diagrams. Diagrams must reflect new code logic perfectly.
-    2. **Filtering:** 
-       - If code matches documentation perfectly, return `NO_IMPACT`.
-       - DO NOT return rows with Severity 'CONFORMANT'.
-    3. **Output:** If gap found, return ONLY a Markdown table row.
-    
-    **CORRECTIVE ACTION FORMAT (Crucial for Confluence Rendering):**
-    - **Structure:** Must have two parts separated by <br/>
-      Part 1: Short, crisp functional text description.
-      Part 2: **Confluence PlantUML Macro XML** (Not a markdown code block).
-    - **Macro Format:** Use XML structure so it renders as an image in Confluence:
-      `<ac:structured-macro ac:name="plantUML" ac:schema-version="1">
-        <ac:parameter ac:name="diagramName">[Name]</ac:parameter>
-        <ac:parameter ac:name="content">@startuml...@enduml</ac:parameter>
-      </ac:structured-macro>`
-    
-    **Row Format:**
-    | ID | Severity | Confluence Section | Impact Scope | SWE.2 Observation | Corrective Action |
-    | 1 | 🔴 **NON-CONFORMANT** | <SECTION_TITLE> | UI/Logic/Data/API | [Observation] | [Text Description]<br/>[Macro XML] |
-    """
+You are an expert technical writer maintaining an AsciiDoc repository. 
+Your goal is to update a documentation file based on specific code changes.
+
+RULES:
+1. Output ONLY the raw content of the updated AsciiDoc file. Do not use markdown code blocks.
+2. Preserve the existing structure and style of the original document.
+3. Implement the changes described in the 'Proposed Change' section.
+4. **CRITICAL**: For every line you modify or add, you must insert a comment on the line immediately before it.
+   - Format: // LLM-UPDATE: <Reason for change>
+   - Example:
+     // LLM-UPDATE: Added new parameter 'timeout'.
+     `timeout`:: The timeout in seconds.
+"""
 
     user_prompt = f"""
-    <SECTION_TITLE>{section_header}</SECTION_TITLE>
-    
-    CONFLUENCE TEXT CONTENT:
-    {section_content}
+### Original AsciiDoc Content:
+{original}
 
-    --- 
-    
-    LOCAL DIAGRAMS (PlantUML Logic):
-    {prompt_diagrams}
+### Code Diff:
+{diff}
 
-    ---
-    
-    GITHUB CODE DIFF:
-    {full_diff}
-    """
-    
-    try:
-        response = client.chat.completions.create(
-            model=deployment_name,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.1
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        print(f"Error analyzing section '{section_header}': {e}")
-        return "NO_IMPACT"
+### Proposed Change:
+{change}
 
-def main():
-    # --- ARGUMENT PARSING ---
-    parser = argparse.ArgumentParser(description="ASPICE SWE.2 Confluence vs Code Analyzer")
-    
-    # Dynamic Inputs
-    parser.add_argument("--base-tag", required=True, help="Base Git Tag (e.g., v1.0.0)")
-    parser.add_argument("--head-tag", required=True, help="Head Git Tag (e.g., v1.1.0)")
-    parser.add_argument("--page-id", required=True, help="Confluence Page ID")
-    parser.add_argument("--module-path", required=True, help="Local Path to Diagrams (Module Path)")
-    parser.add_argument("--split-level", type=int, default=3, help="Header Level to split on (e.g., 3 for ###)")
-    
-    # NEW: Exclude Sections (e.g., "Use Case, Example")
-    parser.add_argument("--exclude-sections", default="", help="Comma separated keywords to skip (e.g., 'Use Case, Example')")
-    
-    # Optional Repo Info
-    parser.add_argument("--repo-owner", default=os.getenv("GITHUB_REPO_OWNER"), help="GitHub Repo Owner")
-    parser.add_argument("--repo-name", default=os.getenv("GITHUB_REPO_NAME"), help="GitHub Repo Name")
-    
-    args = parser.parse_args()
+Please generate the updated AsciiDoc file now.
+"""
 
-    # Process Exclude List
-    exclude_list = [x.strip().lower() for x in args.exclude_sections.split(",")] if args.exclude_sections else []
+    print("Sending request to LLM...")
+    
+    response = client.chat.completions.create(
+        model="gpt-4o", # Recommended for high-quality code/doc correlation
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        temperature=0.1 
+    )
 
-    # --- SETUP ---
-    try:
-        client = AzureOpenAI(
-            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
-            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
-        )
-    except Exception as e:
-        print(f"❌ Initialization Error: {e}")
-        return
+    return response.choices[0].message.content
 
-    # Get Secrets from Environment
-    confl_base = os.getenv("CONFLUENCE_BASE_URL")
-    confl_email = os.getenv("CONFLUENCE_EMAIL")
-    confl_token = os.getenv("CONFLUENCE_API_TOKEN")
-    github_token = os.getenv("GITHUB_TOKEN")
-    deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+# ==========================================
+# 3. MAIN EXECUTION
+# ==========================================
 
-    if not all([confl_base, confl_email, confl_token, github_token, deployment_name]):
-        print("❌ Error: Missing Secrets in Environment Variables.")
-        return
+if __name__ == "__main__":
+    # Initialize client. 
+    # Make sure OPENAI_API_KEY is set in your environment variables.
+    # Mac/Linux: export OPENAI_API_KEY='sk-...'
+    # Windows: set OPENAI_API_KEY=sk-...
+    
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        print("ERROR: Please set the OPENAI_API_KEY environment variable.")
+        exit(1)
+
+    client = OpenAI(api_key=api_key)
 
     try:
-        # Use Args for inputs
-        doc_text = get_confluence_content(confl_base, confl_email, confl_token, args.page_id)
-        sections = chunk_confluence_hierarchical(doc_text, args.split_level)
-        
-        full_diff = get_full_github_diff(
-            args.repo_owner, args.repo_name, 
-            args.base_tag, args.head_tag, 
-            github_token
+        # Generate the content
+        updated_file_content = generate_updated_content(
+            client, 
+            CODE_DIFF, 
+            ORIGINAL_CONTENT, 
+            PROPOSED_CHANGE
         )
-        
-        if not full_diff:
-            print("⚠️  No Diff found.")
-            return
 
-        print(f"🔄 Starting Analysis across {len(sections)} sections...")
-        accumulated_rows = []
+        # Define output filename
+        output_filename = "updated_docs.adoc"
         
-        for idx, section in enumerate(sections):
-            print(f"   Analyzing Section {idx+1}/{len(sections)}: {section['header']}")
-            
-            # Pass exclude list to analyzer
-            result = analyze_single_section(
-                client, 
-                deployment_name, 
-                section['header'], 
-                section['content'], 
-                full_diff,
-                args.module_path,
-                exclude_list
-            )
-            
-            # Filter Logic: Skip NO_IMPACT and Skip CONFORMANT
-            if result and result != "NO_IMPACT":
-                # Check if result contains "CONFORMANT" (case insensitive)
-                if "conformant" not in result.lower():
-                    accumulated_rows.append(result)
-                    print(f"      → Impact Found.")
-                else:
-                    print(f"      ✅ Conformant (Skipped).")
-            else:
-                print(f"      → No Impact. Skipping.")
+        # Write to file
+        with open(output_filename, "w", encoding="utf-8") as f:
+            f.write(updated_file_content)
 
-        if not accumulated_rows:
-            print("✅ No gaps found.")
-        else:
-            with open("Arg_Analyzer_Report.md", "w", encoding="utf-8") as f:
-                f.write("# ASPICE SWE.2 Analysis\n\n")
-                f.write(f"**Release:** `{args.base_tag}` → `{args.head_tag}`\n\n")
-                f.write("## Assessment Criteria\n\n")
-                f.write("| Option | Definition |\n")
-                f.write("| :--- | :--- |\n")
-                f.write("| 🔴 **NON-CONFORMANT** | Code contradicts doc or diagram. |\n")
-                f.write("| 🟠 **GAP IDENTIFIED** | Code adds missing feature. |\n")
-                f.write("| 🔴 **NON-CONFORMANT / GAP** | Complex change. |\n")
-                f.write("| 🟡 **INCONSISTENCY** | Minor mismatch. |\n\n")
-                f.write("## Analysis\n\n")
-                f.write("| ID | Severity | Confluence Section | Impact Scope | SWE.2 Observation | Corrective Action |\n")
-                f.write("| :--- | :--- | :--- | :--- | :--- | :--- |\n")
-                for row in accumulated_rows:
-                    # Clean up newlines for markdown table if necessary
-                    # But we use <br/> in prompt, so just append
-                    f.write(row + "\n")
-            print(f"✅ Report generated.")
+        print(f"\nSuccess! Updated content written to '{output_filename}'.")
+        print("You can now use this file content for your Pull Request.")
+        
+        # Optional: Print preview
+        print("\n--- PREVIEW ---")
+        print(updated_file_content)
 
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"An error occurred: {e}")

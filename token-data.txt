@@ -14,9 +14,11 @@ def get_azure_client():
     """Initializes and returns the Azure OpenAI client."""
     load_dotenv()
     
+    # IMPORTANT: Prompt Caching requires API version 2024-08-01-preview or later
+    # and models like gpt-4o or gpt-4o-mini.
     client = AzureOpenAI(
         api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-        api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview"),
+        api_version="2024-08-01-preview", 
         azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
     )
     return client
@@ -26,12 +28,7 @@ def get_azure_client():
 # ==========================================
 
 def read_source_code_files(source_dir, extensions=[".py", ".js", ".java", ".cs", ".ts"]):
-    """
-    Recursively reads all files.
-    Returns:
-        1. code_files_dict: {filepath: content}
-        2. raw_concat: Raw string for hashing
-    """
+    """Recursively reads all files."""
     code_files = {}
     raw_content_for_hash = ""
     
@@ -62,26 +59,21 @@ def read_hld_file(hld_path):
         return f.read()
 
 # ==========================================
-# 3. TOON IMPLEMENTATION (OPTIMIZED)
+# 3. TOON IMPLEMENTATION
 # ==========================================
 
 def dict_to_optimized_toon(data):
     """
     Converts dictionary to Separator-based TOON.
-    Strategy: 
-    - JSON uses: {"file": "line1\nline2"} -> High overhead (quotes, escapes).
-    - TOON uses: ### FILE: name \n raw content -> Low overhead (natural newlines).
+    Removes JSON syntax overhead.
     """
     if not data:
         return "No data provided"
     
     rows = []
-    # We use a specific separator that LLMs recognize as a header
-    # This avoids the token cost of JSON braces and escaped newlines.
     separator = "#FILE_START#"
     
     for filename, content in data.items():
-        # Format: SEPARATOR path \n content
         rows.append(f"{separator} {filename}")
         rows.append(content)
             
@@ -134,67 +126,87 @@ def analyze_gap(client, deployment_name, source_dir, hld_path, token_report):
     hld_content = read_hld_file(hld_path)
     
     if not code_files_dict:
-        return "No source code files found.", 0
+        return "No source code files found."
 
-    # 2. Prepare Data Formats
-    
-    # A. JSON Format (For Baseline Simulation)
-    # We simulate the "Old Way" to prove the reduction
+    # ==========================================
+    # A. BASELINE CALCULATION (SIMULATED JSON)
+    # ==========================================
     json_input_str = json.dumps(code_files_dict, indent=2)
-    
-    # B. TOON Format (Optimized)
-    # Using the new Separator-based approach
-    toon_input_str = dict_to_optimized_toon(code_files_dict)
-    
-    # 3. Calculate Baseline (Simulation)
-    system_prompt_baseline = "You are an expert code auditor. Analyze the JSON source code against the HLD."
-    sys_tokens_base = count_tokens_tiktoken(system_prompt_baseline)
+    sys_prompt_base = "You are an expert code auditor. Analyze the JSON source code against the HLD."
     hld_tokens = count_tokens_tiktoken(hld_content)
+    sys_tokens_base = count_tokens_tiktoken(sys_prompt_base)
     json_source_tokens = count_tokens_tiktoken(json_input_str)
     
     baseline_input_total = sys_tokens_base + hld_tokens + json_source_tokens
-    token_report['baseline_input_tokens'] = baseline_input_total
+    token_report['json_input_tokens'] = baseline_input_total
     token_report['file_count'] = len(code_files_dict)
 
-    # 4. Caching Logic
+    # ==========================================
+    # B. OPTIMIZED CALCULATION (TOON)
+    # ==========================================
+    toon_input_str = dict_to_optimized_toon(code_files_dict)
+    
+    # System Prompt for TOON
+    sys_prompt_opt = """You are an expert code auditor. 
+The source code is provided in a compact 'TOON' format.
+Each file starts with a header '#FILE_START# filename' followed immediately by the file content.
+Analyze this content against the HLD documentation."""
+    
+    toon_source_tokens = count_tokens_tiktoken(toon_input_str)
+    sys_tokens_opt = count_tokens_tiktoken(sys_prompt_opt)
+    toon_input_total = sys_tokens_opt + hld_tokens + toon_source_tokens
+    token_report['toon_input_tokens_calculated'] = toon_input_total
+
+    # ==========================================
+    # C. LOCAL CACHE CHECK
+    # ==========================================
     cache_key = generate_cache_key(code_raw_content, hld_content)
     cached_result = get_cached_response(cache_key)
     
     if cached_result:
-        print("CACHE HIT: Retrieved response from LLM Cache.")
-        token_report['cache_hit'] = True
-        token_report['actual_input_tokens'] = 0
-        token_report['output_tokens'] = 0
-        token_report['total_tokens_used'] = 0
+        print("LOCAL CACHE HIT: Retrieved response from local disk.")
+        token_report['local_cache_hit'] = True
+        
+        # Retrieve usage from the cached file
+        cached_usage = cached_result.get("usage", {})
+        
+        token_report['actual_input_tokens_used'] = cached_usage.get('prompt_tokens', 0)
+        token_report['actual_output_tokens_used'] = cached_usage.get('completion_tokens', 0)
+        token_report['azure_cached_tokens'] = cached_usage.get('azure_cached_tokens', 0)
+        token_report['total_tokens_billed'] = 0
+        
         return cached_result.get("response")
     
-    print("CACHE MISS: Calling Azure OpenAI...")
-    token_report['cache_hit'] = False
+    print("LOCAL CACHE MISS: Calling Azure OpenAI...")
+    token_report['local_cache_hit'] = False
     
-    # 5. Construct Optimized Prompt (TUNED FOR TOON)
-    # We explicitly tell the LLM how to read the data
-    system_prompt_opt = """You are an expert code auditor. 
-The source code is provided in a compact 'TOON' format (Table Oriented Object Notation).
-Each file starts with a header '#FILE_START# filename' followed immediately by the file content.
-Analyze this content against the HLD documentation."""
+    # ==========================================
+    # D. AZURE PROMPT CACHING IMPLEMENTATION
+    # ==========================================
+    # We structure the prompt to maximize Azure's ability to cache the prefix.
+    # Order: System -> Context (Code+HLD) -> Instructions.
     
-    user_prompt = f"""
+    user_prompt_context = f"""
 # HLD Documentation:
 {hld_content}
 
 # Source Code (TOON Format):
 {toon_input_str}
-
-Task: Compare the source code implementation against the HLD. Identify gaps, missing features, or logic discrepancies.
 """
     
-    # 6. Call Azure OpenAI
+    # We separate the dynamic instruction to allow the context above to be cached
+    user_prompt_instruction = "Task: Compare the source code implementation against the HLD. Identify gaps."
+
+    # Note: Ideally, we put the static context in the system prompt or early user prompt.
+    # Here we combine them for the API call, but in a real conversational app, 
+    # you would send messages[0]=system, messages[1]=context, and vary messages[2]=instruction.
+    
     try:
         response = client.chat.completions.create(
             model=deployment_name,
             messages=[
-                {"role": "system", "content": system_prompt_opt},
-                {"role": "user", "content": user_prompt}
+                {"role": "system", "content": sys_prompt_opt},
+                {"role": "user", "content": user_prompt_context + "\n" + user_prompt_instruction}
             ],
             temperature=0.0 
         )
@@ -202,12 +214,27 @@ Task: Compare the source code implementation against the HLD. Identify gaps, mis
         response_text = response.choices[0].message.content
         usage = response.usage
         
-        # Update Report with ACTUAL usage from API
-        token_report['actual_input_tokens'] = usage.prompt_tokens
-        token_report['output_tokens'] = usage.completion_tokens
-        token_report['total_tokens_used'] = usage.total_tokens
+        # --- EXTRACT AZURE CACHING METRICS ---
+        # The structure in Python SDK >=1.0 for prompt_tokens_details
+        azure_cached_tokens = 0
+        if hasattr(usage, 'prompt_tokens_details') and usage.prompt_tokens_details:
+            azure_cached_tokens = usage.prompt_tokens_details.cached_tokens or 0
         
-        save_to_cache(cache_key, {"response": response_text, "usage": usage.model_dump()})
+        # REPORT VALUES
+        token_report['actual_input_tokens_used'] = usage.prompt_tokens
+        token_report['actual_output_tokens_used'] = usage.completion_tokens
+        token_report['azure_cached_tokens'] = azure_cached_tokens
+        token_report['total_tokens_billed'] = usage.total_tokens
+        
+        # Save to Local Cache
+        save_to_cache(cache_key, {
+            "response": response_text, 
+            "usage": {
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+                "azure_cached_tokens": azure_cached_tokens
+            }
+        })
         
         return response_text
         
@@ -222,53 +249,118 @@ Task: Compare the source code implementation against the HLD. Identify gaps, mis
 def generate_markdown_report(report_data, analysis_result, output_file="token_usage_report.md"):
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    # Calculate Reduction
-    # Baseline is simulated JSON, Actual is TOON
-    tokens_saved = report_data['baseline_input_tokens'] - report_data.get('actual_input_tokens', 0)
+    # --- METRIC CALCULATIONS ---
     
-    if report_data['baseline_input_tokens'] > 0:
-        reduction_pct = (tokens_saved / report_data['baseline_input_tokens']) * 100
-    else:
-        reduction_pct = 0
-
-    # Correct logic for cache hit display
-    actual_input_display = report_data.get('actual_input_tokens', 0)
-    if report_data['cache_hit']:
-        savings_status = "100% (Cache Hit)"
-    else:
-        savings_status = f"{reduction_pct:.2f}%"
+    # 1. TOON Optimization (Data Layer)
+    tokens_saved_toon = report_data['json_input_tokens'] - report_data.get('actual_input_tokens_used', 0)
+    toon_reduction_pct = (tokens_saved_toon / report_data['json_input_tokens']) * 100 if report_data['json_input_tokens'] > 0 else 0
+    
+    # 2. Azure Caching (Server Layer)
+    azure_cached = report_data.get('azure_cached_tokens', 0)
+    azure_cache_status = "Active (Tokens Read from Cache)" if azure_cached > 0 else "Inactive (First Request or Not Supported)"
+    
+    # 3. Local Caching (Client Layer)
+    local_cache_status = 'HIT (Free)' if report_data['local_cache_hit'] else 'MISS (API Called)'
+    gross_tokens = report_data.get('actual_input_tokens_used', 0) + report_data.get('actual_output_tokens_used', 0)
+    net_tokens = report_data.get('total_tokens_billed', 0)
 
     content = f"""# Token Usage & Optimization Report
 
 **Date:** {now}
+**Files Analyzed:** {report_data.get('file_count', 'N/A')}
 
-## 1. Executive Summary
-This report demonstrates the token reduction achieved by switching from standard JSON payloads to **Separator-Based TOON** and utilizing **LLM Caching**.
+---
 
-## 2. Token Reduction Analysis
-Comparison between theoretical JSON usage (Baseline) and Actual TOON usage.
+## 1. Comparison: JSON vs. TOON (Input Optimization)
+This compares standard JSON serialization against the implemented TOON method.
 
-| Metric | Token Count |
-| :--- | :--- |
-| **Baseline (JSON Input)** | {report_data['baseline_input_tokens']} |
-| **Optimized (TOON Input)** | {actual_input_display} |
-| **Tokens Saved** | {tokens_saved} |
-| **Reduction Rate** | **{savings_status}** |
+| Metric | Token Count | Notes |
+| :--- | :--- | :--- |
+| **Baseline (JSON Input)** | {report_data['json_input_tokens']} | Theoretical count if using standard JSON. |
+| **Optimized (TOON Input)** | {report_data.get('actual_input_tokens_used', 'N/A')} | Actual input tokens sent to Azure. |
+| **Tokens Saved** | **{tokens_saved_toon}** | Reduction per analysis run. |
+| **Reduction Rate** | **{toon_reduction_pct:.2f}%** | Efficiency gain from TOON formatting. |
 
-## 3. Why did TOON reduce tokens?
-1. **Removed JSON Syntax:** We eliminated `{`, `}`, `"` characters which are plentiful in JSON code dumps.
-2. **Natural Newlines:** JSON requires `\n` (2 chars) for every line break. TOON uses native newlines (1 char), saving ~50% on whitespace tokens in code.
-3. **Prompt Tuning:** The prompt was updated to instruct the LLM on reading the compact format, ensuring accuracy is maintained despite lower token count.
+---
 
-## 4. Execution Details
+## 2. Comparison: Caching Strategies (Runtime Optimization)
+This report tracks two layers of caching: **Local Client-Side Cache** (Hash based) and **Azure Prompt Cache** (Server based).
+
+### 2.1 Local Client-Side Cache
+Checks if the exact request has been made before.
+
 | Metric | Value |
 | :--- | :--- |
-| **Source Files Analyzed** | {report_data.get('file_count', 'N/A')} |
-| **Cache Status** | {'HIT (0 Tokens Used)' if report_data['cache_hit'] else 'MISS (API Called)'} |
-| **Output Tokens** | {report_data.get('output_tokens', 0)} |
-| **Total Transaction Tokens** | {report_data.get('total_tokens_used', 0)} |
-"""
+| **Status** | {local_cache_status} |
+| **Gross Tokens (Work Done)** | {gross_tokens} |
+| **Net Tokens Billed** | **{net_tokens}** |
 
- with open(output_file, "w") as f:
+### 2.2 Azure Prompt Cache
+If Local Cache missed, Azure might still cache the prompt prefix (Context) if the model supports it (e.g., GPT-4o). This allows re-using the processed code context for *different* questions.
+
+| Metric | Value |
+| :--- | :--- |
+| **Azure Cached Tokens** | **{azure_cached}** |
+| **Status** | {azure_cache_status} |
+| **Impact** | {'Reduced latency and input cost for this request.' if azure_cached > 0 else 'Full processing required.'} |
+
+"""
+    with open(output_file, "w") as f:
         f.write(content)
     print(f"\nReport generated: {output_file}")
+# ==========================================
+# 8. MAIN EXECUTION
+# ==========================================
+
+def main():
+    # --- CONFIGURATION ---
+    SOURCE_CODE_DIR = "./sample_source_code" 
+    HLD_FILE_PATH = "./sample_hld/hld.md"
+    # NOTE: Use a model that supports Prompt Caching (e.g., gpt-4o or gpt-4o-mini)
+    DEPLOYMENT_NAME = os.getenv("AZURE_DEPLOYMENT_NAME", "gpt-4o") 
+    
+    # Setup Dummy Data
+    if not os.path.exists(SOURCE_CODE_DIR):
+        os.makedirs(SOURCE_CODE_DIR)
+        with open(os.path.join(SOURCE_CODE_DIR, "main.py"), "w") as f:
+            # Create a slightly larger file to ensure we meet the 1024 token minimum for caching
+            code_content = "def calculate_tax(amount):\n    return amount * 0.2\n" * 50
+            f.write(code_content)
+            
+    if not os.path.exists(os.path.dirname(HLD_FILE_PATH)):
+        os.makedirs(os.path.dirname(HLD_FILE_PATH))
+    if not os.path.exists(HLD_FILE_PATH):
+        with open(HLD_FILE_PATH, "w") as f:
+            f.write("# Tax Module HLD\nThe system must calculate tax.")
+
+    try:
+        client = get_azure_client()
+    except Exception as e:
+        print(f"Client Init Error: {e}")
+        return
+
+    token_report = {
+        'json_input_tokens': 0,
+        'actual_input_tokens_used': 0,
+        'actual_output_tokens_used': 0,
+        'azure_cached_tokens': 0,
+        'total_tokens_billed': 0,
+        'local_cache_hit': False,
+        'file_count': 0
+    }
+    
+    print("--- Starting Gap Analysis ---")
+    
+    result = analyze_gap(
+        client, 
+        DEPLOYMENT_NAME, 
+        SOURCE_CODE_DIR, 
+        HLD_FILE_PATH, 
+        token_report
+    )
+    
+    print("\n--- Analysis Complete ---")
+    generate_markdown_report(token_report, result)
+
+if __name__ == "__main__":
+    main()

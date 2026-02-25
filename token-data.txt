@@ -1,0 +1,323 @@
+import os
+import json
+import hashlib
+import tiktoken
+from openai import AzureOpenAI
+from dotenv import load_dotenv
+import datetime
+
+# ==========================================
+# 1. SETUP & CONFIGURATION
+# ==========================================
+
+def get_azure_client():
+    """Initializes and returns the Azure OpenAI client."""
+    load_dotenv()
+    
+    client = AzureOpenAI(
+        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+        api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview"),
+        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
+    )
+    return client
+
+# ==========================================
+# 2. TOON IMPLEMENTATION (Token Reduction)
+# ==========================================
+
+def dict_to_toon(data, headers=None):
+    """
+    Converts a dictionary or list into TOON (Table Oriented Object Notation).
+    This format removes JSON syntax overhead (braces, quotes) and uses 
+    pipe-delimited rows.
+    """
+    if not data:
+        return ""
+    
+    rows = []
+    
+    # Handle List of Dictionaries (common for code structures)
+    if isinstance(data, list) and all(isinstance(i, dict) for i in data):
+        if not headers:
+            headers = list(data[0].keys())
+        # Header row
+        rows.append(" | ".join(headers))
+        # Data rows
+        for item in data:
+            vals = [str(item.get(h, "")) for h in headers]
+            rows.append(" | ".join(vals))
+        return "\n".join(rows)
+    
+    # Handle Single Dictionary
+    elif isinstance(data, dict):
+        rows.append("Key | Value")
+        for k, v in data.items():
+            rows.append(f"{k} | {v}")
+        return "\n".join(rows)
+        
+    return str(data)
+
+# ==========================================
+# 3. TOKEN COUNTING UTILITIES
+# ==========================================
+
+def count_tokens(text, model="gpt-4"):
+    """Counts the number of tokens in a text string."""
+    try:
+        encoding = tiktoken.encoding_for_model(model)
+    except KeyError:
+        # Fallback for Azure deployment names that differ from model names
+        encoding = tiktoken.get_encoding("cl100k_base")
+    return len(encoding.encode(text))
+
+# ==========================================
+# 4. LLM CACHING STRATEGY (CORE REQUIREMENT)
+# ==========================================
+
+def generate_cache_key(content):
+    """
+    Generates a unique hash for the content.
+    This acts as the fingerprint for the LLM cache.
+    """
+    return hashlib.sha256(content.encode('utf-8')).hexdigest()
+
+def get_cached_response(cache_key, cache_dir="llm_cache"):
+    """
+    Retrieves response from local file cache if it exists.
+    """
+    if not os.path.exists(cache_dir):
+        os.makedirs(cache_dir)
+        
+    file_path = os.path.join(cache_dir, f"{cache_key}.json")
+    
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as f:
+            return json.load(f)
+    return None
+
+def save_to_cache(cache_key, response_data, cache_dir="llm_cache"):
+    """
+    Saves the LLM response to local cache.
+    """
+    file_path = os.path.join(cache_dir, f"{cache_key}.json")
+    with open(file_path, 'w') as f:
+        json.dump(response_data, f)
+
+# ==========================================
+# 5. CORE APPLICATION LOGIC
+# ==========================================
+
+def analyze_gap_with_llm(client, deployment_name, source_code, hld_doc, token_report):
+    """
+    Analyzes the gap between source code and HLD using TOON and Caching.
+    """
+    
+    # Step A: Convert inputs to TOON format to save tokens
+    # We treat source code metadata or snippets as structured data for TOON
+    # For this example, we assume source_code and hld_doc are text strings.
+    # If they were structured JSON, dict_to_toon would reduce token count significantly.
+    
+    # Let's simulate structured data extraction for the report
+    # (In a real app, you might parse the code AST here)
+    source_data = {"type": "source", "content": source_code, "length": len(source_code)}
+    hld_data = {"type": "hld", "content": hld_doc, "length": len(hld_doc)}
+    
+    # Convert to TOON
+    source_toon = dict_to_toon(source_data)
+    hld_toon = dict_to_toon(hld_data)
+    
+    # Step B: Construct the Prompt
+    system_prompt = "You are an expert code auditor. Compare the Source Code TOON data with the HLD TOON data. Identify gaps."
+    user_prompt = f"""
+    # Source Code Data (TOON):
+    {source_toon}
+    
+    # HLD Documentation Data (TOON):
+    {hld_toon}
+    
+    Task: Analyze the gaps between the source code implementation and the HLD documentation.
+    """
+    
+    # Step C: Token Calculation for Reporting
+    # 1. Calculate JSON Baseline (What it WOULD have been)
+    json_input = json.dumps({"source": source_data, "hld": hld_data})
+    baseline_token_count = count_tokens(json_input) + count_tokens(system_prompt)
+    
+    # 2. Calculate TOON Optimized Count
+    toon_input = user_prompt
+    optimized_token_count = count_tokens(toon_input) + count_tokens(system_prompt)
+    
+    token_report['baseline_input_tokens'] = baseline_token_count
+    token_report['optimized_input_tokens'] = optimized_token_count
+    token_report['input_tokens_saved'] = baseline_token_count - optimized_token_count
+    
+    # Step D: Caching Logic
+    cache_key_content = system_prompt + user_prompt
+    cache_key = generate_cache_key(cache_key_content)
+    
+    # Check Cache
+    cached_result = get_cached_response(cache_key)
+    
+    if cached_result:
+        print("CACHE HIT: Retrieved response from LLM Cache (0 tokens used).")
+        token_report['output_tokens'] = 0
+        token_report['total_tokens_used'] = 0
+        token_report['cache_hit'] = True
+        return cached_result.get("response")
+    
+    print("CACHE MISS: Calling Azure OpenAI...")
+    token_report['cache_hit'] = False
+    
+    # Step E: Call Azure OpenAI
+    try:
+        response = client.chat.completions.create(
+            model=deployment_name,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.0 # Deterministic output helps caching
+        )
+        
+        response_text = response.choices[0].message.content
+        usage = response.usage
+        
+        # Update Report
+        token_report['output_tokens'] = usage.completion_tokens
+        # We report actual usage for the optimized flow
+        token_report['total_tokens_used'] = usage.total_tokens 
+        
+        # Save to Cache
+        save_to_cache(cache_key, {"response": response_text, "usage": usage.model_dump()})
+        
+        return response_text
+        
+    except Exception as e:
+        return f"Error calling LLM: {str(e)}"
+
+# ==========================================
+# 6. REPORT GENERATION
+# ==========================================
+
+def generate_markdown_report(report_data, output_file="token_usage_report.md"):
+    """Generates a markdown file with the token usage report."""
+    
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    content = f"""# Token Usage & Optimization Report
+
+**Generated At:** {now}
+**Target:** Azure OpenAI (Local Application)
+
+## 1. Summary
+This report details the token reduction achieved by implementing **TOON (Table Oriented Object Notation)** and **LLM-Side Caching**.
+
+## 2. Input Token Reduction (TOON vs JSON)
+We compared the standard JSON serialization against the implemented TOON serialization for the input prompt.
+
+| Metric | Token Count |
+| :--- | :--- |
+| **Baseline (JSON Format)** | {report_data['baseline_input_tokens']} |
+| **Optimized (TOON Format)** | {report_data['optimized_input_tokens']} |
+| **Tokens Saved** | {report_data['input_tokens_saved']} |
+| **Reduction %** | {(report_data['input_tokens_saved'] / report_data['baseline_input_tokens']) * 100:.2f}% |
+
+## 3. LLM Caching Strategy Results
+The application uses a content-hash based caching mechanism (SHA-256).
+
+| Metric | Status |
+| :--- | :--- |
+| **Cache Status** | {'HIT (Free of cost)' if report_data['cache_hit'] else 'MISS (API Called)'} |
+| **Output Tokens** | {report_data['output_tokens']} |
+| **Total Tokens Charged** | {report_data['total_tokens_used']} |
+
+## 4. Cost Analysis
+Assuming a standard GPT-4 pricing model ($0.03 / 1k input tokens, $0.06 / 1k output tokens):
+
+- **Cost without Optimization (JSON, No Cache):** 
+  - Input: {report_data['baseline_input_tokens']} tokens
+  - Output: {report_data['output_tokens']} tokens
+  - **Total Cost:** ${(report_data['baseline_input_tokens']/1000 * 0.03) + (report_data['output_tokens']/1000 * 0.06):.4f}}
+
+- **Cost with Optimization (TOON + Cache):**
+  - Input: {report_data['optimized_input_tokens']} tokens
+  - Output: {report_data['output_tokens']} tokens
+  - **Total Cost:** ${(report_data['total_tokens_used']/1000 * 0.03):.4f}}
+
+*(Note: If Cache was HIT, cost is $0.00 for this run, but the table above shows the cost comparison for the specific run logic).*
+
+## 5. Other Optimization Ideas
+1. **Semantic Caching:** Instead of exact hash matching, use vector embeddings to check if a *similar* question has been asked before.
+2. **Context Compression:** Use a smaller model (e.g., GPT-3.5) to summarize the code before feeding it to the main GPT-4 model.
+3. **Pydantic Validation:** Enforce strict output schemas to prevent verbose LLM rambling.
+"""
+    
+    with open(output_file, "w") as f:
+        f.write(content)
+    
+    print(f"\nReport generated: {output_file}")
+
+# ==========================================
+# 7. MAIN EXECUTION
+# ==========================================
+
+def main():
+    # Configuration
+    load_dotenv()
+    DEPLOYMENT_NAME = os.getenv("AZURE_DEPLOYMENT_NAME", "gpt-4")
+    
+    # Initialize Client
+    try:
+        client = get_azure_client()
+    except Exception as e:
+        print(f"Error initializing client: {e}")
+        return
+
+    # Dummy Data (Simulating Source Code & HLD)
+    # In real scenario, read from files: open('main.py').read()
+    source_code_content = """
+    def calculate_sum(a, b):
+        return a + b
+    
+    def process_data(data):
+        result = []
+        for item in data:
+            result.append(item * 2)
+        return result
+    """
+    
+    hld_documentation = """
+    The system shall contain a calculator module.
+    The calculator module should support addition (sum).
+    The system shall also contain a data processor that doubles input values.
+    """
+    
+    # Token Report Dictionary
+    token_report = {
+        'baseline_input_tokens': 0,
+        'optimized_input_tokens': 0,
+        'input_tokens_saved': 0,
+        'output_tokens': 0,
+        'total_tokens_used': 0,
+        'cache_hit': False
+    }
+    
+    print("--- Starting Gap Analysis ---")
+    
+    # Run Analysis
+    result = analyze_gap_with_llm(
+        client, 
+        DEPLOYMENT_NAME, 
+        source_code_content, 
+        hld_documentation, 
+        token_report
+    )
+    
+    print("\n--- Analysis Result ---")
+    print(result)
+    
+    # Generate Report
+    generate_markdown_report(token_report)
+
+if __name__ == "__main__":
+    main()

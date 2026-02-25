@@ -1,0 +1,286 @@
+import os
+import json
+import yaml
+import hashlib
+import tiktoken
+from openai import AzureOpenAI
+from dotenv import load_dotenv
+from datetime import datetime
+
+# ==========================================
+# STEP 1: CONFIGURATION & SETUP
+# ==========================================
+load_dotenv()
+
+# Azure Credentials
+AZURE_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
+API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
+API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
+DEPLOYMENT_NAME = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o")
+
+# Initialize Client globally or pass it around
+client = AzureOpenAI(
+    azure_endpoint=AZURE_ENDPOINT,
+    api_key=API_KEY,
+    api_version=API_VERSION
+)
+
+# Global tracker for the report
+token_logs = []
+
+# ==========================================
+# STEP 2: TOKEN COUNTING UTILITY
+# ==========================================
+def count_tokens(text: str, model="gpt-4"):
+    """
+    Calculates the number of tokens in a text string using tiktoken.
+    """
+    try:
+        encoding = tiktoken.encoding_for_model(model)
+    except KeyError:
+        # Fallback for newer models not in tiktoken yet
+        encoding = tiktoken.get_encoding("cl100k_base")
+    return len(encoding.encode(text))
+
+# ==========================================
+# STEP 3: CACHING IMPLEMENTATION
+# ==========================================
+CACHE_FILE = "llm_cache.json"
+
+def get_cache_key(source_code: str, hld_doc: str, mode: str):
+    """
+    Generates a unique SHA256 hash based on the content and mode.
+    This ensures that if content changes, the cache invalidates automatically.
+    """
+    raw_data = f"{source_code}|{hld_doc}|{mode}"
+    return hashlib.sha256(raw_data.encode('utf-8')).hexdigest()
+
+def load_cache():
+    """Loads the cache from a local JSON file."""
+    if not os.path.exists(CACHE_FILE):
+        return {}
+    try:
+        with open(CACHE_FILE, 'r') as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        return {}
+
+def save_cache(cache_data):
+    """Saves the cache to a local JSON file."""
+    with open(CACHE_FILE, 'w') as f:
+        json.dump(cache_data, f, indent=4)
+
+def get_cached_response(key):
+    """Retrieves response from cache if exists."""
+    cache = load_cache()
+    return cache.get(key)
+
+def set_cached_response(key, response):
+    """Stores response in cache."""
+    cache = load_cache()
+    cache[key] = response
+    save_cache(cache)
+
+# ==========================================
+# STEP 4: PAYLOAD FORMATTERS (JSON vs YAML)
+# ==========================================
+def format_payload_json(source_code, hld_doc):
+    """Standard JSON formatting (High Token Cost)."""
+    return json.dumps({
+        "source_code": source_code,
+        "high_level_design": hld_doc
+    }, indent=2)
+
+def format_payload_yaml(source_code, hld_doc):
+    """TOON / YAML formatting (Low Token Cost)."""
+    return yaml.dump({
+        "source_code": source_code,
+        "high_level_design": hld_doc
+    }, default_flow_style=False, sort_keys=False)
+
+# ==========================================
+# STEP 5: CORE ANALYSIS FUNCTIONS
+# ==========================================
+def analyze_baseline(source_code, hld_doc):
+    """
+    Standard approach: JSON format, No Caching.
+    """
+    system_prompt = "You are a code reviewer. Compare Source Code and HLD. Identify gaps."
+    user_payload = format_payload_json(source_code, hld_doc)
+    
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_payload}
+    ]
+    
+    # Calculate Input Tokens
+    input_text = system_prompt + user_payload
+    input_tokens = count_tokens(input_text)
+    
+    # API Call
+    response = client.chat.completions.create(
+        model=DEPLOYMENT_NAME,
+        messages=messages,
+        temperature=0.0
+    )
+    
+    result_text = response.choices[0].message.content
+    output_tokens = count_tokens(result_text)
+    
+    # Log usage
+    token_logs.append({
+        "strategy": "Baseline (JSON + No Cache)",
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        "status": "API Called"
+    })
+    
+    return result_text
+
+def analyze_optimized(source_code, hld_doc):
+    """
+    Optimized approach: YAML (TOON) + Active Caching.
+    """
+    system_prompt = "You are a code reviewer. Compare Source Code and HLD. Identify gaps."
+    user_payload = format_payload_yaml(source_code, hld_doc)
+    
+    # 1. Generate Cache Key
+    cache_key = get_cache_key(source_code, hld_doc, "yaml_optimized")
+    
+    # 2. Check Cache
+    cached_response = get_cached_response(cache_key)
+    if cached_response:
+        # CACHE HIT!
+        token_logs.append({
+            "strategy": "Optimized (YAML + Cache)",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "status": "Cache Hit (Free)"
+        })
+        return cached_response
+    
+    # 3. Cache Miss - Prepare Messages
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_payload}
+    ]
+    
+    # Calculate Input Tokens (YAML is smaller)
+    input_text = system_prompt + user_payload
+    input_tokens = count_tokens(input_text)
+    
+    # 4. API Call
+    response = client.chat.completions.create(
+        model=DEPLOYMENT_NAME,
+        messages=messages,
+        temperature=0.0
+    )
+    
+    result_text = response.choices[0].message.content
+    output_tokens = count_tokens(result_text)
+    
+    # 5. Save to Cache
+    set_cached_response(cache_key, result_text)
+    
+    # Log usage
+    token_logs.append({
+        "strategy": "Optimized (YAML - First Run)",
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        "status": "API Called"
+    })
+    
+    return result_text
+
+# ==========================================
+# STEP 6: REPORTING
+# ==========================================
+def generate_markdown_report():
+    report = []
+    report.append("# Token Usage & Cost Optimization Report")
+    report.append(f"**Generated At:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    report.append("")
+    
+    report.append("## Detailed Logs")
+    report.append("| Strategy | Input Tokens | Output Tokens | Total Tokens | Status |")
+    report.append("|---|---|---|---|---|")
+    
+    total_input = 0
+    total_output = 0
+    total_overall = 0
+    
+    for log in token_logs:
+        report.append(f"| {log['strategy']} | {log['input_tokens']} | {log['output_tokens']} | {log['total_tokens']} | {log['status']} |")
+        total_input += log['input_tokens']
+        total_output += log['output_tokens']
+        total_overall += log['total_tokens']
+        
+    report.append("")
+    report.append("## Summary Statistics")
+    report.append(f"- **Total Tokens Consumed:** {total_overall}")
+    report.append(f"- **Total Input Tokens:** {total_input}")
+    report.append(f"- **Total Output Tokens:** {total_output}")
+    
+    if len(token_logs) >= 2:
+        # Compare Baseline vs Optimized First Run
+        base = token_logs[0]
+        opt = [x for x in token_logs if "First Run" in x['strategy']][0] # Find the optimization run that actually hit API
+        
+        reduction = base['total_tokens'] - opt['total_tokens']
+        pct = (reduction / base['total_tokens']) * 100
+        
+        report.append("")
+        report.append("## Optimization Analysis")
+        report.append(f"- **Token Reduction (YAML vs JSON):** {reduction} tokens ({pct:.2f}%)")
+        report.append("- **Cost Savings Strategy:**")
+        report.append("  - **YAML (TOON):** Reduced structural syntax overhead.")
+        report.append("  - **Caching:** Subsequent runs of the same file comparison cost $0 (0 tokens).")
+    
+    return "\n".join(report)
+
+# ==========================================
+# STEP 7: MAIN EXECUTION FLOW
+# ==========================================
+if __name__ == "__main__":
+    # Mock Data
+    SRC_CODE = """
+    class UserService:
+        def __init__(self, db):
+            self.db = db
+        
+        def get_user(self, id):
+            query = f"SELECT * FROM users WHERE id = {id}"
+            return self.db.execute(query)
+            
+        def delete_user(self, id):
+            self.db.execute(f"DELETE FROM users WHERE id = {id}")
+    """
+    
+    HLD_DOC = """
+    Component: UserService
+    Requirements:
+    1. Use parameterized queries to prevent SQL injection.
+    2. Implement soft-delete for user removal (set is_deleted=1).
+    3. Add logging for all transactions.
+    """
+
+    print("Step 1: Running Baseline Analysis (JSON, No Cache)...")
+    analyze_baseline(SRC_CODE, HLD_DOC)
+    
+    print("\nStep 2: Running Optimized Analysis (YAML, First Run - Cache Miss)...")
+    analyze_optimized(SRC_CODE, HLD_DOC)
+    
+    print("\nStep 3: Running Optimized Analysis Again (Cache Hit Simulation)...")
+    analyze_optimized(SRC_CODE, HLD_DOC)
+    
+    print("\nGenerating Report...")
+    report_content = generate_markdown_report()
+    print(report_content)
+    
+    # Save report to file
+    with open("Token_Report.md", "w") as f:
+        f.write(report_content)
+    print("\nReport saved to Token_Report.md")

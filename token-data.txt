@@ -5,7 +5,6 @@ import tiktoken
 from openai import AzureOpenAI
 from dotenv import load_dotenv
 import datetime
-import glob
 
 # ==========================================
 # 1. SETUP & CONFIGURATION
@@ -26,10 +25,12 @@ def get_azure_client():
 # 2. FILE SYSTEM OPERATIONS
 # ==========================================
 
-def read_source_code_files(source_dir, extensions=[".py", ".js", ".java", ".cs"]):
+def read_source_code_files(source_dir, extensions=[".py", ".js", ".java", ".cs", ".ts"]):
     """
     Recursively reads all files with given extensions from the directory.
-    Returns a dictionary {filepath: content} and the raw concatenated string for hashing.
+    Returns:
+        1. code_files_dict: {filepath: content}
+        2. raw_concat: Raw string of all content (for hashing)
     """
     code_files = {}
     raw_content_for_hash = ""
@@ -38,19 +39,18 @@ def read_source_code_files(source_dir, extensions=[".py", ".js", ".java", ".cs"]
         raise FileNotFoundError(f"Source directory not found: {source_dir}")
 
     for root, dirs, files in os.walk(source_dir):
-        # Skip common non-code directories like venv, node_modules, .git
-        dirs[:] = [d for d in dirs if d not in ['venv', '__pycache__', 'node_modules', '.git', 'env']]
+        # Skip non-essential directories
+        dirs[:] = [d for d in dirs if d not in ['venv', '__pycache__', 'node_modules', '.git', 'env', 'build', 'dist']]
         
         for file in files:
             if any(file.endswith(ext) for ext in extensions):
                 file_path = os.path.join(root, file)
                 try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                         content = f.read()
-                        # Store relative path to save tokens and for clarity
                         rel_path = os.path.relpath(file_path, source_dir)
                         code_files[rel_path] = content
-                        raw_content_for_hash += content
+                        raw_content_for_hash += f"FILE:{rel_path}\n{content}\n"
                 except Exception as e:
                     print(f"Warning: Could not read {file_path}: {e}")
                     
@@ -68,29 +68,21 @@ def read_hld_file(hld_path):
 # 3. TOON IMPLEMENTATION
 # ==========================================
 
-def dict_to_toon(data, headers=None):
+def dict_to_toon(data):
     """
     Converts a dictionary to TOON (Table Oriented Object Notation).
-    For Source Code: 'File Path | Content'
+    Format: 'Key | Value'
     """
     if not data:
         return "No data provided"
     
     rows = []
+    rows.append("File Path | Content")
     
-    if isinstance(data, dict):
-        # Determine headers based on context
-        # If keys are file paths, we label them explicitly
-        sample_key = next(iter(data.keys()))
-        
-        # Heuristic: if content looks like code, use "File | Code"
-        rows.append("File Path | Content")
-        
-        for key, value in data.items():
-            # Escape newlines in content to keep table structure valid (optional, but cleaner for logs)
-            # LLMs handle newlines inside pipe cells fine usually.
-            clean_val = str(value).replace("\n", "\\n") 
-            rows.append(f"{key} | {clean_val}")
+    for key, value in data.items():
+        # We keep newlines as escaped \\n for the table structure visibility
+        clean_val = str(value).replace("\n", "\\n") 
+        rows.append(f"{key} | {clean_val}")
             
     return "\n".join(rows)
 
@@ -98,8 +90,11 @@ def dict_to_toon(data, headers=None):
 # 4. TOKEN COUNTING UTILITIES
 # ==========================================
 
-def count_tokens(text, model="gpt-4"):
-    """Counts the number of tokens in a text string."""
+def count_tokens_tiktoken(text, model="gpt-4"):
+    """
+    Used ONLY for Baseline Simulation.
+    Actual usage comes from API response.
+    """
     try:
         encoding = tiktoken.encoding_for_model(model)
     except KeyError:
@@ -110,12 +105,12 @@ def count_tokens(text, model="gpt-4"):
 # 5. LLM CACHING STRATEGY
 # ==========================================
 
-def generate_cache_key(source_content, hld_content):
+def generate_cache_key(source_raw, hld_raw):
     """
     Generates a unique hash based on file contents.
-    Strategy: If content changes -> Hash changes -> Cache Miss.
+    Ensures cache invalidation if code or doc changes.
     """
-    combined = source_content + "||SEPARATOR||" + hld_content
+    combined = source_raw + "||SEPARATOR||" + hld_raw
     return hashlib.sha256(combined.encode('utf-8')).hexdigest()
 
 def get_cached_response(cache_key, cache_dir="llm_cache"):
@@ -148,60 +143,60 @@ def analyze_gap(client, deployment_name, source_dir, hld_path, token_report):
     hld_content = read_hld_file(hld_path)
     
     if not code_files_dict:
-        return "No source code files found."
+        return "No source code files found.", 0
 
-    # 2. Prepare TOON Data
-    # Convert source code dictionary to TOON string
-    source_toon = dict_to_toon(code_files_dict)
+    # 2. Prepare Data Formats
     
-    # 3. Baseline Calculation (What it would have been in JSON)
-    # This simulates dumping the whole dictionary as JSON
-    json_baseline_input = json.dumps(code_files_dict)
-    baseline_tokens = count_tokens(json_baseline_input)
+    # A. JSON Format (For Baseline Simulation)
+    json_input_str = json.dumps(code_files_dict, indent=2)
     
-    # 4. Optimized Input (TOON)
-    optimized_tokens = count_tokens(source_toon)
+    # B. TOON Format (For Optimization)
+    toon_input_str = dict_to_toon(code_files_dict)
     
-    # Update report with input stats
-    token_report['baseline_input_tokens'] = baseline_tokens
-    token_report['optimized_input_tokens'] = optimized_tokens
-    token_report['input_tokens_saved'] = baseline_tokens - optimized_tokens
+    # 3. Calculate Baseline (Simulated)
+    # We simulate what the token count WOULD have been if we sent JSON
+    system_prompt = "You are an expert code auditor. Analyze the Source Code against the HLD documentation. Identify gaps."
     
-    # 5. Caching Logic
-    # Key is generated from actual file content, not the TOON string, 
-    # to ensure semantic identity.
+    # Counting system prompt once
+    sys_tokens = count_tokens_tiktoken(system_prompt)
+    hld_tokens = count_tokens_tiktoken(hld_content)
+    
+    # Baseline Input = System Prompt + HLD + JSON Source
+    json_source_tokens = count_tokens_tiktoken(json_input_str)
+    baseline_input_total = sys_tokens + hld_tokens + json_source_tokens
+    
+    token_report['baseline_input_tokens'] = baseline_input_total
+    token_report['file_count'] = len(code_files_dict)
+
+    # 4. Caching Logic
     cache_key = generate_cache_key(code_raw_content, hld_content)
     cached_result = get_cached_response(cache_key)
     
     if cached_result:
-        print("CACHE HIT: Retrieved response from LLM Cache (Cost: $0.00).")
+        print("CACHE HIT: Retrieved response from LLM Cache.")
+        token_report['cache_hit'] = True
+        token_report['actual_input_tokens'] = 0
         token_report['output_tokens'] = 0
         token_report['total_tokens_used'] = 0
-        token_report['cache_hit'] = True
+        # For cache hits, we can't show "Actual vs Baseline" for this specific run 
+        # because we didn't send the prompt, but the design saving (TOON) remains constant.
         return cached_result.get("response")
     
     print("CACHE MISS: Calling Azure OpenAI...")
     token_report['cache_hit'] = False
     
-    # 6. Construct Prompt
-    system_prompt = "You are an expert code auditor. Analyze the Source Code (in TOON format) against the HLD documentation. Identify implementation gaps, missing features, or logic discrepancies."
-    
+    # 5. Construct Optimized Prompt
     user_prompt = f"""
     # HLD Documentation:
     {hld_content}
     
-    # Source Code Data (TOON Format: File Path | Content):
-    {source_toon}
+    # Source Code Data (TOON Format):
+    {toon_input_str}
     
-    Task: Please provide a detailed gap analysis report.
+    Task: Analyze the gaps between the HLD and Source Code.
     """
     
-    # Add system prompt tokens to the counts for accurate reporting
-    system_tokens = count_tokens(system_prompt)
-    token_report['baseline_input_tokens'] += system_tokens
-    token_report['optimized_input_tokens'] += system_tokens
-    
-    # 7. Call Azure OpenAI
+    # 6. Call Azure OpenAI
     try:
         response = client.chat.completions.create(
             model=deployment_name,
@@ -213,8 +208,11 @@ def analyze_gap(client, deployment_name, source_dir, hld_path, token_report):
         )
         
         response_text = response.choices[0].message.content
+        
+        # 7. Extract Usage from API Response (THE REQUIREMENT)
         usage = response.usage
         
+        token_report['actual_input_tokens'] = usage.prompt_tokens
         token_report['output_tokens'] = usage.completion_tokens
         token_report['total_tokens_used'] = usage.total_tokens
         
@@ -224,7 +222,8 @@ def analyze_gap(client, deployment_name, source_dir, hld_path, token_report):
         return response_text
         
     except Exception as e:
-        return f"Error: {str(e)}"
+        print(f"Error: {str(e)}")
+        return f"Error during analysis: {str(e)}"
 
 # ==========================================
 # 7. REPORT GENERATION
@@ -233,116 +232,39 @@ def analyze_gap(client, deployment_name, source_dir, hld_path, token_report):
 def generate_markdown_report(report_data, analysis_result, output_file="token_usage_report.md"):
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    # Calculate costs (Standard GPT-4 Pricing approximation)
-    input_cost = (report_data['optimized_input_tokens'] / 1000) * 0.03
-    output_cost = (report_data['output_tokens'] / 1000) * 0.06
-    total_cost = input_cost + output_cost
+    # Calculate Reduction
+    # Note: If Cache Hit, actual tokens are 0, reduction would be 100% regarding runtime, 
+    # but we focus on 'Design Reduction' (JSON vs TOON) for the first table.
     
-    baseline_input_cost = (report_data['baseline_input_tokens'] / 1000) * 0.03
+    tokens_saved_design = report_data['baseline_input_tokens'] - report_data.get('actual_input_tokens', 0)
     
+    # Avoid division by zero if actual_input_tokens is 0 (cache hit)
+    if report_data['baseline_input_tokens'] > 0:
+        reduction_pct = (tokens_saved_design / report_data['baseline_input_tokens']) * 100
+    else:
+        reduction_pct = 0
+
     content = f"""# Token Usage & Optimization Report
 
-**Generated At:** {now}
+**Date:** {now}
 
-## 1. Execution Summary
-- **Source Path:** `{report_data.get('source_path', 'N/A')}`
-- **HLD Path:** `{report_data.get('hld_path', 'N/A')}`
-- **Files Analyzed:** {report_data.get('file_count', 'N/A')}
-- **Cache Status:** {'HIT (Free)' if report_data['cache_hit'] else 'MISS (API Called)'}
+## 1. Executive Summary
+This report presents the token usage metrics for the Code-to-HLD Gap Analysis application. 
+It highlights the efficiency gains achieved through **TOON (Table Oriented Object Notation)** and **LLM Caching**.
 
-## 2. Token Optimization Analysis (JSON vs TOON)
-We replaced standard JSON serialization with TOON (Table Oriented Object Notation) for transmitting source code content.
+## 2. Optimization Metrics (Input Reduction)
+The following table compares the theoretical usage of standard JSON input versus the implemented TOON input.
 
-| Metric | Token Count | Estimated Cost |
-| :--- | :--- | :--- |
-| **Baseline (JSON)** | {report_data['baseline_input_tokens']} | ${baseline_input_cost:.4f} |
-| **Optimized (TOON)** | {report_data['optimized_input_tokens']} | ${input_cost:.4f} |
-| **Savings** | **{report_data['input_tokens_saved']}** | **{((report_data['input_tokens_saved']/1000)*0.03):.4f}** |
-
-## 3. Total Transaction Cost
-| Item | Tokens |
+| Metric | Token Count |
 | :--- | :--- |
-| **Input Tokens (Sent)** | {report_data['optimized_input_tokens']} |
-| **Output Tokens (Received)** | {report_data['output_tokens']} |
-| **Total Tokens** | {report_data['total_tokens_used']} |
-| **Total API Cost** | **${total_cost:.4f}** |
+| **Standard JSON Input (Baseline)** | {report_data['baseline_input_tokens']} |
+| **Optimized TOON Input (Actual)** | {report_data.get('actual_input_tokens', 'N/A')} |
+| **Tokens Saved (Design)** | {tokens_saved_design} |
+| **Input Reduction Rate** | **{reduction_pct:.2f}%** |
 
-## 4. LLM Gap Analysis Result
-{analysis_result}
+## 3. Execution Statistics
+Details of the last API call (if cache missed) or cached retrieval.
 
-## 5. Optimization Strategy Explanation
-1. **TOON:** By removing JSON syntax (`{{`, `}}`, quotes) and using pipe-delimited tables, we reduced the input token count significantly.
-2. **Caching:** A SHA-256 hash was generated from file contents. If files do not change, the cache returns the previous result, reducing cost to zero for subsequent runs.
-"""
-    
-    with open(output_file, "w") as f:
-        f.write(content)
-    print(f"\nReport generated: {output_file}")
-
-# ==========================================
-# 8. MAIN EXECUTION
-# ==========================================
-
-def main():
-    # --- CONFIGURATION ---
-    # Replace these with your actual local paths
-    SOURCE_CODE_DIR = "./sample_source_code" 
-    HLD_FILE_PATH = "./sample_hld/hld.md"
-    DEPLOYMENT_NAME = os.getenv("AZURE_DEPLOYMENT_NAME", "gpt-4")
-    
-    # Create dummy files for demonstration if they don't exist
-    if not os.path.exists(SOURCE_CODE_DIR):
-        os.makedirs(SOURCE_CODE_DIR)
-        with open(os.path.join(SOURCE_CODE_DIR, "main.py"), "w") as f:
-            f.write("def add(a, b):\n    return a + b\n")
-        with open(os.path.join(SOURCE_CODE_DIR, "utils.py"), "w") as f:
-            f.write("def delete_user(id):\n    pass # TODO\n")
-            
-    if not os.path.exists(os.path.dirname(HLD_FILE_PATH)):
-        os.makedirs(os.path.dirname(HLD_FILE_PATH))
-    if not os.path.exists(HLD_FILE_PATH):
-        with open(HLD_FILE_PATH, "w") as f:
-            f.write("# HLD\nSystem must implement add function and user deletion logic.")
-
-    # Initialize Client
-    try:
-        client = get_azure_client()
-    except Exception as e:
-        print(f"Client Init Error: {e}")
-        return
-
-    # Initialize Report Dictionary
-    token_report = {
-        'baseline_input_tokens': 0,
-        'optimized_input_tokens': 0,
-        'input_tokens_saved': 0,
-        'output_tokens': 0,
-        'total_tokens_used': 0,
-        'cache_hit': False,
-        'source_path': SOURCE_CODE_DIR,
-        'hld_path': HLD_FILE_PATH,
-        'file_count': 0
-    }
-    
-    # Run Analysis
-    print("--- Starting Gap Analysis ---")
-    
-    # Get file count for report
-    files_dict, _ = read_source_code_files(SOURCE_CODE_DIR)
-    token_report['file_count'] = len(files_dict)
-    
-    result = analyze_gap(
-        client, 
-        DEPLOYMENT_NAME, 
-        SOURCE_CODE_DIR, 
-        HLD_FILE_PATH, 
-        token_report
-    )
-    
-    print("\n--- Analysis Complete ---")
-    
-    # Generate Report
-    generate_markdown_report(token_report, result)
-
-if __name__ == "__main__":
-    main()
+| Metric | Value |
+| :--- | :--- |
+| **Source Files Analyzed** | {report_data.get('file_count', 'N/A

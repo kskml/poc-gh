@@ -278,3 +278,67 @@ Details of the last API call (if cache missed) or cached retrieval.
 2. **Semantic Caching:** A SHA-256 hash of the source code and HLD content was generated. Identical requests retrieve cached responses, eliminating API calls.
 
 ## 5. Analysis Result Preview
+{analysis_result[:500]}...
+*(Full result available in application logs)*
+"""
+
+ with open(output_file, "w") as f:
+        f.write(content)
+    print(f"\nReport generated: {output_file}")
+# ==========================================
+# 8. MAIN EXECUTION
+# ==========================================
+
+def main():
+    # --- CONFIGURATION ---
+    # Set your paths here
+    SOURCE_CODE_DIR = "./sample_source_code" 
+    HLD_FILE_PATH = "./sample_hld/hld.md"
+    DEPLOYMENT_NAME = os.getenv("AZURE_DEPLOYMENT_NAME", "gpt-4")
+    
+    # Setup Dummy Data for Demo (if not exists)
+    if not os.path.exists(SOURCE_CODE_DIR):
+        os.makedirs(SOURCE_CODE_DIR)
+        with open(os.path.join(SOURCE_CODE_DIR, "main.py"), "w") as f:
+            f.write("def calculate_tax(amount):\n    return amount * 0.2\n")
+            
+    if not os.path.exists(os.path.dirname(HLD_FILE_PATH)):
+        os.makedirs(os.path.dirname(HLD_FILE_PATH))
+    if not os.path.exists(HLD_FILE_PATH):
+        with open(HLD_FILE_PATH, "w") as f:
+            f.write("# Tax Module HLD\nThe system must calculate tax at 20%.")
+
+    # Initialize Client
+    try:
+        client = get_azure_client()
+    except Exception as e:
+        print(f"Client Init Error: {e}")
+        return
+
+    # Initialize Report Dictionary
+    token_report = {
+        'baseline_input_tokens': 0,
+        'actual_input_tokens': 0,
+        'output_tokens': 0,
+        'total_tokens_used': 0,
+        'cache_hit': False,
+        'file_count': 0
+    }
+    
+    print("--- Starting Gap Analysis ---")
+    
+    result = analyze_gap(
+        client, 
+        DEPLOYMENT_NAME, 
+        SOURCE_CODE_DIR, 
+        HLD_FILE_PATH, 
+        token_report
+    )
+    
+    print("\n--- Analysis Complete ---")
+    
+    # Generate Report
+    generate_markdown_report(token_report, result)
+
+if __name__ == "__main__":
+    main()

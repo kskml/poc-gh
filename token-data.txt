@@ -267,4 +267,14 @@ Details of the last API call (if cache missed) or cached retrieval.
 
 | Metric | Value |
 | :--- | :--- |
-| **Source Files Analyzed** | {report_data.get('file_count', 'N/A
+| **Source Files Analyzed** | {report_data.get('file_count', 'N/A')} |
+| **Cache Status** | {'HIT (0 Tokens Consumed)' if report_data['cache_hit'] else 'MISS (API Called)'} |
+| **Input Tokens (Sent)** | {report_data.get('actual_input_tokens', 0)} |
+| **Output Tokens (Generated)** | {report_data.get('output_tokens', 0)} |
+| **Total Tokens Used** | {report_data.get('total_tokens_used', 0)} |
+
+## 4. Technical Implementation Details
+1. **TOON Optimization:** Source code payloads were converted from verbose JSON objects to pipe-delimited tables, removing syntax overhead (quotes, braces, commas).
+2. **Semantic Caching:** A SHA-256 hash of the source code and HLD content was generated. Identical requests retrieve cached responses, eliminating API calls.
+
+## 5. Analysis Result Preview

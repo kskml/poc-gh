@@ -1,0 +1,332 @@
+import os
+import json
+import hashlib
+import tiktoken
+from openai import AzureOpenAI
+from dotenv import load_dotenv
+import datetime
+
+# ==========================================
+# 1. SETUP & CONFIGURATION
+# ==========================================
+
+def get_azure_client():
+    """Initializes and returns the Azure OpenAI client."""
+    load_dotenv()
+    
+    # Prompt Caching requires API version 2024-08-01-preview or later
+    client = AzureOpenAI(
+        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+        api_version="2024-08-01-preview", 
+        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
+    )
+    return client
+
+# ==========================================
+# 2. FILE SYSTEM OPERATIONS
+# ==========================================
+
+def read_source_code_files(source_dir, extensions=[".py", ".js", ".java", ".cs", ".ts"]):
+    """Recursively reads all files."""
+    code_files = {}
+    raw_content_for_hash = ""
+    
+    if not os.path.exists(source_dir):
+        raise FileNotFoundError(f"Source directory not found: {source_dir}")
+
+    for root, dirs, files in os.walk(source_dir):
+        dirs[:] = [d for d in dirs if d not in ['venv', '__pycache__', 'node_modules', '.git', 'env', 'build', 'dist']]
+        
+        for file in files:
+            if any(file.endswith(ext) for ext in extensions):
+                file_path = os.path.join(root, file)
+                try:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                        rel_path = os.path.relpath(file_path, source_dir)
+                        code_files[rel_path] = content
+                        raw_content_for_hash += f"FILE:{rel_path}\n{content}\n"
+                except Exception as e:
+                    print(f"Warning: Could not read {file_path}: {e}")
+                    
+    return code_files, raw_content_for_hash
+
+def read_hld_file(hld_path):
+    if not os.path.exists(hld_path):
+        raise FileNotFoundError(f"HLD file not found: {hld_path}")
+    with open(hld_path, 'r', encoding='utf-8') as f:
+        return f.read()
+
+# ==========================================
+# 3. DATA FORMATTING STRATEGIES
+# ==========================================
+
+def format_json_payload(code_files_dict):
+    """Strategy A: Standard Minified JSON."""
+    # separators=(',', ':') removes whitespace for most efficient JSON token count
+    return json.dumps(code_files_dict, separators=(',', ':'))
+
+def format_toon_payload(code_files_dict):
+    """Strategy B: Optimized TOON (Table Oriented Object Notation)."""
+    if not code_files_dict:
+        return "No data provided"
+    
+    rows = []
+    for filename, content in code_files_dict.items():
+        # Efficient header + native newline content
+        rows.append(f"### {filename}")
+        rows.append(content)
+            
+    return "\n".join(rows)
+
+# ==========================================
+# 4. TOKEN COUNTING UTILITIES
+# ==========================================
+
+def count_tokens_tiktoken(text, model="gpt-4"):
+    try:
+        encoding = tiktoken.encoding_for_model(model)
+    except KeyError:
+        encoding = tiktoken.get_encoding("cl100k_base")
+    return len(encoding.encode(text))
+
+# ==========================================
+# 5. CACHING LOGIC
+# ==========================================
+
+def generate_cache_key(strategy_name, source_raw, hld_raw):
+    """Generates a unique hash including the strategy name."""
+    combined = f"{strategy_name}||{source_raw}||{hld_raw}"
+    return hashlib.sha256(combined.encode('utf-8')).hexdigest()
+
+def get_cached_response(cache_key, cache_dir="llm_cache"):
+    if not os.path.exists(cache_dir):
+        os.makedirs(cache_dir)
+    file_path = os.path.join(cache_dir, f"{cache_key}.json")
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as f:
+            return json.load(f)
+    return None
+
+def save_to_cache(cache_key, response_data, cache_dir="llm_cache"):
+    file_path = os.path.join(cache_dir, f"{cache_key}.json")
+    with open(file_path, 'w') as f:
+        json.dump(response_data, f)
+
+# ==========================================
+# 6. CORE ANALYSIS LOGIC
+# ==========================================
+
+def run_analysis(client, deployment_name, strategy_name, code_files_dict, code_raw_content, hld_content, force_miss=False):
+    """
+    Runs the Gap Analysis for a specific strategy.
+    force_miss: If True, skips local cache check to ensure a fresh API call for comparison.
+    """
+    print(f"\n--- Running Analysis: {strategy_name} ---")
+    
+    # 1. Prepare Payload based on Strategy
+    if strategy_name == "JSON_STRATEGY":
+        payload_str = format_json_payload(code_files_dict)
+        system_prompt = "You are an expert code auditor. Analyze the JSON source code against the HLD. Output a gap analysis."
+    else:
+        payload_str = format_toon_payload(code_files_dict)
+        system_prompt = "You are an expert code auditor. Analyze the TOON formatted source code against the HLD. Output a gap analysis."
+
+    # 2. Check Local Cache
+    cache_key = generate_cache_key(strategy_name, code_raw_content, hld_content)
+    cached_result = None
+    if not force_miss:
+        cached_result = get_cached_response(cache_key)
+    
+    metrics = {
+        'strategy': strategy_name,
+        'local_cache_hit': False,
+        'azure_cache_hit': False,
+        'prompt_tokens': 0,
+        'completion_tokens': 0,
+        'total_tokens': 0,
+        'azure_cached_tokens': 0
+    }
+
+    if cached_result:
+        print(f"{strategy_name}: Local Cache HIT.")
+        usage = cached_result.get("usage", {})
+        metrics['local_cache_hit'] = True
+        metrics['prompt_tokens'] = usage.get('prompt_tokens', 0)
+        metrics['completion_tokens'] = usage.get('completion_tokens', 0)
+        metrics['total_tokens'] = usage.get('total_tokens', 0)
+        metrics['azure_cached_tokens'] = usage.get('azure_cached_tokens', 0)
+        metrics['azure_cache_hit'] = metrics['azure_cached_tokens'] > 0
+        return cached_result.get("response"), metrics
+    
+    print(f"{strategy_name}: Local Cache MISS. Calling Azure...")
+    
+    # 3. Construct Prompt (Optimized for Azure Caching)
+    # We put the large static content first, instructions last.
+    user_content = f"# HLD Documentation:\n{hld_content}\n\n# Source Code:\n{payload_str}"
+    
+    try:
+        response = client.chat.completions.create(
+            model=deployment_name,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content}
+            ],
+            temperature=0.0 
+        )
+        
+        response_text = response.choices[0].message.content
+        usage = response.usage
+        
+        # Extract Azure Cache Metrics
+        azure_cached_tokens = 0
+        if hasattr(usage, 'prompt_tokens_details') and usage.prompt_tokens_details:
+            azure_cached_tokens = usage.prompt_tokens_details.cached_tokens or 0
+        
+        metrics['prompt_tokens'] = usage.prompt_tokens
+        metrics['completion_tokens'] = usage.completion_tokens
+        metrics['total_tokens'] = usage.total_tokens
+        metrics['azure_cached_tokens'] = azure_cached_tokens
+        metrics['azure_cache_hit'] = azure_cached_tokens > 0
+        
+        # Save to Local Cache
+        save_to_cache(cache_key, {
+            "response": response_text, 
+            "usage": {
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+                "total_tokens": usage.total_tokens,
+                "azure_cached_tokens": azure_cached_tokens
+            }
+        })
+        
+        return response_text, metrics
+        
+    except Exception as e:
+        print(f"Error in {strategy_name}: {str(e)}")
+        return f"Error: {str(e)}", metrics
+
+# ==========================================
+# 7. REPORT GENERATION
+# ==========================================
+
+def generate_comparison_report(report_data, output_file="comparison_report.md"):
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    json_m = report_data['json']
+    toon_m = report_data['toon']
+    
+    # Calculate Reduction
+    token_reduction = json_m['prompt_tokens'] - toon_m['prompt_tokens']
+    pct_reduction = (token_reduction / json_m['prompt_tokens']) * 100 if json_m['prompt_tokens'] > 0 else 0
+
+    content = f"""# Gap Analysis Comparison Report
+
+**Date:** {now}
+
+---
+
+## 1. Executive Summary
+This report compares the token efficiency of two data formatting strategies for LLM interactions:
+1.  **JSON Strategy:** Baseline using minified JSON.
+2.  **TOON Strategy:** Optimized using Table Oriented Object Notation.
+
+---
+
+## 2. Token Usage Comparison (LLM Response Usage)
+
+| Metric | JSON Strategy | TOON Strategy | Difference |
+| :--- | :---: | :---: | :---: |
+| **Input Tokens (Prompt)** | {json_m['prompt_tokens']} | {toon_m['prompt_tokens']} | **-{token_reduction} ({pct_reduction:.2f}%)** |
+| **Output Tokens (Completion)** | {json_m['completion_tokens']} | {toon_m['completion_tokens']} | {toon_m['completion_tokens'] - json_m['completion_tokens']} |
+| **Total Tokens** | {json_m['total_tokens']} | {toon_m['total_tokens']} | {toon_m['total_tokens'] - json_m['total_tokens']} |
+
+---
+
+## 3. Caching Strategy Performance
+
+### 3.1 Local Client Cache (Exact Match)
+| Strategy | Status | Notes |
+| :--- | :--- | :--- |
+| **JSON Strategy** | {'HIT' if json_m['local_cache_hit'] else 'MISS'} | {'Retrieved from local disk.' if json_m['local_cache_hit'] else 'API call required.'} |
+| **TOON Strategy** | {'HIT' if toon_m['local_cache_hit'] else 'MISS'} | {'Retrieved from local disk.' if toon_m['local_cache_hit'] else 'API call required.'} |
+
+### 3.2 Azure Prompt Cache (Server Prefix Match)
+| Strategy | Cached Tokens | Status |
+| :--- | :---: | :--- |
+| **JSON Strategy** | {json_m['azure_cached_tokens']} | {'Active' if json_m['azure_cache_hit'] else 'Inactive'} |
+| **TOON Strategy** | {toon_m['azure_cached_tokens']} | {'Active' if toon_m['azure_cache_hit'] else 'Inactive'} |
+
+---
+
+## 4. Conclusion
+The **TOON Strategy** reduced input token consumption by **{pct_reduction:.2f}%** compared to the JSON baseline.
+This directly translates to cost savings and allows for larger context windows (more code files) per request.
+
+## 5. Gap Analysis Result (Preview)
+*Below is the result from the optimized TOON strategy:*
+{report_data.get('toon_result_preview', 'N/A')}
+"""
+with open(output_file, "w") as f:
+        f.write(content)
+    print(f"\nComparison Report generated: {output_file}")
+
+# ==========================================
+# 8. MAIN EXECUTION
+# ==========================================
+
+def main():
+    # --- CONFIGURATION ---
+    SOURCE_CODE_DIR = "./sample_source_code" 
+    HLD_FILE_PATH = "./sample_hld/hld.md"
+    DEPLOYMENT_NAME = os.getenv("AZURE_DEPLOYMENT_NAME", "gpt-4o") 
+    
+    # Setup Dummy Data
+    if not os.path.exists(SOURCE_CODE_DIR):
+        os.makedirs(SOURCE_CODE_DIR)
+        with open(os.path.join(SOURCE_CODE_DIR, "main.py"), "w") as f:
+            code_content = "def calculate_tax(amount):\n    return amount * 0.2\n" * 50
+            f.write(code_content)
+            
+    if not os.path.exists(os.path.dirname(HLD_FILE_PATH)):
+        os.makedirs(os.path.dirname(HLD_FILE_PATH))
+    if not os.path.exists(HLD_FILE_PATH):
+        with open(HLD_FILE_PATH, "w") as f:
+            f.write("# Tax Module HLD\nThe system must calculate tax.")
+
+    try:
+        client = get_azure_client()
+    except Exception as e:
+        print(f"Client Init Error: {e}")
+        return
+
+    # Load Data Once
+    code_files_dict, code_raw_content = read_source_code_files(SOURCE_CODE_DIR)
+    hld_content = read_hld_file(HLD_FILE_PATH)
+
+    report_data = {}
+
+    # --- RUN 1: JSON STRATEGY ---
+    # force_miss=True ensures we get a real API call for accurate comparison
+    json_result, json_metrics = run_analysis(
+        client, DEPLOYMENT_NAME, "JSON_STRATEGY", 
+        code_files_dict, code_raw_content, hld_content, 
+        force_miss=True
+    )
+    report_data['json'] = json_metrics
+
+    # --- RUN 2: TOON STRATEGY ---
+    # force_miss=True ensures we see the fresh token reduction
+    toon_result, toon_metrics = run_analysis(
+        client, DEPLOYMENT_NAME, "TOON_STRATEGY", 
+        code_files_dict, code_raw_content, hld_content, 
+        force_miss=True
+    )
+    report_data['toon'] = toon_metrics
+    report_data['toon_result_preview'] = toon_result[:500]
+
+    # --- GENERATE REPORT ---
+    generate_comparison_report(report_data)
+
+if __name__ == "__main__":
+    main()

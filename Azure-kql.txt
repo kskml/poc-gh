@@ -1,0 +1,7 @@
+AzureDiagnostics
+| where Category == "AzureOpenAI"
+| where apiVersion_s has "2024-08" or apiVersion_s has "2024-10"
+| summarize 
+    TotalPromptTokens = sum(toint(prompt_tokens_s)), 
+    TotalCachedTokens = sum(toint(cached_prompt_tokens_s))
+| extend CachePercentage = round((TotalCachedTokens * 100.0) / TotalPromptTokens, 2)

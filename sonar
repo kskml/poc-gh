@@ -1,0 +1,68 @@
+import requests
+import subprocess
+import json
+import os
+from mcp.server.fastmcp import FastMCP
+
+# Initialize MCP Server
+mcp = FastMCP("SonarQube Bridge")
+
+# Configuration (Ideally loaded from env vars or mcp.json)
+SONAR_URL = os.getenv("SONAR_URL", "http://localhost:9000")
+SONAR_TOKEN = os.getenv("SONAR_TOKEN", "squ_your_token_here")
+PROJECT_KEY = os.getenv("SONAR_PROJECT_KEY", "my-project-key")
+
+@mcp.tool()
+def get_open_sonar_issues(severity: str = "MAJOR") -> list:
+    """
+    Fetches the list of open issues from SonarQube for the current project.
+    Use this to identify what needs to be fixed.
+    """
+    url = f"{SONAR_URL}/api/issues/search"
+    params = {
+        "componentKeys": PROJECT_KEY,
+        "severities": severity,
+        "statuses": "OPEN,CONFIRMED,REOPENED",
+        "ps": 100 # Page size
+    }
+    
+    response = requests.get(url, params=params, auth=(SONAR_TOKEN, ""))
+    response.raise_for_status()
+    data = response.json()
+    
+    simplified_issues = []
+    for issue in data.get('issues', []):
+        simplified_issues.append({
+            "key": issue.get('key'),
+            "rule": issue.get('rule'),
+            "message": issue.get('message'),
+            "component": issue.get('component'),
+            "line": issue.get('line'),
+            "severity": issue.get('severity')
+        })
+    
+    return simplified_issues
+
+@mcp.tool()
+def run_local_sonar_scan() -> str:
+    """
+    Runs a local SonarQube scan using the sonar-scanner CLI.
+    Use this to verify if fixes actually resolved the issues.
+    """
+    try:
+        # Ensure sonar-scanner is in PATH
+        result = subprocess.run(
+            ["sonar-scanner"], 
+            capture_output=True, 
+            text=True, 
+            timeout=300
+        )
+        if result.returncode == 0:
+            return "Scan completed successfully. Check SonarQube dashboard or re-fetch issues."
+        else:
+            return f"Scan failed: {result.stderr}"
+    except Exception as e:
+        return f"Error running scan: {str(e)}"
+
+if __name__ == "__main__":
+    mcp.run()

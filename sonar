@@ -66,3 +66,21 @@ def run_local_sonar_scan() -> str:
 
 if __name__ == "__main__":
     mcp.run()
+
+
+===
+mcp.json
+
+{
+  "mcpServers": {
+    "sonarBridge": {
+      "command": "python",
+      "args": [".mcp/sonar_mcp_server.py"],
+      "env": {
+        "SONAR_URL": "http://your-sonar-instance:9000",
+        "SONAR_TOKEN": "squ_your_actual_token",
+        "SONAR_PROJECT_KEY": "your_project_key"
+      }
+    }
+  }
+}

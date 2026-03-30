@@ -1,0 +1,161 @@
+import os
+from openai import OpenAI
+
+def generate_architectural_summary(requirements: str, code_diff: str, api_key: str, base_url: str = None):
+    """
+    Generates an architectural summary of a PR using Chain of Thought prompting.
+    """
+    
+    # Initialize client (Supports OpenAI, Z.ai, or any OpenAI-compatible API)
+    client = OpenAI(
+        api_key=api_key,
+        base_url=base_url if base_url else "https://open.bigmodel.cn/api/paas/v4/" # Defaulting to Z.ai GLM endpoint
+    )
+
+    # Read the prompt template from a file or define it as a string
+    # (For brevity, I'm assigning it directly, but in production, load from prompt.md)
+    prompt_template = """
+    # SYSTEM ROLE
+    You are a Principal Software Architect with deep expertise in system design, design patterns, and enterprise architecture. Your task is to analyze a GitHub Pull Request (PR) code diff alongside its stated feature scope and requirements, and generate a comprehensive Architectural Summary.
+
+    # CONTEXT INPUTS
+    <REQUIREMENTS_AND_SCOPE>
+    {requirements}
+    </REQUIREMENTS_AND_SCOPE>
+
+    <CODE_DIFF>
+    {code_diff}
+    </CODE_DIFF>
+
+    # INSTRUCTIONS (CHAIN OF THOUGHT)
+    To generate the Architectural Summary, you must process the information sequentially. Follow these mental steps before writing the final output:
+    1. Context Alignment: Compare the <REQUIREMENTS_AND_SCOPE> against the actual <CODE_DIFF>. 
+    2. Structural Mapping: Scan the diff for class definitions, interfaces, abstract classes, and domain models.
+    3. Technology & Framework Detection: Look for new imports, library dependencies, or framework-specific decorators.
+    4. UI/View Parsing: Identify changes in component files, templates, or routing configurations.
+    5. Non-Functional & Cross-Cutting Evaluation: Look for logging, security, caching, error handling.
+    6. Synthesis & Gap Analysis: Combine findings to assess architectural impact.
+
+    # OUTPUT REQUIREMENTS
+    Generate a formal Architectural Summary Report strictly following this structure:
+
+    ## 1. PR Objective & Scope Alignment
+    - **Primary Objective:** What is the core purpose of this diff?
+    - **Scope Variance:** Detail any deviations between the stated requirements and actual code.
+
+    ## 2. Interface & Contract Changes
+    - New Interfaces/Protocols introduced.
+    - Existing Interfaces modified (note breaking changes).
+    - Changes in API contracts (DTOs, payloads).
+
+    ## 3. Design Pattern Analysis
+    - New design patterns introduced.
+    - Modified existing patterns.
+
+    ## 4. Technology & Framework Evolution
+    - **New Technologies:** New languages, databases, or services.
+    - **Framework Utilization:** New framework-specific features used.
+
+    ## 5. Business Domain Object Model
+    - New Entities/Models.
+    - Modifications to existing domain objects.
+    - Schema/persistence mapping changes.
+
+    ## 6. Dynamic View & Presentation Layer
+    - New UI components/screens.
+    - Modifications to existing views/state.
+    - Routing/navigation changes.
+
+    ## 7. Cross-Cutting Concerns
+    - **Security:** Auth changes.
+    - **Observability:** Logging/metrics.
+    - **Performance:** Caching/Async.
+    - **Resilience:** Retries/Circuit breakers.
+
+    ## 8. Extended Architectural Impact (Critical Analysis)
+    - **Dependency Impact:** Risky third-party additions?
+    - **Backward Compatibility:** Breaking changes for consumers?
+    - **Technical Debt:** Shortcuts, TODOs, anti-patterns?
+    - **Deployment/Infra:** Env vars, migrations needed?
+
+    **IMPORTANT:** If a section has no relevant changes, explicitly state "No changes detected in this area".
+    """
+
+    # Format the prompt with user data
+    final_prompt = prompt_template.format(requirements=requirements, code_diff=code_diff)
+
+    print("Generating Architectural Summary... This may take a moment depending on diff size.\n")
+    
+    try:
+        response = client.chat.completions.create(
+            model="glm-4", # Use "glm-4-long" if the diff is extremely massive (up to 128k context)
+            messages=[
+                {"role": "system", "content": "You are an expert Principal Software Architect."},
+                {"role": "user", "content": final_prompt}
+            ],
+            temperature=0.2, # Low temperature for highly factual, structural analysis
+            stream=True # Streaming is better for long reports
+        )
+
+        # Stream the output to the console
+        full_report = ""
+        for chunk in response:
+            if chunk.choices[0].delta.content is not None:
+                content = chunk.choices[0].delta.content
+                print(content, end="")
+                full_report += content
+                
+        return full_report
+
+    except Exception as e:
+        print(f"\nError generating report: {e}")
+        return None
+
+# ==========================================
+# USAGE EXAMPLE
+# ==========================================
+if __name__ == "__main__":
+    # Replace these with your actual data
+    MOCK_REQUIREMENTS = """
+    Feature: User Checkout Flow
+    Scope: Implement a new checkout API that takes a cart ID, calculates taxes, and creates an order. 
+    Requirements: Must use Stripe for payments, log the checkout attempt, and return an Order DTO.
+    """
+
+    MOCK_DIFF = """
+    diff --git a/src/services/checkout.py b/src/services/checkout.py
+    new file mode 100644
+    index 0000000..1234567
+    --- /dev/null
+    +++ b/src/services/checkout.py
+    @@ -0,0 +1,25 @@
+    +import stripe
+    +import logging
+    +from abc import ABC, abstractmethod
+    +from models.order_dto import OrderDTO
+    +
+    +logger = logging.getLogger(__name__)
+    +
+    +class PaymentProcessor(ABC):
+    +    @abstractmethod
+    +    def charge(self, amount: int, token: str) -> bool: pass
+    +
+    +class StripeProcessor(PaymentProcessor):
+    +    def charge(self, amount: int, token: str) -> bool:
+    +        logger.info(f"Charging {amount} via Stripe")
+    +        return stripe.Charge.create(amount=amount, currency='usd', source=token).paid
+    +
+    +class CheckoutService:
+    +    def __init__(self, processor: PaymentProcessor):
+    +        self.processor = processor
+    +
+    +    def execute_checkout(self, cart_id: str, token: str) -> OrderDTO:
+    +        # Logic omitted for brevity
+    +        return OrderDTO(order_id="123", status="SUCCESS")
+    """
+
+    # Set your API key here
+    # API_KEY = os.environ.get("Z_AI_API_KEY", "your_api_key_here")
+    
+    # Uncomment to run:
+    # generate_architectural_summary(MOCK_REQUIREMENTS, MOCK_DIFF, api_key=API_KEY)

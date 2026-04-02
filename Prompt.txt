@@ -3,133 +3,118 @@ from unidiff import PatchSet
 from javalang import parse, tree
 from javalang.parser import JavaSyntaxError
 
-# --- FALLBACK: SPRING REGEX EXTRACTOR ---
-def _extract_via_regex(lines: list) -> list:
-    """Fallback for fragmented modified lines that cannot form a valid AST."""
-    context_lines = []
-    annotation_buffer = []
+# --- GITHUB DIFF PRE-PROCESSOR ---
+def _sanitize_github_diff(diff_text: str) -> list:
+    """
+    Fixes common GitHub API diff formatting issues that cause unidiff to crash.
+    Splits the diff into individual file blocks for safe parsing.
+    """
+    # 1. Remove GitHub binary file diff lines completely (they have no hunks)
+    clean_text = re.sub(r'^Binary files .* differ\s*$', '', diff_text, flags=re.MULTILINE)
     
-    ann_pattern = re.compile(r'^\s*(@\w+(?:\([^)]*\))?)\s*$')
-    # Matches methods (including partial multi-line signatures ending in '(' or ',')
-    method_pattern = re.compile(r'^\s*(?:public|private|protected)?\s*(?:static|final|abstract|synchronized|default)?\s*([\w<>\[\],\s]+?)\s+(\w+)\s*(\([^)]*\)?|,)\s*$')
-    class_pattern = re.compile(r'^\s*(?:public|private|protected)?\s*(?:abstract|static)?\s*(class|interface|enum|record)\s+(\w+)')
-
-    for line in lines:
-        stripped = line.strip()
-        if not stripped: continue
-
-        ann_match = ann_pattern.match(line)
-        if ann_match:
-            annotation_buffer.append(ann_match.group(1))
+    # 2. Split into individual file diffs
+    # GitHub diffs always start with "diff --git a/... b/..."
+    file_blocks = re.split(r'^(?=diff --git)', clean_text, flags=re.MULTILINE)
+    
+    sanitized_blocks = []
+    for block in file_blocks:
+        if not block.strip():
             continue
+            
+        lines = block.split('\n')
+        fixed_lines = []
+        in_hunk = False
+        
+        for line in lines:
+            # Detect start of a hunk
+            if line.startswith('@@'):
+                in_hunk = True
+                fixed_lines.append(line)
+                continue
+                
+            # Detect new file block (resets hunk state)
+            if line.startswith('diff --git'):
+                in_hunk = False
+                fixed_lines.append(line)
+                continue
+                
+            # Fix lines INSIDE hunks
+            if in_hunk:
+                # Valid diff lines start with +, -, \, or ' ' (space)
+                if line.startswith(('+', '-', '\\', ' ')):
+                    fixed_lines.append(line)
+                elif line == '':
+                    # Empty line in a hunk MUST be a space (context line) for unidiff
+                    fixed_lines.append(' ')
+                else:
+                    # GitHub API bug: missing leading space on context line. Add it.
+                    fixed_lines.append(' ' + line)
+            else:
+                # Headers, metadata, etc. Leave alone
+                fixed_lines.append(line)
+                
+        sanitized_blocks.append("\n".join(fixed_lines))
+        
+    return sanitized_blocks
 
-        method_match = method_pattern.match(line)
-        if method_match:
-            ret_type = method_match.group(1).strip()
-            name = method_match.group(2)
-            params = method_match.group(3).strip().rstrip(',')
-            ann_str = " ".join(annotation_buffer)
-            context_lines.append(f"  [METHOD] {ann_str} {ret_type} {name}({params})".strip())
-            annotation_buffer = []
-            continue
-
-        class_match = class_pattern.match(line)
-        if class_match:
-            ann_str = " ".join(annotation_buffer)
-            context_lines.append(f"[CLASS] {ann_str} {class_match.group(2)}".strip())
-            annotation_buffer = []
-            continue
-
-        # Reset buffer if we hit non-architectural code
-        if not stripped.startswith('//'):
-            annotation_buffer = []
-
-    return context_lines
-
-# --- PRIMARY: JAVA AST EXTRACTOR ---
-def _parse_java_snippet(code_lines: list) -> list:
-    """Attempts strict AST parsing, uses dummy wrapper for partial classes."""
-    code_str = "\n".join(code_lines)
-    try:
-        return parse(code_str).filter(tree.TypeDeclaration)
-    except JavaSyntaxError:
+# --- SAFE PARSER ---
+def _get_patched_files_safely(diff_text: str):
+    """Yields PatchedFile objects, skipping files that fail to parse."""
+    sanitized_blocks = _sanitize_github_diff(diff_text)
+    
+    for block in sanitized_blocks:
         try:
-            wrapped_code = f"public class DiffWrapper {{ {code_str} }}"
-            parsed_tree = parse(wrapped_code)
-            dummy_class = parsed_tree.filter(tree.ClassDeclaration)[0]
-            return dummy_class.body
-        except Exception:
-            return [] # Triggers Fallback
+            # Parse the sanitized block
+            patch_set = PatchSet.from_string(block)
+            for patched_file in patch_set:
+                yield patched_file
+        except Exception as e:
+            # If a specific file still fails, skip it gracefully
+            print(f"[Warning] Skipping malformed diff block: {str(e)[:80]}...")
+            continue
+
+# --- AST & REGEX EXTRACTORS (Same as before, omitted _extract_via_regex for brevity, assume it's here) ---
+def _extract_via_regex(lines: list) -> list:
+    # ... (Keep the exact same regex fallback from the previous step) ...
+    pass
+
+def _parse_java_snippet(code_lines: list) -> list:
+    # ... (Keep the exact same AST wrapper from the previous step) ...
+    pass
 
 def _walk_ast_nodes(nodes: list, indent: int = 0) -> list:
-    """Walks AST tree, extracting Spring annotations and signatures."""
-    context_lines = []
-    prefix = "  " * indent
-    spring_annotations = {'Service', 'Component', 'Repository', 'RestController', 'Controller', 
-                          'Configuration', 'Bean', 'Autowired', 'Inject', 'Value', 'Transactional', 
-                          'Override', 'GetMapping', 'PostMapping', 'PutMapping', 'DeleteMapping',
-                          'RequestMapping', 'Async', 'Cacheable', 'Valid'}
+    # ... (Keep the exact same AST walker from the previous step) ...
+    pass
 
-    for node in nodes:
-        raw_annotations = [ann.name for ann in getattr(node, 'annotations', [])]
-        annotations = [ann for ann in raw_annotations if ann in spring_annotations]
-        ann_str = " ".join(annotations)
-
-        if isinstance(node, (tree.ClassDeclaration, tree.InterfaceDeclaration, tree.EnumDeclaration)):
-            node_type = node.__class__.__name__.replace('Declaration', '').upper()
-            extends = f" extends {node.extends.name}" if hasattr(node, 'extends') and node.extends else ""
-            implements = f" implements {', '.join([i.name for i in node.implements])}" if node.implements else ""
-            line = f"{prefix}[{node_type}] {ann_str} {node.name}{extends}{implements}"
-            context_lines.append(line.strip())
-            if node.body:
-                context_lines.extend(_walk_ast_nodes(node.body, indent + 1))
-
-        elif isinstance(node, tree.MethodDeclaration):
-            return_type = node.return_type.name if node.return_type else "void"
-            params = ", ".join([f"{ann.name + ' ' if ann.annotations else ''}{p.type.name} {p.name}" 
-                                for p in node.parameters]) if node.parameters else ""
-            line = f"{prefix}[METHOD] {ann_str} {return_type} {node.name}({params})"
-            context_lines.append(line.strip())
-
-        elif isinstance(node, tree.FieldDeclaration) and annotations:
-            field_type = node.type.name
-            field_name = node.declarators[0].name if node.declarators else "unknown" 
-            line = f"{prefix}[FIELD] {ann_str} {field_type} {field_name}"
-            context_lines.append(line.strip())
-
-    return context_lines
-
-# --- MAIN EXECUTION FUNCTION ---
+# --- MAIN EXECUTION FUNCTION (UPDATED) ---
 def extract_java_ast_architecture(diff_text: str) -> str:
     """
-    Extracts Added and Modified code blocks.
-    Uses AST for valid blocks, Regex fallback for fragmented modifications.
+    Extracts Added and Modified code blocks from raw GitHub Diff text.
+    Resistant to GitHub API formatting quirks.
     """
-    patch_set = PatchSet.from_string(diff_text)
     final_blueprint = []
 
-    for patched_file in patch_set:
+    # Use the safe generator instead of raw PatchSet
+    for patched_file in _get_patched_files_safely(diff_text):
         if not patched_file.path.endswith('.java'): continue
         if any(skip in patched_file.path for skip in ['Test.java', 'Tests.java']): continue
 
-        # CRITICAL: Extract ONLY added lines (which includes the new state of modified lines)
+        # Extract ONLY added lines (captures both Additions and Modifications)
         added_lines = [line.value for hunk in patched_file for line in hunk if line.is_added]
         if not added_lines: continue
 
         file_context = f"// File: {patched_file.path}"
         
-        # Step A: Try to build an AST from the added/modified lines
+        # Try AST first
         ast_nodes = _parse_java_snippet(added_lines)
         
         if ast_nodes:
-            # AST Success: We extracted clean, complete architectural blocks
             extracted_lines = _walk_ast_nodes(ast_nodes)
             if extracted_lines:
                 final_blueprint.append(file_context)
                 final_blueprint.extend(extracted_lines)
         else:
-            # AST Failure: The lines are fragmented modifications (e.g., just adding @Valid)
-            # Fallback to Regex to ensure we DON'T lose this modified architectural data
+            # Fallback to Regex for fragmented modifications
             fallback_lines = _extract_via_regex(added_lines)
             if fallback_lines:
                 final_blueprint.append(f"{file_context} (Fragmented Modification)")

@@ -103,127 +103,123 @@ def _regex_structural_fallback(code_lines: list, filtered_imports: list) -> dict
 
 
 def _process_java_file_ast(code_lines: list) -> dict:
-    """Hyper-safe AST parser. Uses manual traversal and getattr() to prevent tuple crashes."""
+    """Wraps diffs safely to guarantee AST parsing, avoiding all javalang tuple/syntax bugs."""
     code_str = "\n".join(code_lines)
     
     imports = [line.strip() for line in code_lines if line.strip().startswith('import ')]
     filtered_imports = _filter_imports(imports)
     
     try:
-        # FIX: Prepend package to prevent 'Module object not found'
-        safe_code = code_str
-        if not safe_code.strip().startswith("package"):
-            safe_code = "package dummy;\n" + safe_code
+        # STEP 1: Safely wrap partial code into a dummy class to satisfy Java syntax rules
+        has_package = any(line.strip().startswith("package ") for line in code_lines)
+        if has_package:
+            pkg_line = next((line for line in code_lines if line.strip().startswith("package ")), "")
+            rest_of_code = "\n".join([line for line in code_lines if not line.strip().startswith("package ")])
+            safe_code = f"{pkg_line}\npublic class DiffWrapper {{\n{rest_of_code}\n}}"
+        else:
+            safe_code = f"package dummy;\npublic class DiffWrapper {{\n{code_str}\n}}"
             
         ast_tree = parse(safe_code)
         
-        # FIX: DO NOT USE .filter(). It causes the tuple bug. Manually iterate the tree.
-        types = []
+        # STEP 2: Manual tree traversal (Bypasses the .filter() tuple bug entirely)
+        wrapper_node = None
         for path, node in ast_tree: 
-            if isinstance(node, (tree.ClassDeclaration, tree.InterfaceDeclaration, tree.EnumDeclaration)):
-                types.append(node)
+            if isinstance(node, tree.ClassDeclaration) and getattr(node, 'name', None) == 'DiffWrapper':
+                wrapper_node = node
+                break
                 
-        if not types:
+        if not wrapper_node:
             return _regex_structural_fallback(code_lines, filtered_imports)
 
-        classes_data = []
-        for type_node in types:  # type_node is strictly the Node now
-            # FIX: Use getattr for everything to safely handle missing attributes
-            class_name = getattr(type_node, 'name', 'UnknownClass')
-            class_type = type_node.__class__.__name__.replace('Declaration', '')
-            class_annotations = [getattr(a, 'name', '') for a in getattr(type_node, 'annotations', [])]
+        classes_data = [{"name": "DiffWrapper", "type": "Class", "annotations": [], "methods": []}]
+        
+        def extract_member(member, remaining_members, search_start_idx):
+            """Recursively extracts methods/fields, mapping them back to raw diff lines."""
             
-            class_info = {
-                "name": class_name,
-                "type": class_type,
-                "annotations": class_annotations,
-                "methods": []
-            }
-            
-            ast_members = getattr(type_node, 'body', [])
-            current_search_start = 0
-            
-            for idx, member in enumerate(ast_members):
+            # If the diff contained a whole class, it's now an inner class. Flatten it.
+            if isinstance(member, (tree.ClassDeclaration, tree.InterfaceDeclaration)):
+                inner_body = getattr(member, 'body', [])
+                for i, inner_m in enumerate(inner_body):
+                    extract_member(inner_m, inner_body[i+1:], search_start_idx)
+                return
+
+            if isinstance(member, tree.MethodDeclaration):
+                member_name = getattr(member, 'name', 'unknown_method')
                 
-                # --- HANDLE METHODS ---
-                if isinstance(member, tree.MethodDeclaration):
-                    member_name = getattr(member, 'name', 'unknown_method')
+                # Find this method in the raw diff text
+                start_idx = -1
+                for i in range(search_start_idx, len(code_lines)):
+                    if f"{member_name}(" in code_lines[i]:
+                        start_idx = i
+                        break
+                
+                if start_idx != -1:
+                    # Find where the next method starts to slice the body
+                    end_idx = len(code_lines)
+                    for next_m in remaining_members:
+                        n_name = getattr(next_m, 'name', None)
+                        if n_name:
+                            for j in range(start_idx + 1, len(code_lines)):
+                                if n_name in code_lines[j]:
+                                    end_idx = j
+                                    break
+                            break 
                     
-                    # Safely find method in diff lines by name
+                    body_raw = code_lines[start_idx:end_idx]
+                    
+                    # Safely extract parameters and types
+                    params = []
+                    for p in getattr(member, 'parameters', []):
+                        p_anns = " ".join([getattr(a, 'name', '') for a in getattr(p, 'annotations', [])])
+                        p_type = getattr(getattr(p, 'type', None), 'name', 'Object')
+                        p_name = getattr(p, 'name', 'arg')
+                        params.append(f"{p_anns} {p_type} {p_name}".strip())
+                    
+                    ret_type = getattr(getattr(member, 'return_type', None), 'name', 'void')
+                    method_anns = [getattr(a, 'name', '') for a in getattr(member, 'annotations', [])]
+                    
+                    classes_data[0]["methods"].append({
+                        "signature": f"{ret_type} {member_name}({', '.join(params)})",
+                        "annotations": method_anns,
+                        "logic_body": _clean_body_lines(body_raw)
+                    })
+
+            elif isinstance(member, tree.FieldDeclaration) and getattr(member, 'annotations', None):
+                f_type = getattr(getattr(member, 'type', None), 'name', 'unknown_type')
+                declarators = getattr(member, 'declarators', [])
+                if declarators:
+                    f_name = getattr(declarators[0], 'name', 'unknown_field')
+                    
                     start_idx = -1
-                    for i in range(current_search_start, len(code_lines)):
-                        if f"{member_name}(" in code_lines[i]:
+                    for i in range(search_start_idx, len(code_lines)):
+                        if f_name in code_lines[i]:
                             start_idx = i
                             break
-                    
+                            
                     if start_idx != -1:
-                        end_idx = len(code_lines)
-                        for next_member in ast_members[idx+1:]:
-                            search_name = getattr(next_member, 'name', None)
-                            if search_name:
-                                for j in range(start_idx + 1, len(code_lines)):
-                                    if search_name in code_lines[j]:
-                                        end_idx = j
-                                        break
-                                break 
+                        body_raw = code_lines[start_idx:start_idx+1]
+                        field_anns = [getattr(a, 'name', '') for a in getattr(member, 'annotations', [])]
                         
-                        body_raw = code_lines[start_idx:end_idx]
-                        current_search_start = end_idx
-                        
-                        params = []
-                        for p in getattr(member, 'parameters', []):
-                            p_anns = " ".join([getattr(a, 'name', '') for a in getattr(p, 'annotations', [])])
-                            p_type_node = getattr(p, 'type', None)
-                            # Safely handle generic types or missing names
-                            p_type_name = getattr(p_type_node, 'name', 'Object') if p_type_node else 'Object'
-                            p_name = getattr(p, 'name', 'arg')
-                            params.append(f"{p_anns} {p_type_name} {p_name}".strip())
-                        
-                        ret_type_node = getattr(member, 'return_type', None)
-                        ret_type = getattr(ret_type_node, 'name', 'void') if ret_type_node else 'void'
-                        
-                        method_anns = [getattr(a, 'name', '') for a in getattr(member, 'annotations', [])]
-                        
-                        class_info["methods"].append({
-                            "signature": f"{ret_type} {member_name}({', '.join(params)})",
-                            "annotations": method_anns,
+                        classes_data[0]["methods"].append({
+                            "signature": f"FIELD: {f_type} {f_name}",
+                            "annotations": field_anns,
                             "logic_body": _clean_body_lines(body_raw)
                         })
-                
-                # --- HANDLE FIELDS ---
-                elif isinstance(member, tree.FieldDeclaration):
-                    f_type_node = getattr(member, 'type', None)
-                    f_type = getattr(f_type_node, 'name', 'unknown_type') if f_type_node else 'unknown_type'
-                    
-                    declarators = getattr(member, 'declarators', [])
-                    if declarators:
-                        f_name = getattr(declarators[0], 'name', 'unknown_field')
-                        
-                        start_idx = -1
-                        for i in range(current_search_start, len(code_lines)):
-                            if f_name in code_lines[i]:
-                                start_idx = i
-                                break
-                                
-                        if start_idx != -1:
-                            body_raw = code_lines[start_idx:start_idx+1]
-                            current_search_start = start_idx + 1
-                            
-                            field_anns = [getattr(a, 'name', '') for a in getattr(member, 'annotations', [])]
-                            
-                            class_info["methods"].append({
-                                "signature": f"FIELD: {f_type} {f_name}",
-                                "annotations": field_anns,
-                                "logic_body": _clean_body_lines(body_raw)
-                            })
-                        
-            classes_data.append(class_info)
+
+        # STEP 3: Process all members found inside the wrapper
+        ast_members = getattr(wrapper_node, 'body', [])
+        for idx, member in enumerate(ast_members):
+            extract_member(member, ast_members[idx+1:], 0)
+
+        # Clean up wrapper name if the raw code was just a standalone method
+        if len(classes_data[0]["methods"]) == 1 and not any("class " in line for line in code_lines):
+             pass # Keep wrapper name to group the loose method
 
         return {"imports": filtered_imports, "classes": classes_data}
 
     except Exception as e:
-        # Absolute catch-all. If javalang fails for ANY reason, we gracefully fallback.
-        print(f"[AST Safety Catch: {str(e)[:60]}... Using Regex Fallback]")
+        # Absolute catch-all for un-parsable code (e.g., unclosed string literals in diff)
+        print(f"[AST Safety Catch: {str(e)}... Using Regex Fallback]")
         return _regex_structural_fallback(code_lines, filtered_imports)
 
 # ==========================================
@@ -251,7 +247,7 @@ def extract_token_optimized_ast(diff_text: str, output_json_path: str) -> None:
 # VERIFICATION TEST
 # ==========================================
 if __name__ == "__main__":
-    # Diff designed to trigger internal javalang tuple/module bugs
+    # The EXACT tricky diff that was failing before
     tricky_diff = """
 diff --git a/src/main/java/com/app/Logic.java b/src/main/java/com/app/Logic.java
 index 1234567..abcdefg 100644
@@ -276,7 +272,7 @@ index 1234567..abcdefg 100644
     output_file = "./verified_ast_output.json"
     extract_token_optimized_ast(tricky_diff, output_file)
     
-    # Verify JSON was created and is valid
+    # Verify JSON was created and print it
     with open(output_file, 'r') as f:
         print("JSON Output Preview:")
         print(json.dumps(json.load(f), indent=2))

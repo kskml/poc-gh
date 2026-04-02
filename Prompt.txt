@@ -1,0 +1,52 @@
+GLM-5-Turbo
+
+
+ You are an expert AI python developer.
+I want to develop an application which takes the github release tags code diff along with the requirement for the tagged release. For this follow the below instruction:
+1. As the release code diff can be huge and cross the LLM context window, so use ast or any other module to handle the large code diff.
+2. LLM takes the input as the output of step 1 and the requirement scope.
+3. LLM generates the a concise but comprehensive architecture summary focused on observable behavior, design impact and documentation impact.
+4. The summary must be business facing and architecture facing, not implementation facing.
+5. Use chain of thoughts concept. Output must be only architectural summary and supporting below sections:
+    - extracted information
+    - Feature objective and scope alignement
+    - interface and contract impact
+    - business workflow / design intent
+    - domain model or data impact
+    - dynamic dehavior / sequence changes
+    - logical view impact
+    - deployment/context view impact
+    - technology/framework implications
+    - cross cutting concerns
+
+6. add any missing points for step 5
+7. generate the report in a markdown file
+8. suggest and use the best ideas for this use-case
+9. explain code flow in md file for each step
+
+Thought Process
+
+
+
+ You are an expert AI python developer.
+I want to develop an application which takes the github release tags code diff along with the requirement for the tagged release. For this follow the below instruction:
+1. As the release code diff can be huge and cross the LLM context window, so use ast or any other module to handle the large code diff.
+2. LLM takes the input as the output of step 1 and the requirement scope.
+3. LLM generates the a concise but comprehensive architecture summary focused on observable behavior, design impact and documentation impact.
+4. The summary must be business facing and architecture facing, not implementation facing.
+5. Use chain of thoughts concept. Output must be only architectural summary and supporting below sections:
+    - extracted information
+    - Feature objective and scope alignement
+    - interface and contract impact
+    - business workflow / design intent
+    - domain model or data impact
+    - dynamic dehavior / sequence changes
+    - logical view impact
+    - deployment/context view impact
+    - technology/framework implications
+    - cross cutting concerns
+
+6. add any missing points for step 5
+7. generate the report in a markdown file
+8. suggest and use the best ideas for this use-case
+9. explain code flow in md file for each step

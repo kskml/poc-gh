@@ -9,12 +9,10 @@ def _parse_github_diff_raw(diff_text: str):
     added_lines_buffer = []
     file_pattern = re.compile(r'^diff --git a/(.*) b/(.*)$')
     
-    # Guard against None being passed as diff_text
     if not diff_text or not isinstance(diff_text, str):
         return
 
     for line in diff_text.split('\n'):
-        # CRITICAL GUARD: Skip null or non-string lines
         if not line or not isinstance(line, str):
             continue
             
@@ -33,12 +31,11 @@ def _parse_github_diff_raw(diff_text: str):
         yield current_file, added_lines_buffer
 
 # ==========================================
-# 2. STRUCTURAL REGEX MAPPER (Replaces AST)
+# 2. STRUCTURAL REGEX MAPPER
 # ==========================================
 def _clean_body_lines(lines: list) -> str:
     cleaned = []
     for line in lines:
-        # CRITICAL GUARD: Check line validity before strip()
         if not line or not isinstance(line, str):
             continue
         stripped = line.strip()
@@ -87,7 +84,6 @@ def _process_java_file(code_lines: list) -> dict:
     ann_buffer = []
     
     for line in code_lines:
-        # CRITICAL GUARD: Check line validity before any string operations
         if not line or not isinstance(line, str):
             continue
             
@@ -102,9 +98,10 @@ def _process_java_file(code_lines: list) -> dict:
         if c_match:
             if current_class["methods"]:
                 classes_data.append(current_class)
+            # SAFE EXTRACTION: Coerce regex groups to strings before calling .strip()
             current_class = {
-                "name": c_match.group(2), 
-                "type": c_match.group(1), 
+                "name": (c_match.group(2) or "UnknownClass").strip(), 
+                "type": (c_match.group(1) or "Class").strip(), 
                 "annotations": list(ann_buffer), 
                 "methods": []
             }
@@ -114,7 +111,12 @@ def _process_java_file(code_lines: list) -> dict:
             
         m_match = method_pattern.match(stripped)
         if m_match:
-            signature = f"{m_match.group(1).strip()} {m_match.group(2)}({m_match.group(3).strip()})"
+            # SAFE EXTRACTION: Prevents 'NoneType has no attribute strip'
+            ret_type = (m_match.group(1) or "void").strip()
+            name = (m_match.group(2) or "unknownMethod").strip()
+            params = (m_match.group(3) or "").strip()
+            
+            signature = f"{ret_type} {name}({params})"
             current_method = {
                 "signature": signature, 
                 "annotations": list(ann_buffer), 
@@ -126,7 +128,11 @@ def _process_java_file(code_lines: list) -> dict:
             
         f_match = field_pattern.match(stripped)
         if f_match and not current_method:
-            signature = f"FIELD: {f_match.group(1)} {f_match.group(2)}"
+            # SAFE EXTRACTION: Prevents 'NoneType has no attribute strip'
+            f_type = (f_match.group(1) or "UnknownType").strip()
+            f_name = (f_match.group(2) or "unknownField").strip()
+            
+            signature = f"FIELD: {f_type} {f_name}"
             current_class["methods"].append({
                 "signature": signature, 
                 "annotations": list(ann_buffer), 

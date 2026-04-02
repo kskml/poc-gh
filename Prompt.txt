@@ -9,7 +9,15 @@ def _parse_github_diff_raw(diff_text: str):
     added_lines_buffer = []
     file_pattern = re.compile(r'^diff --git a/(.*) b/(.*)$')
     
+    # Guard against None being passed as diff_text
+    if not diff_text or not isinstance(diff_text, str):
+        return
+
     for line in diff_text.split('\n'):
+        # CRITICAL GUARD: Skip null or non-string lines
+        if not line or not isinstance(line, str):
+            continue
+            
         file_match = file_pattern.match(line)
         if file_match:
             if current_file is not None:
@@ -28,50 +36,50 @@ def _parse_github_diff_raw(diff_text: str):
 # 2. STRUCTURAL REGEX MAPPER (Replaces AST)
 # ==========================================
 def _clean_body_lines(lines: list) -> str:
-    """Flattens logic to save LLM tokens."""
     cleaned = []
     for line in lines:
+        # CRITICAL GUARD: Check line validity before strip()
+        if not line or not isinstance(line, str):
+            continue
         stripped = line.strip()
         if stripped and stripped != '{' and stripped != '}':
             cleaned.append(stripped)
     return "\n    ".join(cleaned)
 
 def _filter_imports(import_lines: list) -> list:
-    """Drops standard Java boilerplate imports to save tokens."""
     filtered = []
     skip_prefixes = ('java.lang.', 'java.util.', 'java.io.', 'java.net.', 'lombok.')
     for imp in import_lines:
-        if not imp.startswith(skip_prefixes):
+        if imp and isinstance(imp, str) and not imp.startswith(skip_prefixes):
             filtered.append(imp)
     return filtered
 
 def _process_java_file(code_lines: list) -> dict:
-    """
-    Uses advanced Regex to group raw diff lines into Classes/Methods.
-    Keeps 100% of implementation logic. Immune to partial diff syntax errors.
-    """
-    imports = [line.strip() for line in code_lines if line.strip().startswith('import ')]
+    imports = []
+    for line in code_lines:
+        if line and isinstance(line, str) and line.strip().startswith('import '):
+            imports.append(line.strip())
+            
     filtered_imports = _filter_imports(imports)
     
-    # Regex patterns to identify Java structures (handles inline Spring annotations)
     class_pattern = re.compile(r'^\s*(?:public|private|protected)?\s*(?:abstract|static)?\s*(class|interface|enum|record)\s+(\w+)')
     method_pattern = re.compile(
-        r'^\s*(?:(@\w+(?:\([^)]*\))?)\s*)*' # Captures inline annotations like @Override
+        r'^\s*(?:(@\w+(?:\([^)]*\))?)\s*)*'
         r'(?:public|private|protected)?\s*' 
         r'(?:static|final|abstract|synchronized|default)?\s*' 
-        r'([\w<>\[\],\s\?]+?)\s+' # Return type
-        r'(\w+)\s*' # Method name
-        r'\(([^)]*)\)\s*' # Parameters
-        r'(?:throws\s+[\w,\s]+)?\s*' # Throws clause
-        r'\{?\s*$' # Opening brace
+        r'([\w<>\[\],\s\?]+?)\s+' 
+        r'(\w+)\s*'
+        r'\(([^)]*)\)\s*' 
+        r'(?:throws\s+[\w,\s]+)?\s*' 
+        r'\{?\s*$' 
     )
     field_pattern = re.compile(
-        r'^\s*(?:(@\w+(?:\([^)]*\))?)\s*)*' # Captures @Autowired etc
+        r'^\s*(?:(@\w+(?:\([^)]*\))?)\s*)*'
         r'(?:private|protected|public)?\s*' 
-        r'([\w<>\[\]]+)\s+' # Type
-        r'(\w+)\s*[;=]' # Field name
+        r'([\w<>\[\]]+)\s+' 
+        r'(\w+)\s*[;=]' 
     )
-    ann_pattern = re.compile(r'^\s*(@\w+(?:\([^)]*\))?)\s*$') # Standalone annotations
+    ann_pattern = re.compile(r'^\s*(@\w+(?:\([^)]*\))?)\s*$')
     
     classes_data = []
     current_class = {"name": "Root", "type": "File", "annotations": [], "methods": []}
@@ -79,15 +87,17 @@ def _process_java_file(code_lines: list) -> dict:
     ann_buffer = []
     
     for line in code_lines:
+        # CRITICAL GUARD: Check line validity before any string operations
+        if not line or not isinstance(line, str):
+            continue
+            
         stripped = line.strip()
         if not stripped: continue
         
-        # 1. Buffer standalone annotations (e.g., lines with JUST @Service)
         if ann_pattern.match(stripped):
             ann_buffer.append(stripped)
             continue
             
-        # 2. Detect Class/Interface
         c_match = class_pattern.match(stripped)
         if c_match:
             if current_class["methods"]:
@@ -102,7 +112,6 @@ def _process_java_file(code_lines: list) -> dict:
             current_method = None
             continue
             
-        # 3. Detect Method Signature
         m_match = method_pattern.match(stripped)
         if m_match:
             signature = f"{m_match.group(1).strip()} {m_match.group(2)}({m_match.group(3).strip()})"
@@ -115,7 +124,6 @@ def _process_java_file(code_lines: list) -> dict:
             ann_buffer = []
             continue
             
-        # 4. Detect Fields (only outside of methods to avoid confusing variables with fields)
         f_match = field_pattern.match(stripped)
         if f_match and not current_method:
             signature = f"FIELD: {f_match.group(1)} {f_match.group(2)}"
@@ -127,16 +135,13 @@ def _process_java_file(code_lines: list) -> dict:
             ann_buffer = []
             continue
             
-        # 5. Capture implementation logic inside the method
         if current_method:
             if stripped != '{' and stripped != '}':
                 current_method["logic_body"].append(stripped)
                 
-    # Don't forget the last class in the file
     if current_class["methods"]:
         classes_data.append(current_class)
         
-    # Finalize string formatting
     for cls in classes_data:
         for method in cls["methods"]:
             if isinstance(method["logic_body"], list):
@@ -151,11 +156,12 @@ def extract_structured_code(diff_text: str, output_json_path: str) -> None:
     final_data = []
 
     for file_path, added_lines in _parse_github_diff_raw(diff_text):
+        if not file_path or not isinstance(file_path, str):
+            continue
         if not file_path.endswith('.java'): 
             continue
         if not added_lines: continue
 
-        # Process using the stable Regex mapper
         file_data = _process_java_file(added_lines)
         file_data["file"] = file_path
         
@@ -170,7 +176,6 @@ def extract_structured_code(diff_text: str, output_json_path: str) -> None:
 # VERIFICATION TEST
 # ==========================================
 if __name__ == "__main__":
-    # The EXACT tricky diff that kept breaking javalang
     tricky_diff = """
 diff --git a/src/main/java/com/app/Logic.java b/src/main/java/com/app/Logic.java
 index 1234567..abcdefg 100644
@@ -195,7 +200,6 @@ index 1234567..abcdefg 100644
     output_file = "./verified_output.json"
     extract_structured_code(tricky_diff, output_file)
     
-    # Print output to verify
     with open(output_file, 'r') as f:
         print("JSON Output Preview:")
         print(json.dumps(json.load(f), indent=2))

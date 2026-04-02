@@ -27,20 +27,17 @@ def _parse_github_diff_raw(diff_text: str):
         yield current_file, added_lines_buffer
 
 # ==========================================
-# 2. TOKEN-OPTIMIZED AST PROCESSOR
+# 2. AST + REGEX FALLBACK PROCESSOR
 # ==========================================
 def _clean_body_lines(lines: list) -> str:
-    """Flattens a method body to save LLM tokens (removes isolated braces/empty lines)."""
     cleaned = []
     for line in lines:
         stripped = line.strip()
-        # Skip empty lines and lines that are ONLY a curly brace
         if stripped and stripped != '{' and stripped != '}':
             cleaned.append(stripped)
     return "\n    ".join(cleaned)
 
 def _filter_imports(import_lines: list) -> list:
-    """Drops standard Java boilerplate imports to save tokens."""
     filtered = []
     skip_prefixes = ('java.lang.', 'java.util.', 'java.io.', 'java.net.', 'lombok.')
     for imp in import_lines:
@@ -48,91 +45,122 @@ def _filter_imports(import_lines: list) -> list:
             filtered.append(imp)
     return filtered
 
-def _process_java_file_ast(code_lines: list) -> dict:
+def _regex_structural_fallback(code_lines: list, filtered_imports: list) -> dict:
     """
-    Uses AST to map the file into Classes/Methods, but keeps raw logic inside.
+    FALLBACK: If javalang completely fails, this uses Regex to group 
+    raw code into Classes/Methods, ensuring the JSON structure is identical.
     """
-    code_str = "\n".join(code_lines)
-    is_partial = False
+    class_pattern = re.compile(r'^\s*(?:public|private|protected)?\s*(?:abstract|static)?\s*(class|interface|enum|record)\s+(\w+)')
+    method_pattern = re.compile(r'^\s*(?:public|private|protected)?\s*(?:static|final|abstract|synchronized|default)?\s*([\w<>\[\],\s]+?)\s+(\w+)\s*\(([^)]*)\)\s*(?:throws\s+[\w,\s]+)?\s*\{?')
+    ann_pattern = re.compile(r'^\s*(@\w+(?:\([^)]*\))?)\s*$')
     
-    # 1. Extract Imports via Regex (AST is bad at partial imports)
+    classes_data = []
+    current_class = None
+    current_method = None
+    ann_buffer = []
+    
+    for line in code_lines:
+        stripped = line.strip()
+        if not stripped: continue
+        
+        if ann_pattern.match(stripped):
+            ann_buffer.append(stripped)
+            continue
+            
+        c_match = class_pattern.match(stripped)
+        if c_match:
+            current_class = {"name": c_match.group(2), "type": c_match.group(1), "annotations": list(ann_buffer), "methods": []}
+            classes_data.append(current_class)
+            ann_buffer = []
+            continue
+            
+        m_match = method_pattern.match(stripped)
+        if m_match:
+            signature = f"{m_match.group(1).strip()} {m_match.group(2)}({m_match.group(3).strip()})"
+            current_method = {"signature": signature, "annotations": list(ann_buffer), "logic_body": [stripped]}
+            if current_class:
+                current_class["methods"].append(current_method)
+            else:
+                classes_data.append({"name": "Default", "type": "File", "annotations": [], "methods": [current_method]})
+            ann_buffer = []
+            continue
+            
+        if current_method and stripped != '{' and stripped != '}':
+            current_method["logic_body"].append(stripped)
+                
+    for cls in classes_data:
+        for method in cls["methods"]:
+            method["logic_body"] = "\n    ".join(method["logic_body"])
+            
+    return {"imports": filtered_imports, "classes": classes_data}
+
+
+def _process_java_file_ast(code_lines: list) -> dict:
+    """Attempts AST parsing with 'package dummy' fix, falls back to regex if needed."""
+    code_str = "\n".join(code_lines)
+    
     imports = [line.strip() for line in code_lines if line.strip().startswith('import ')]
     filtered_imports = _filter_imports(imports)
     
-    # 2. Parse to AST
     try:
-        ast_tree = parse(code_str)
-    except JavaSyntaxError:
-        try:
-            wrapped_code = f"public class DiffWrapper {{ {code_str} }}"
-            ast_tree = parse(wrapped_code)
-            is_partial = True
-        except Exception:
-            # Fallback if completely unparsable
-            return {"imports": filtered_imports, "unmapped_code": _clean_body_lines(code_lines)}
-
-    classes_data = []
-    
-    # Find top-level types
-    types = ast_tree.filter(tree.TypeDeclaration)
-    if is_partial:
-        # If wrapped, extract the inner body of the dummy class
-        dummy = ast_tree.filter(tree.ClassDeclaration)
-        if dummy: types = dummy[0].body
-
-    for t in types:
-        class_info = {
-            "name": t.name,
-            "type": t.__class__.__name__.replace('Declaration', ''),
-            "annotations": [a.name for a in getattr(t, 'annotations', [])],
-            "methods": []
-        }
+        # FIX: Prepend 'package dummy;' to prevent "Module object not found" parser bug
+        safe_code = code_str
+        if not safe_code.strip().startswith("package"):
+            safe_code = "package dummy;\n" + safe_code
+            
+        ast_tree = parse(safe_code)
+        is_partial = False
         
-        # Walk class body for methods and fields
-        for member in getattr(t, 'body', []):
-            if isinstance(member, tree.MethodDeclaration):
-                # Find where this method is in the raw code lines to grab its body
-                start_line = member.position.line - 1 if member.position else 0
-                # Estimate end line (next method or end of class)
-                end_line = len(code_lines) 
-                for next_member in getattr(t, 'body', []):
-                    if next_member.position and next_member.position.line > member.position.line:
-                        end_line = next_member.position.line - 1
-                        break
-                
-                body_raw = code_lines[start_line:end_line]
-                
-                # Extract signature from AST
-                params = []
-                for p in getattr(member, 'parameters', []):
-                    param_anns = " ".join([a.name for a in getattr(p, 'annotations', [])])
-                    p_str = f"{param_anns} {p.type.name} {p.name}".strip()
-                    params.append(p_str)
-                
-                ret_type = member.return_type.name if member.return_type else "void"
-                
-                class_info["methods"].append({
-                    "signature": f"{ret_type} {member.name}({', '.join(params)})",
-                    "annotations": [a.name for a in member.annotations],
-                    "logic_body": _clean_body_lines(body_raw) # Keep logic, flatten tokens
-                })
-                
-            elif isinstance(member, tree.FieldDeclaration) and member.annotations:
-                 # Only capture Fields if they have annotations (e.g. @Autowired)
-                 f_type = member.type.name
-                 f_name = member.declarators[0].name if member.declarators else "unknown"
-                 class_info["methods"].append({
-                    "signature": f"FIELD: {f_type} {f_name}",
-                    "annotations": [a.name for a in member.annotations],
-                    "logic_body": None
-                 })
+        types = ast_tree.filter(tree.TypeDeclaration)
+        
+        classes_data = []
+        for t in types:
+            class_info = {
+                "name": t.name,
+                "type": t.__class__.__name__.replace('Declaration', ''),
+                "annotations": [a.name for a in getattr(t, 'annotations', [])],
+                "methods": []
+            }
+            
+            for member in getattr(t, 'body', []):
+                if isinstance(member, tree.MethodDeclaration):
+                    start_line = member.position.line - 1 if member.position else 0
+                    # Compensate for the "package dummy;\n" we added (adds 1 line)
+                    if not code_str.strip().startswith("package"):
+                        start_line = max(0, start_line - 1) 
+                        
+                    end_line = len(code_lines) 
+                    for next_member in getattr(t, 'body', []):
+                        if next_member.position and next_member.position.line > member.position.line:
+                            end_line = next_member.position.line - 1
+                            if not code_str.strip().startswith("package"):
+                                end_line = max(0, end_line - 1)
+                            break
+                    
+                    body_raw = code_lines[start_line:end_line]
+                    params = []
+                    for p in getattr(member, 'parameters', []):
+                        param_anns = " ".join([a.name for a in getattr(p, 'annotations', [])])
+                        p_str = f"{param_anns} {p.type.name} {p.name}".strip()
+                        params.append(p_str)
+                    
+                    ret_type = member.return_type.name if member.return_type else "void"
+                    
+                    class_info["methods"].append({
+                        "signature": f"{ret_type} {member.name}({', '.join(params)})",
+                        "annotations": [a.name for a in member.annotations],
+                        "logic_body": _clean_body_lines(body_raw)
+                    })
+                    
+            classes_data.append(class_info)
 
-        classes_data.append(class_info)
+        return {"imports": filtered_imports, "classes": classes_data}
 
-    return {
-        "imports": filtered_imports,
-        "classes": classes_data
-    }
+    except Exception as e:
+        # If AST fails for ANY reason (Module error, unclosed brackets, etc), 
+        # gracefully fall back to the Regex Structured extractor.
+        print(f"[AST Parse Failed: {str(e)[:50]}... Using Regex Fallback]")
+        return _regex_structural_fallback(code_lines, filtered_imports)
 
 # ==========================================
 # 3. MAIN EXECUTION & JSON EXPORT
@@ -142,7 +170,7 @@ def extract_token_optimized_ast(diff_text: str, output_json_path: str) -> None:
 
     for file_path, added_lines in _parse_github_diff_raw(diff_text):
         if not file_path.endswith('.java'): 
-            continue # Basic constraint: Focus on Java for Spring Boot
+            continue
         if not added_lines: continue
 
         file_data = _process_java_file_ast(added_lines)
@@ -153,42 +181,4 @@ def extract_token_optimized_ast(diff_text: str, output_json_path: str) -> None:
     with open(output_json_path, 'w', encoding='utf-8') as f:
         json.dump(final_data, f, indent=4)
         
-    print(f"Token-optimized AST extraction saved to: {output_json_path}")
-
-# ==========================================
-# DEMONSTRATION
-# ==========================================
-if __name__ == "__main__":
-    github_diff = """
-diff --git a/src/main/java/com/app/service/PaymentService.java b/src/main/java/com/app/service/PaymentService.java
-new file mode 100644
---- /dev/null
-+++ b/src/main/java/com/app/service/PaymentService.java
-@@ -0,0 +1,25 @@
-+package com.app.service;
-+
-+import java.util.List;
-+import java.util.ArrayList;
-+import org.springframework.stereotype.Service;
-+import com.app.dto.OrderDto;
-+
-+@Service
-+public class PaymentService {
-+
-+    public boolean processOrder(OrderDto order) {
-+        if (order.getAmount() > 100) {
-+            List<String> risks = new ArrayList<>();
-+            risks.add("High Value");
-+            return false;
-+        }
-+        return true;
-+    }
-+
-+    private void logTransaction(String id) {
-+        System.out.println("Logging " + id);
-+    }
-+}
-"""
-
-    output_file = "./token_optimized_ast.json"
-    extract_token_optimized_ast(github_diff, output_file)
+    print(f"Extraction completed successfully. Saved to: {output_json_path}")

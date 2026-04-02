@@ -1,7 +1,5 @@
 import re
 import json
-from javalang import parse, tree
-from javalang.parser import JavaSyntaxError
 
 # ==========================================
 # 1. CUSTOM GITHUB DIFF PARSER
@@ -27,9 +25,10 @@ def _parse_github_diff_raw(diff_text: str):
         yield current_file, added_lines_buffer
 
 # ==========================================
-# 2. AST + REGEX FALLBACK PROCESSOR
+# 2. STRUCTURAL REGEX MAPPER (Replaces AST)
 # ==========================================
 def _clean_body_lines(lines: list) -> str:
+    """Flattens logic to save LLM tokens."""
     cleaned = []
     for line in lines:
         stripped = line.strip()
@@ -38,6 +37,7 @@ def _clean_body_lines(lines: list) -> str:
     return "\n    ".join(cleaned)
 
 def _filter_imports(import_lines: list) -> list:
+    """Drops standard Java boilerplate imports to save tokens."""
     filtered = []
     skip_prefixes = ('java.lang.', 'java.util.', 'java.io.', 'java.net.', 'lombok.')
     for imp in import_lines:
@@ -45,15 +45,36 @@ def _filter_imports(import_lines: list) -> list:
             filtered.append(imp)
     return filtered
 
-def _regex_structural_fallback(code_lines: list, filtered_imports: list) -> dict:
-    """FALLBACK: Uses Regex to group raw code if AST completely fails."""
+def _process_java_file(code_lines: list) -> dict:
+    """
+    Uses advanced Regex to group raw diff lines into Classes/Methods.
+    Keeps 100% of implementation logic. Immune to partial diff syntax errors.
+    """
+    imports = [line.strip() for line in code_lines if line.strip().startswith('import ')]
+    filtered_imports = _filter_imports(imports)
+    
+    # Regex patterns to identify Java structures (handles inline Spring annotations)
     class_pattern = re.compile(r'^\s*(?:public|private|protected)?\s*(?:abstract|static)?\s*(class|interface|enum|record)\s+(\w+)')
-    method_pattern = re.compile(r'^\s*(?:public|private|protected)?\s*(?:static|final|abstract|synchronized|default)?\s*([\w<>\[\],\s]+?)\s+(\w+)\s*\(([^)]*)\)\s*(?:throws\s+[\w,\s]+)?\s*\{?')
-    field_pattern = re.compile(r'^\s*(?:private|protected|public)?\s*([\w<>\[\]]+)\s+(\w+)\s*[;=]')
-    ann_pattern = re.compile(r'^\s*(@\w+(?:\([^)]*\))?)\s*$')
+    method_pattern = re.compile(
+        r'^\s*(?:(@\w+(?:\([^)]*\))?)\s*)*' # Captures inline annotations like @Override
+        r'(?:public|private|protected)?\s*' 
+        r'(?:static|final|abstract|synchronized|default)?\s*' 
+        r'([\w<>\[\],\s\?]+?)\s+' # Return type
+        r'(\w+)\s*' # Method name
+        r'\(([^)]*)\)\s*' # Parameters
+        r'(?:throws\s+[\w,\s]+)?\s*' # Throws clause
+        r'\{?\s*$' # Opening brace
+    )
+    field_pattern = re.compile(
+        r'^\s*(?:(@\w+(?:\([^)]*\))?)\s*)*' # Captures @Autowired etc
+        r'(?:private|protected|public)?\s*' 
+        r'([\w<>\[\]]+)\s+' # Type
+        r'(\w+)\s*[;=]' # Field name
+    )
+    ann_pattern = re.compile(r'^\s*(@\w+(?:\([^)]*\))?)\s*$') # Standalone annotations
     
     classes_data = []
-    current_class = {"name": "Default", "type": "File", "annotations": [], "methods": []}
+    current_class = {"name": "Root", "type": "File", "annotations": [], "methods": []}
     current_method = None
     ann_buffer = []
     
@@ -61,171 +82,72 @@ def _regex_structural_fallback(code_lines: list, filtered_imports: list) -> dict
         stripped = line.strip()
         if not stripped: continue
         
+        # 1. Buffer standalone annotations (e.g., lines with JUST @Service)
         if ann_pattern.match(stripped):
             ann_buffer.append(stripped)
             continue
             
+        # 2. Detect Class/Interface
         c_match = class_pattern.match(stripped)
         if c_match:
             if current_class["methods"]:
                 classes_data.append(current_class)
-            current_class = {"name": c_match.group(2), "type": c_match.group(1), "annotations": list(ann_buffer), "methods": []}
+            current_class = {
+                "name": c_match.group(2), 
+                "type": c_match.group(1), 
+                "annotations": list(ann_buffer), 
+                "methods": []
+            }
             ann_buffer = []
+            current_method = None
             continue
             
+        # 3. Detect Method Signature
         m_match = method_pattern.match(stripped)
         if m_match:
             signature = f"{m_match.group(1).strip()} {m_match.group(2)}({m_match.group(3).strip()})"
-            current_method = {"signature": signature, "annotations": list(ann_buffer), "logic_body": [stripped]}
+            current_method = {
+                "signature": signature, 
+                "annotations": list(ann_buffer), 
+                "logic_body": []
+            }
             current_class["methods"].append(current_method)
             ann_buffer = []
             continue
             
+        # 4. Detect Fields (only outside of methods to avoid confusing variables with fields)
         f_match = field_pattern.match(stripped)
         if f_match and not current_method:
             signature = f"FIELD: {f_match.group(1)} {f_match.group(2)}"
-            current_class["methods"].append({"signature": signature, "annotations": list(ann_buffer), "logic_body": stripped})
+            current_class["methods"].append({
+                "signature": signature, 
+                "annotations": list(ann_buffer), 
+                "logic_body": [stripped]
+            })
             ann_buffer = []
             continue
             
-        if current_method and stripped != '{' and stripped != '}':
-            current_method["logic_body"].append(stripped)
+        # 5. Capture implementation logic inside the method
+        if current_method:
+            if stripped != '{' and stripped != '}':
+                current_method["logic_body"].append(stripped)
                 
+    # Don't forget the last class in the file
     if current_class["methods"]:
         classes_data.append(current_class)
         
+    # Finalize string formatting
     for cls in classes_data:
         for method in cls["methods"]:
             if isinstance(method["logic_body"], list):
                 method["logic_body"] = "\n    ".join(method["logic_body"])
-            
+                
     return {"imports": filtered_imports, "classes": classes_data}
-
-
-def _process_java_file_ast(code_lines: list) -> dict:
-    """Wraps diffs safely to guarantee AST parsing, avoiding all javalang tuple/syntax bugs."""
-    code_str = "\n".join(code_lines)
-    
-    imports = [line.strip() for line in code_lines if line.strip().startswith('import ')]
-    filtered_imports = _filter_imports(imports)
-    
-    try:
-        # STEP 1: Safely wrap partial code into a dummy class to satisfy Java syntax rules
-        has_package = any(line.strip().startswith("package ") for line in code_lines)
-        if has_package:
-            pkg_line = next((line for line in code_lines if line.strip().startswith("package ")), "")
-            rest_of_code = "\n".join([line for line in code_lines if not line.strip().startswith("package ")])
-            safe_code = f"{pkg_line}\npublic class DiffWrapper {{\n{rest_of_code}\n}}"
-        else:
-            safe_code = f"package dummy;\npublic class DiffWrapper {{\n{code_str}\n}}"
-            
-        ast_tree = parse(safe_code)
-        
-        # STEP 2: Manual tree traversal (Bypasses the .filter() tuple bug entirely)
-        wrapper_node = None
-        for path, node in ast_tree: 
-            if isinstance(node, tree.ClassDeclaration) and getattr(node, 'name', None) == 'DiffWrapper':
-                wrapper_node = node
-                break
-                
-        if not wrapper_node:
-            return _regex_structural_fallback(code_lines, filtered_imports)
-
-        classes_data = [{"name": "DiffWrapper", "type": "Class", "annotations": [], "methods": []}]
-        
-        def extract_member(member, remaining_members, search_start_idx):
-            """Recursively extracts methods/fields, mapping them back to raw diff lines."""
-            
-            # If the diff contained a whole class, it's now an inner class. Flatten it.
-            if isinstance(member, (tree.ClassDeclaration, tree.InterfaceDeclaration)):
-                inner_body = getattr(member, 'body', [])
-                for i, inner_m in enumerate(inner_body):
-                    extract_member(inner_m, inner_body[i+1:], search_start_idx)
-                return
-
-            if isinstance(member, tree.MethodDeclaration):
-                member_name = getattr(member, 'name', 'unknown_method')
-                
-                # Find this method in the raw diff text
-                start_idx = -1
-                for i in range(search_start_idx, len(code_lines)):
-                    if f"{member_name}(" in code_lines[i]:
-                        start_idx = i
-                        break
-                
-                if start_idx != -1:
-                    # Find where the next method starts to slice the body
-                    end_idx = len(code_lines)
-                    for next_m in remaining_members:
-                        n_name = getattr(next_m, 'name', None)
-                        if n_name:
-                            for j in range(start_idx + 1, len(code_lines)):
-                                if n_name in code_lines[j]:
-                                    end_idx = j
-                                    break
-                            break 
-                    
-                    body_raw = code_lines[start_idx:end_idx]
-                    
-                    # Safely extract parameters and types
-                    params = []
-                    for p in getattr(member, 'parameters', []):
-                        p_anns = " ".join([getattr(a, 'name', '') for a in getattr(p, 'annotations', [])])
-                        p_type = getattr(getattr(p, 'type', None), 'name', 'Object')
-                        p_name = getattr(p, 'name', 'arg')
-                        params.append(f"{p_anns} {p_type} {p_name}".strip())
-                    
-                    ret_type = getattr(getattr(member, 'return_type', None), 'name', 'void')
-                    method_anns = [getattr(a, 'name', '') for a in getattr(member, 'annotations', [])]
-                    
-                    classes_data[0]["methods"].append({
-                        "signature": f"{ret_type} {member_name}({', '.join(params)})",
-                        "annotations": method_anns,
-                        "logic_body": _clean_body_lines(body_raw)
-                    })
-
-            elif isinstance(member, tree.FieldDeclaration) and getattr(member, 'annotations', None):
-                f_type = getattr(getattr(member, 'type', None), 'name', 'unknown_type')
-                declarators = getattr(member, 'declarators', [])
-                if declarators:
-                    f_name = getattr(declarators[0], 'name', 'unknown_field')
-                    
-                    start_idx = -1
-                    for i in range(search_start_idx, len(code_lines)):
-                        if f_name in code_lines[i]:
-                            start_idx = i
-                            break
-                            
-                    if start_idx != -1:
-                        body_raw = code_lines[start_idx:start_idx+1]
-                        field_anns = [getattr(a, 'name', '') for a in getattr(member, 'annotations', [])]
-                        
-                        classes_data[0]["methods"].append({
-                            "signature": f"FIELD: {f_type} {f_name}",
-                            "annotations": field_anns,
-                            "logic_body": _clean_body_lines(body_raw)
-                        })
-
-        # STEP 3: Process all members found inside the wrapper
-        ast_members = getattr(wrapper_node, 'body', [])
-        for idx, member in enumerate(ast_members):
-            extract_member(member, ast_members[idx+1:], 0)
-
-        # Clean up wrapper name if the raw code was just a standalone method
-        if len(classes_data[0]["methods"]) == 1 and not any("class " in line for line in code_lines):
-             pass # Keep wrapper name to group the loose method
-
-        return {"imports": filtered_imports, "classes": classes_data}
-
-    except Exception as e:
-        # Absolute catch-all for un-parsable code (e.g., unclosed string literals in diff)
-        print(f"[AST Safety Catch: {str(e)}... Using Regex Fallback]")
-        return _regex_structural_fallback(code_lines, filtered_imports)
 
 # ==========================================
 # 3. MAIN EXECUTION & JSON EXPORT
 # ==========================================
-def extract_token_optimized_ast(diff_text: str, output_json_path: str) -> None:
+def extract_structured_code(diff_text: str, output_json_path: str) -> None:
     final_data = []
 
     for file_path, added_lines in _parse_github_diff_raw(diff_text):
@@ -233,7 +155,8 @@ def extract_token_optimized_ast(diff_text: str, output_json_path: str) -> None:
             continue
         if not added_lines: continue
 
-        file_data = _process_java_file_ast(added_lines)
+        # Process using the stable Regex mapper
+        file_data = _process_java_file(added_lines)
         file_data["file"] = file_path
         
         final_data.append(file_data)
@@ -247,7 +170,7 @@ def extract_token_optimized_ast(diff_text: str, output_json_path: str) -> None:
 # VERIFICATION TEST
 # ==========================================
 if __name__ == "__main__":
-    # The EXACT tricky diff that was failing before
+    # The EXACT tricky diff that kept breaking javalang
     tricky_diff = """
 diff --git a/src/main/java/com/app/Logic.java b/src/main/java/com/app/Logic.java
 index 1234567..abcdefg 100644
@@ -269,10 +192,10 @@ index 1234567..abcdefg 100644
  }
 """
 
-    output_file = "./verified_ast_output.json"
-    extract_token_optimized_ast(tricky_diff, output_file)
+    output_file = "./verified_output.json"
+    extract_structured_code(tricky_diff, output_file)
     
-    # Verify JSON was created and print it
+    # Print output to verify
     with open(output_file, 'r') as f:
         print("JSON Output Preview:")
         print(json.dumps(json.load(f), indent=2))

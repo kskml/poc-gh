@@ -30,7 +30,6 @@ def _parse_github_diff_raw(diff_text: str):
 # 2. AST + REGEX FALLBACK PROCESSOR
 # ==========================================
 def _clean_body_lines(lines: list) -> str:
-    """Flattens a method body to save LLM tokens."""
     cleaned = []
     for line in lines:
         stripped = line.strip()
@@ -39,7 +38,6 @@ def _clean_body_lines(lines: list) -> str:
     return "\n    ".join(cleaned)
 
 def _filter_imports(import_lines: list) -> list:
-    """Drops standard Java boilerplate imports to save tokens."""
     filtered = []
     skip_prefixes = ('java.lang.', 'java.util.', 'java.io.', 'java.net.', 'lombok.')
     for imp in import_lines:
@@ -48,7 +46,7 @@ def _filter_imports(import_lines: list) -> list:
     return filtered
 
 def _regex_structural_fallback(code_lines: list, filtered_imports: list) -> dict:
-    """FALLBACK: Uses Regex to group raw code if AST fails."""
+    """FALLBACK: Uses Regex to group raw code if AST completely fails."""
     class_pattern = re.compile(r'^\s*(?:public|private|protected)?\s*(?:abstract|static)?\s*(class|interface|enum|record)\s+(\w+)')
     method_pattern = re.compile(r'^\s*(?:public|private|protected)?\s*(?:static|final|abstract|synchronized|default)?\s*([\w<>\[\],\s]+?)\s+(\w+)\s*\(([^)]*)\)\s*(?:throws\s+[\w,\s]+)?\s*\{?')
     field_pattern = re.compile(r'^\s*(?:private|protected|public)?\s*([\w<>\[\]]+)\s+(\w+)\s*[;=]')
@@ -105,7 +103,7 @@ def _regex_structural_fallback(code_lines: list, filtered_imports: list) -> dict
 
 
 def _process_java_file_ast(code_lines: list) -> dict:
-    """Parses with AST safely, maps structure to raw diff lines."""
+    """Hyper-safe AST parser. Uses manual traversal and getattr() to prevent tuple crashes."""
     code_str = "\n".join(code_lines)
     
     imports = [line.strip() for line in code_lines if line.strip().startswith('import ')]
@@ -119,15 +117,26 @@ def _process_java_file_ast(code_lines: list) -> dict:
             
         ast_tree = parse(safe_code)
         
-        # FIX: Unpack the tuple! filter() returns (node, path)
-        types = ast_tree.filter(tree.TypeDeclaration)
-        
+        # FIX: DO NOT USE .filter(). It causes the tuple bug. Manually iterate the tree.
+        types = []
+        for path, node in ast_tree: 
+            if isinstance(node, (tree.ClassDeclaration, tree.InterfaceDeclaration, tree.EnumDeclaration)):
+                types.append(node)
+                
+        if not types:
+            return _regex_structural_fallback(code_lines, filtered_imports)
+
         classes_data = []
-        for type_node, _ in types:  
+        for type_node in types:  # type_node is strictly the Node now
+            # FIX: Use getattr for everything to safely handle missing attributes
+            class_name = getattr(type_node, 'name', 'UnknownClass')
+            class_type = type_node.__class__.__name__.replace('Declaration', '')
+            class_annotations = [getattr(a, 'name', '') for a in getattr(type_node, 'annotations', [])]
+            
             class_info = {
-                "name": type_node.name,
-                "type": type_node.__class__.__name__.replace('Declaration', ''),
-                "annotations": [a.name for a in getattr(type_node, 'annotations', [])],
+                "name": class_name,
+                "type": class_type,
+                "annotations": class_annotations,
                 "methods": []
             }
             
@@ -138,15 +147,16 @@ def _process_java_file_ast(code_lines: list) -> dict:
                 
                 # --- HANDLE METHODS ---
                 if isinstance(member, tree.MethodDeclaration):
-                    # Safely find method in diff lines by name (ignores broken AST line numbers)
+                    member_name = getattr(member, 'name', 'unknown_method')
+                    
+                    # Safely find method in diff lines by name
                     start_idx = -1
                     for i in range(current_search_start, len(code_lines)):
-                        if f"{member.name}(" in code_lines[i]:
+                        if f"{member_name}(" in code_lines[i]:
                             start_idx = i
                             break
                     
                     if start_idx != -1:
-                        # Find where the next method/field starts to slice the body
                         end_idx = len(code_lines)
                         for next_member in ast_members[idx+1:]:
                             search_name = getattr(next_member, 'name', None)
@@ -162,46 +172,58 @@ def _process_java_file_ast(code_lines: list) -> dict:
                         
                         params = []
                         for p in getattr(member, 'parameters', []):
-                            param_anns = " ".join([a.name for a in getattr(p, 'annotations', [])])
-                            p_str = f"{param_anns} {p.type.name} {p.name}".strip()
-                            params.append(p_str)
+                            p_anns = " ".join([getattr(a, 'name', '') for a in getattr(p, 'annotations', [])])
+                            p_type_node = getattr(p, 'type', None)
+                            # Safely handle generic types or missing names
+                            p_type_name = getattr(p_type_node, 'name', 'Object') if p_type_node else 'Object'
+                            p_name = getattr(p, 'name', 'arg')
+                            params.append(f"{p_anns} {p_type_name} {p_name}".strip())
                         
-                        ret_type = member.return_type.name if member.return_type else "void"
+                        ret_type_node = getattr(member, 'return_type', None)
+                        ret_type = getattr(ret_type_node, 'name', 'void') if ret_type_node else 'void'
+                        
+                        method_anns = [getattr(a, 'name', '') for a in getattr(member, 'annotations', [])]
                         
                         class_info["methods"].append({
-                            "signature": f"{ret_type} {member.name}({', '.join(params)})",
-                            "annotations": [a.name for a in member.annotations],
+                            "signature": f"{ret_type} {member_name}({', '.join(params)})",
+                            "annotations": method_anns,
                             "logic_body": _clean_body_lines(body_raw)
                         })
                 
                 # --- HANDLE FIELDS ---
                 elif isinstance(member, tree.FieldDeclaration):
-                    f_type = member.type.name
-                    f_name = member.declarators[0].name if member.declarators else "unknown"
+                    f_type_node = getattr(member, 'type', None)
+                    f_type = getattr(f_type_node, 'name', 'unknown_type') if f_type_node else 'unknown_type'
                     
-                    start_idx = -1
-                    for i in range(current_search_start, len(code_lines)):
-                        if f_name in code_lines[i]:
-                            start_idx = i
-                            break
-                            
-                    if start_idx != -1:
-                        body_raw = code_lines[start_idx:start_idx+1]
-                        current_search_start = start_idx + 1
+                    declarators = getattr(member, 'declarators', [])
+                    if declarators:
+                        f_name = getattr(declarators[0], 'name', 'unknown_field')
                         
-                        class_info["methods"].append({
-                            "signature": f"FIELD: {f_type} {f_name}",
-                            "annotations": [a.name for a in member.annotations],
-                            "logic_body": _clean_body_lines(body_raw)
-                        })
+                        start_idx = -1
+                        for i in range(current_search_start, len(code_lines)):
+                            if f_name in code_lines[i]:
+                                start_idx = i
+                                break
+                                
+                        if start_idx != -1:
+                            body_raw = code_lines[start_idx:start_idx+1]
+                            current_search_start = start_idx + 1
+                            
+                            field_anns = [getattr(a, 'name', '') for a in getattr(member, 'annotations', [])]
+                            
+                            class_info["methods"].append({
+                                "signature": f"FIELD: {f_type} {f_name}",
+                                "annotations": field_anns,
+                                "logic_body": _clean_body_lines(body_raw)
+                            })
                         
             classes_data.append(class_info)
 
         return {"imports": filtered_imports, "classes": classes_data}
 
     except Exception as e:
-        # Catch-all for ANY AST error (Module, Tuple, Syntax, etc)
-        print(f"[AST Parse Warning: {str(e)[:60]}... Using Regex Fallback]")
+        # Absolute catch-all. If javalang fails for ANY reason, we gracefully fallback.
+        print(f"[AST Safety Catch: {str(e)[:60]}... Using Regex Fallback]")
         return _regex_structural_fallback(code_lines, filtered_imports)
 
 # ==========================================
@@ -226,10 +248,10 @@ def extract_token_optimized_ast(diff_text: str, output_json_path: str) -> None:
     print(f"\nSuccess! Extraction saved to: {output_json_path}")
 
 # ==========================================
-# DEMONSTRATION & VERIFICATION
+# VERIFICATION TEST
 # ==========================================
 if __name__ == "__main__":
-    # Deliberately tricky diff: partial class, no package, no imports
+    # Diff designed to trigger internal javalang tuple/module bugs
     tricky_diff = """
 diff --git a/src/main/java/com/app/Logic.java b/src/main/java/com/app/Logic.java
 index 1234567..abcdefg 100644
@@ -253,3 +275,8 @@ index 1234567..abcdefg 100644
 
     output_file = "./verified_ast_output.json"
     extract_token_optimized_ast(tricky_diff, output_file)
+    
+    # Verify JSON was created and is valid
+    with open(output_file, 'r') as f:
+        print("JSON Output Preview:")
+        print(json.dumps(json.load(f), indent=2))

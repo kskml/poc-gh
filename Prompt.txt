@@ -30,6 +30,7 @@ def _parse_github_diff_raw(diff_text: str):
 # 2. AST + REGEX FALLBACK PROCESSOR
 # ==========================================
 def _clean_body_lines(lines: list) -> str:
+    """Flattens a method body to save LLM tokens."""
     cleaned = []
     for line in lines:
         stripped = line.strip()
@@ -38,6 +39,7 @@ def _clean_body_lines(lines: list) -> str:
     return "\n    ".join(cleaned)
 
 def _filter_imports(import_lines: list) -> list:
+    """Drops standard Java boilerplate imports to save tokens."""
     filtered = []
     skip_prefixes = ('java.lang.', 'java.util.', 'java.io.', 'java.net.', 'lombok.')
     for imp in import_lines:
@@ -46,16 +48,14 @@ def _filter_imports(import_lines: list) -> list:
     return filtered
 
 def _regex_structural_fallback(code_lines: list, filtered_imports: list) -> dict:
-    """
-    FALLBACK: If javalang completely fails, this uses Regex to group 
-    raw code into Classes/Methods, ensuring the JSON structure is identical.
-    """
+    """FALLBACK: Uses Regex to group raw code if AST fails."""
     class_pattern = re.compile(r'^\s*(?:public|private|protected)?\s*(?:abstract|static)?\s*(class|interface|enum|record)\s+(\w+)')
     method_pattern = re.compile(r'^\s*(?:public|private|protected)?\s*(?:static|final|abstract|synchronized|default)?\s*([\w<>\[\],\s]+?)\s+(\w+)\s*\(([^)]*)\)\s*(?:throws\s+[\w,\s]+)?\s*\{?')
+    field_pattern = re.compile(r'^\s*(?:private|protected|public)?\s*([\w<>\[\]]+)\s+(\w+)\s*[;=]')
     ann_pattern = re.compile(r'^\s*(@\w+(?:\([^)]*\))?)\s*$')
     
     classes_data = []
-    current_class = None
+    current_class = {"name": "Default", "type": "File", "annotations": [], "methods": []}
     current_method = None
     ann_buffer = []
     
@@ -69,8 +69,9 @@ def _regex_structural_fallback(code_lines: list, filtered_imports: list) -> dict
             
         c_match = class_pattern.match(stripped)
         if c_match:
+            if current_class["methods"]:
+                classes_data.append(current_class)
             current_class = {"name": c_match.group(2), "type": c_match.group(1), "annotations": list(ann_buffer), "methods": []}
-            classes_data.append(current_class)
             ann_buffer = []
             continue
             
@@ -78,88 +79,129 @@ def _regex_structural_fallback(code_lines: list, filtered_imports: list) -> dict
         if m_match:
             signature = f"{m_match.group(1).strip()} {m_match.group(2)}({m_match.group(3).strip()})"
             current_method = {"signature": signature, "annotations": list(ann_buffer), "logic_body": [stripped]}
-            if current_class:
-                current_class["methods"].append(current_method)
-            else:
-                classes_data.append({"name": "Default", "type": "File", "annotations": [], "methods": [current_method]})
+            current_class["methods"].append(current_method)
+            ann_buffer = []
+            continue
+            
+        f_match = field_pattern.match(stripped)
+        if f_match and not current_method:
+            signature = f"FIELD: {f_match.group(1)} {f_match.group(2)}"
+            current_class["methods"].append({"signature": signature, "annotations": list(ann_buffer), "logic_body": stripped})
             ann_buffer = []
             continue
             
         if current_method and stripped != '{' and stripped != '}':
             current_method["logic_body"].append(stripped)
                 
+    if current_class["methods"]:
+        classes_data.append(current_class)
+        
     for cls in classes_data:
         for method in cls["methods"]:
-            method["logic_body"] = "\n    ".join(method["logic_body"])
+            if isinstance(method["logic_body"], list):
+                method["logic_body"] = "\n    ".join(method["logic_body"])
             
     return {"imports": filtered_imports, "classes": classes_data}
 
 
 def _process_java_file_ast(code_lines: list) -> dict:
-    """Attempts AST parsing with 'package dummy' fix, falls back to regex if needed."""
+    """Parses with AST safely, maps structure to raw diff lines."""
     code_str = "\n".join(code_lines)
     
     imports = [line.strip() for line in code_lines if line.strip().startswith('import ')]
     filtered_imports = _filter_imports(imports)
     
     try:
-        # FIX: Prepend 'package dummy;' to prevent "Module object not found" parser bug
+        # FIX: Prepend package to prevent 'Module object not found'
         safe_code = code_str
         if not safe_code.strip().startswith("package"):
             safe_code = "package dummy;\n" + safe_code
             
         ast_tree = parse(safe_code)
-        is_partial = False
         
+        # FIX: Unpack the tuple! filter() returns (node, path)
         types = ast_tree.filter(tree.TypeDeclaration)
         
         classes_data = []
-        for t in types:
+        for type_node, _ in types:  
             class_info = {
-                "name": t.name,
-                "type": t.__class__.__name__.replace('Declaration', ''),
-                "annotations": [a.name for a in getattr(t, 'annotations', [])],
+                "name": type_node.name,
+                "type": type_node.__class__.__name__.replace('Declaration', ''),
+                "annotations": [a.name for a in getattr(type_node, 'annotations', [])],
                 "methods": []
             }
             
-            for member in getattr(t, 'body', []):
+            ast_members = getattr(type_node, 'body', [])
+            current_search_start = 0
+            
+            for idx, member in enumerate(ast_members):
+                
+                # --- HANDLE METHODS ---
                 if isinstance(member, tree.MethodDeclaration):
-                    start_line = member.position.line - 1 if member.position else 0
-                    # Compensate for the "package dummy;\n" we added (adds 1 line)
-                    if not code_str.strip().startswith("package"):
-                        start_line = max(0, start_line - 1) 
-                        
-                    end_line = len(code_lines) 
-                    for next_member in getattr(t, 'body', []):
-                        if next_member.position and next_member.position.line > member.position.line:
-                            end_line = next_member.position.line - 1
-                            if not code_str.strip().startswith("package"):
-                                end_line = max(0, end_line - 1)
+                    # Safely find method in diff lines by name (ignores broken AST line numbers)
+                    start_idx = -1
+                    for i in range(current_search_start, len(code_lines)):
+                        if f"{member.name}(" in code_lines[i]:
+                            start_idx = i
                             break
                     
-                    body_raw = code_lines[start_line:end_line]
-                    params = []
-                    for p in getattr(member, 'parameters', []):
-                        param_anns = " ".join([a.name for a in getattr(p, 'annotations', [])])
-                        p_str = f"{param_anns} {p.type.name} {p.name}".strip()
-                        params.append(p_str)
+                    if start_idx != -1:
+                        # Find where the next method/field starts to slice the body
+                        end_idx = len(code_lines)
+                        for next_member in ast_members[idx+1:]:
+                            search_name = getattr(next_member, 'name', None)
+                            if search_name:
+                                for j in range(start_idx + 1, len(code_lines)):
+                                    if search_name in code_lines[j]:
+                                        end_idx = j
+                                        break
+                                break 
+                        
+                        body_raw = code_lines[start_idx:end_idx]
+                        current_search_start = end_idx
+                        
+                        params = []
+                        for p in getattr(member, 'parameters', []):
+                            param_anns = " ".join([a.name for a in getattr(p, 'annotations', [])])
+                            p_str = f"{param_anns} {p.type.name} {p.name}".strip()
+                            params.append(p_str)
+                        
+                        ret_type = member.return_type.name if member.return_type else "void"
+                        
+                        class_info["methods"].append({
+                            "signature": f"{ret_type} {member.name}({', '.join(params)})",
+                            "annotations": [a.name for a in member.annotations],
+                            "logic_body": _clean_body_lines(body_raw)
+                        })
+                
+                # --- HANDLE FIELDS ---
+                elif isinstance(member, tree.FieldDeclaration):
+                    f_type = member.type.name
+                    f_name = member.declarators[0].name if member.declarators else "unknown"
                     
-                    ret_type = member.return_type.name if member.return_type else "void"
-                    
-                    class_info["methods"].append({
-                        "signature": f"{ret_type} {member.name}({', '.join(params)})",
-                        "annotations": [a.name for a in member.annotations],
-                        "logic_body": _clean_body_lines(body_raw)
-                    })
-                    
+                    start_idx = -1
+                    for i in range(current_search_start, len(code_lines)):
+                        if f_name in code_lines[i]:
+                            start_idx = i
+                            break
+                            
+                    if start_idx != -1:
+                        body_raw = code_lines[start_idx:start_idx+1]
+                        current_search_start = start_idx + 1
+                        
+                        class_info["methods"].append({
+                            "signature": f"FIELD: {f_type} {f_name}",
+                            "annotations": [a.name for a in member.annotations],
+                            "logic_body": _clean_body_lines(body_raw)
+                        })
+                        
             classes_data.append(class_info)
 
         return {"imports": filtered_imports, "classes": classes_data}
 
     except Exception as e:
-        # If AST fails for ANY reason (Module error, unclosed brackets, etc), 
-        # gracefully fall back to the Regex Structured extractor.
-        print(f"[AST Parse Failed: {str(e)[:50]}... Using Regex Fallback]")
+        # Catch-all for ANY AST error (Module, Tuple, Syntax, etc)
+        print(f"[AST Parse Warning: {str(e)[:60]}... Using Regex Fallback]")
         return _regex_structural_fallback(code_lines, filtered_imports)
 
 # ==========================================
@@ -181,4 +223,33 @@ def extract_token_optimized_ast(diff_text: str, output_json_path: str) -> None:
     with open(output_json_path, 'w', encoding='utf-8') as f:
         json.dump(final_data, f, indent=4)
         
-    print(f"Extraction completed successfully. Saved to: {output_json_path}")
+    print(f"\nSuccess! Extraction saved to: {output_json_path}")
+
+# ==========================================
+# DEMONSTRATION & VERIFICATION
+# ==========================================
+if __name__ == "__main__":
+    # Deliberately tricky diff: partial class, no package, no imports
+    tricky_diff = """
+diff --git a/src/main/java/com/app/Logic.java b/src/main/java/com/app/Logic.java
+index 1234567..abcdefg 100644
+--- a/src/main/java/com/app/Logic.java
++++ b/src/main/java/com/app/Logic.java
+@@ -10,4 +10,15 @@ public class Logic {
++    @Autowired
++    private PaymentGateway gateway;
++
++    @Override
++    public boolean process(OrderDto order) {
++        if (order.getAmount() > 100) {
++            List<String> risks = new ArrayList<>();
++            risks.add("High Value");
++            return gateway.charge(order);
++        }
++        return false;
++    }
+ }
+"""
+
+    output_file = "./verified_ast_output.json"
+    extract_token_optimized_ast(tricky_diff, output_file)

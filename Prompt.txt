@@ -1,161 +1,453 @@
-import os
-from github import Github
-from tree_sitter import Language, Parser
+"""
+Hyper-Optimized Diff Summarizer for LLM Context
+Focus: Zero raw code in output. 100% behavioral/intent summaries.
+Uses Tree-Sitter to locate context, heuristics to summarize intent.
+"""
+
+import re
 import tree_sitter_java as tsjava
+import tree_sitter as ts
+from typing import Dict, List, Optional
+from dataclasses import dataclass, field
 
-# Initialize Tree-Sitter Java
-JAVA_LANGUAGE = Language(tsjava.language())
-parser = Parser(JAVA_LANGUAGE)
+# Initialize Tree-sitter
+JAVA_LANGUAGE = ts.Language(tsjava.language())
+PARSER = ts.Parser(JAVA_LANGUAGE)
 
-# --- CONFIGURATION ---
-GITHUB_TOKEN = "your_github_token"
-REPO_NAME = "owner/repo"
-BASE_TAG = "v1.0.0"
-COMPARE_TAG = "v1.1.0"
+# ============================================================================
+# ULTRA-COMPACT DATA STRUCTURES (No raw code stored here)
+# ============================================================================
 
-def get_github_diff_info(repo, base, compare):
-    """
-    Fetches the comparison between two tags and returns a list of modified files 
-    and their changed line ranges.
-    """
-    comparison = repo.compare(base, compare)
-    files_data = []
+@dataclass
+class MethodChange:
+    name: str
+    intent: str  # e.g., "Added null-check validation and logging"
+
+@dataclass
+class ClassChange:
+    name: str
+    type: str
+    component: Optional[str] # e.g., "RestController"
+    endpoints: List[str] = field(default_factory=list)
+    methods: List[MethodChange] = field(default_factory=list)
+    structural_change: str = "" # e.g., "Added record for immutable data"
+
+@dataclass
+class FileSummary:
+    path: str
+    status: str
+    package: Optional[str] = None
+    classes: List[ClassChange] = field(default_factory=list)
+    config_intent: str = "" # For yml/properties files
+
+@dataclass
+class ReleaseSummary:
+    overview: str = ""
+    files: List[FileSummary] = field(default_factory=list)
+    breaking_indicators: List[str] = field(default_factory=list)
+
+# ============================================================================
+# STEP 1: INTENT EXTRACTION ENGINE (The Magic)
+# ============================================================================
+
+INTENT_PATTERNS = [
+    (r'throw\s+new\s+\w+', 'Throws explicit exception'),
+    (r'if\s*\([^)]*==\s*null[^)]*\)', 'Added null-check guard'),
+    (r'if\s*\([^)]*!=\s*null[^)]*\)', 'Added null-check guard'),
+    (r'log\.(debug|info|warn|error|trace)', 'Added logging statement'),
+    (r'@Valid(?:ated)?\b', 'Added request validation'),
+    (r'@Transactional\s*\(', 'Added transaction boundary'),
+    (r'@Cacheable|@CacheEvict', 'Added caching layer'),
+    (r'ResponseEntity\.(ok|status|notFound|noContent)', 'Wrapped response in ResponseEntity'),
+    (r'\.stream\(\)\.map\(', 'Added stream-based DTO mapping'),
+    (r'\.orElseThrow\(', 'Replaced optional get with orElseThrow'),
+    (r'\.orElse\(null\)', 'Fallback to null if empty'),
+    (r'\.save\(|\.saveAll\(', 'Persisted entity to database'),
+    (r'\.deleteBy|\.remove\(', 'Deleted entity from database'),
+    (r'\.findById\(', 'Fetched entity by ID'),
+    (r'\.findAll\(|\.findAllBy', 'Queried multiple entities'),
+    (r'new\s+\w+DTO\(', 'Instantiated new Data Transfer Object'),
+    (r'public\s+record\s+\w+', 'Defined immutable Java 17 record'),
+    (r'sealed\s+(class|interface)', 'Defined Java 17 sealed type hierarchy'),
+    (r'permits\s+[\w,\s]+', 'Restricted inheritance (permits)'),
+    (r'hikari|maximum-pool|minimum-idle', 'Tuned database connection pool'),
+    (r'spring\.datasource\.url', 'Modified database connection string'),
+]
+
+def summarize_code_intent(lines: List[str]) -> List[str]:
+    """Translate raw code lines into human-readable behavioral intents."""
+    intents = set()
     
-    for file in comparison.files:
-        # We store the filename and the patch (diff)
-        # We will parse the patch to find changed line numbers
-        files_data.append({
-            "filename": file.filename,
-            "patch": file.patch,
-            "status": file.status
-        })
-    return files_data
-
-def parse_diff_lines(patch):
-    """
-    Parses a git patch string to extract the line numbers that were modified.
-    """
-    changed_lines = set()
-    if not patch:
-        return changed_lines
-
-    for line in patch.split('\n'):
-        if line.startswith('@@'):
-            # Format: @@ -start,len +start,len @@
-            parts = line.split(' ')
-            added_part = parts[2] # e.g., +123,10
-            start_line = int(added_part.split(',')[0].replace('+', ''))
-            # Simplified: we mark the range of the hunk as modified
-            # In a production system, you'd iterate through the '+' lines specifically
-            changed_lines.add(start_line) 
-    return changed_lines
-
-def get_node_text(node, source_code):
-    """Extracts the actual text of a node from the source code."""
-    return source_code[node.start_byte:node.end_byte].decode('utf-8')
-
-def analyze_java_structure(source_code, changed_lines):
-    """
-    Uses AST to find which classes, methods, and Spring components 
-    contain the changed lines.
-    """
-    tree = parser.parse(source_code)
-    root_node = tree.root_node
-    
-    results = {
-        "package": "",
-        "modified_classes": [],
-        "modified_methods": [],
-        "spring_components": []
-    }
-
-    # 1. Extract Package
-    pkg_node = root_node.children_get_by_type("package_declaration") # Simplified logic
-    # Search for package keyword
-    for child in root_node.children:
-        if child.type == 'package_declaration':
-            results["package"] = get_node_text(child, source_code)
-
-    # 2. Traverse AST to find modified elements
-    def traverse(node):
-        # Check if this node is a Class or Method
-        is_class = node.type == 'class_declaration'
-        is_method = node.type == 'method_declaration'
-        
-        if is_class or is_method:
-            # Check if any changed line falls within this node's line range
-            node_start = node.start_point[0] + 1 # 0-indexed to 1-indexed
-            node_end = node.end_point[0] + 1
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith('//') or stripped.startswith('*'):
+            continue
             
-            if any(line >= node_start and line <= node_end for line in changed_lines):
-                text = get_node_text(node, source_code)
+        for pattern, intent in INTENT_PATTERNS:
+            if re.search(pattern, stripped, re.IGNORECASE):
+                intents.add(intent)
                 
-                if is_class:
-                    results["modified_classes"].append(text.split('{')[0].strip())
-                if is_method:
-                    # Extract signature only (up to the opening brace)
-                    signature = text.split('{')[0].strip()
-                    results["modified_methods"].append(signature)
+    return list(intents)
 
-        # Check for Spring Annotations (looking for @RestController, @Service, etc.)
-        if node.type == 'annotation':
-            anno_text = get_node_text(node, source_code)
-            if any(keyword in anno_text for keyword in ['@RestController', '@Service', '@Component', '@Repository', '@GetMapping', '@PostMapping']):
-                # We only care if this annotation is part of a modified section
-                node_line = node.start_point[0] + 1
-                if any(line >= node_line - 1 and line <= node_line + 1 for line in changed_lines):
-                    results["spring_components"].append(anno_text)
+def infer_diff_type(added: List[str], removed: List[str]) -> str:
+    """Infer if this is an addition, modification, or removal block."""
+    if not removed and added: return "Added"
+    if not added and removed: return "Removed"
+    return "Modified"
 
-        for child in node.children:
-            traverse(child)
+# ============================================================================
+# STEP 2: CONTEXT-AWARE TREE-SITTER PARSER
+# ============================================================================
 
-    traverse(root_node)
+def get_node_text(node: ts.Node, source_bytes: bytes) -> str:
+    return source_bytes[node.start_byte:node.end_byte].decode('utf8', errors='ignore')
+
+def find_enclosing_method_name(node: ts.Node, source_bytes: bytes) -> Optional[str]:
+    """Walk up the tree from a changed line to find which method it belongs to."""
+    current = node.parent
+    while current:
+        if current.type == 'method_declaration':
+            name_node = current.child_by_field_name('name')
+            if name_node:
+                return get_node_text(name_node, source_bytes)
+        if current.type in ('class_declaration', 'interface_declaration', 'enum_declaration'):
+            break # Don't go outside the class
+        current = current.parent
+    return None
+
+def extract_endpoints_from_annotations(text: str) -> List[str]:
+    """Extract HTTP method and path without keeping raw annotations."""
+    endpoints = []
+    # Normalize multiline annotations to single line
+    text = re.sub(r'\s+', ' ', text)
+    
+    mappings = {
+        '@GetMapping': 'GET', '@PostMapping': 'POST', '@PutMapping': 'PUT',
+        '@DeleteMapping': 'DELETE', '@PatchMapping': 'PATCH'
+    }
+    
+    for ann, method in mappings.items():
+        if ann in text:
+            # Extract path
+            match = re.search(rf'{ann}\s*\(\s*(?:value\s*=\s*)?["\']([^"\']+)["\']', text)
+            path = match.group(1) if match else '/'
+            endpoints.append(f"{method} {path}")
+            
+    return endpoints
+
+def process_java_change(added: List[str], removed: List[str], context: List[str]) -> Dict:
+    """
+    Uses Tree-Sitter on the CONTEXT lines to figure out WHERE we are,
+    then maps the ADDED/REMOVED intents to that location.
+    """
+    # Combine context to make a valid enough block for Tree-Sitter
+    context_code = "\n".join(context + added) 
+    source_bytes = context_code.encode('utf8')
+    tree = PARSER.parse(source_bytes)
+    
+    result = {
+        'package': None,
+        'classes': []
+    }
+    
+    # Extract package via simple regex (faster than AST for this)
+    for line in context:
+        pkg_match = re.match(r'^\s*package\s+([\w.]+)', line)
+        if pkg_match:
+            result['package'] = pkg_match.group(1)
+            break
+
+    # Find class and method context using Tree-Sitter
+    root = tree.root_node
+    
+    # We only care about the first class/interface in this snippet
+    class_node = None
+    for child in root.children:
+        if child.type in ('class_declaration', 'interface_declaration', 'enum_declaration', 'record_declaration'):
+            class_node = child
+            break
+            
+    if not class_node:
+        # If no class found (e.g., top-level code or error), just return intents
+        intents = summarize_code_intent(added + removed)
+        if intents:
+            result['classes'].append({'type': 'Unknown', 'name': 'Unknown', 'component': None, 'endpoints': [], 'methods': [{'name': 'Block', 'intent': ", ".join(intents)}]})
+        return result
+
+    # Extract Class Info
+    name_node = class_node.child_by_field_name('name')
+    class_name = get_node_text(name_node, source_bytes) if name_node else "Unknown"
+    class_type = class_node.type.replace('_declaration', '')
+    
+    component = None
+    for child in class_node.children:
+        if child.type == 'marker_annotation':
+            ann_text = get_node_text(child, source_bytes)
+            if '@RestController' in ann_text: component = 'RestController'
+            elif '@Controller' in ann_text: component = 'Controller'
+            elif '@Service' in ann_text: component = 'Service'
+            elif '@Repository' in ann_text: component = 'Repository'
+            elif '@Configuration' in ann_text: component = 'Configuration'
+
+    # Extract Endpoints from added text block
+    endpoints = extract_endpoints_from_annotations("\n".join(added))
+    
+    # Map intents to specific methods
+    method_intents = {}
+    
+    # To find methods, we look at added/removed lines in the context of the AST
+    all_change_lines = added + removed
+    
+    for line in all_change_lines:
+        # Find this line in the AST
+        line_bytes = line.encode('utf8')
+        # Rough search for the node containing this text
+        start_idx = context_code.find(line)
+        if start_idx == -1: continue
+        
+        node = root.named_descendant_for_byte_range(start_idx, start_idx + len(line_bytes))
+        if not node: continue
+        
+        method_name = find_enclosing_method_name(node, source_bytes)
+        if method_name:
+            if method_name not in method_intents:
+                method_intents[method_name] = set()
+            # Tag if added or removed
+            if line in added:
+                method_intents[method_name].add("Added")
+            else:
+                method_intents[method_name].add("Removed")
+
+    # Generate final method summaries
+    methods_summary = []
+    raw_intents = summarize_code_intent(all_change_lines)
+    
+    if method_intents:
+        for m_name, tags in method_intents.items():
+            action = " & ".join(tags)
+            # Combine action with behavioral intents
+            final_intent = f"{action}: {', '.join(raw_intents)}" if raw_intents else f"{action} logic"
+            methods_summary.append({'name': m_name, 'intent': final_intent})
+    elif raw_intents:
+        # Happened outside a method (e.g., field injection)
+        methods_summary.append({'name': 'Class-level', 'intent': ", ".join(raw_intents)})
+    else:
+        methods_summary.append({'name': 'Internal', 'intent': 'Updated implementation details'})
+
+    result['classes'].append({
+        'type': class_type,
+        'name': class_name,
+        'component': component,
+        'endpoints': endpoints,
+        'methods': methods_summary
+    })
+    
+    return result
+
+# ============================================================================
+# STEP 3: CONFIG FILE PARSER (YML/Properties)
+# ============================================================================
+
+def summarize_config_change(added: List[str], removed: List[str]) -> str:
+    """Convert config changes to plain English."""
+    intents = summarize_code_intent(added + removed)
+    if intents:
+        return "; ".join(intents)
+        
+    # Fallback: just list the keys changed
+    keys = []
+    for line in added:
+        line = line.strip()
+        if ':' in line and not line.startswith('#'):
+            keys.append(line.split(':')[0].strip())
+    if keys:
+        return f"Modified keys: {', '.join(keys[:5])}"
+    return "Updated configuration"
+
+# ============================================================================
+# STEP 4: MAIN PIPELINE
+# ============================================================================
+
+def parse_diff_text(diff_text: str) -> List[Dict]:
+    """Minimal diff parser to extract hunks efficiently."""
+    diff_text = diff_text.replace('\r\n', '\n')
+    file_sections = re.split(r'^diff --git ', diff_text, flags=re.MULTILINE)
+    if file_sections and not file_sections[0].strip(): file_sections = file_sections[1:]
+    
+    results = []
+    for section in file_sections:
+        lines = section.split('\n')
+        match = re.match(r'a/(.+?)\s+b/(.+)', lines[0])
+        if not match: continue
+        
+        status = 'Modified'
+        if 'new file' in section[:200]: status = 'Added'
+        elif 'deleted file' in section[:200]: status = 'Deleted'
+        
+        hunks = []
+        cur_hunk = None
+        for line in lines:
+            if re.match(r'^@@', line):
+                if cur_hunk: hunks.append(cur_hunk)
+                cur_hunk = {'added': [], 'removed': [], 'context': []}
+            elif cur_hunk:
+                if line.startswith('+'): cur_hunk['added'].append(line[1:])
+                elif line.startswith('-'): cur_hunk['removed'].append(line[1:])
+                elif line.startswith(' '): cur_hunk['context'].append(line[1:])
+        if cur_hunk: hunks.append(cur_hunk)
+        
+        results.append({'path': match.group(2), 'status': status, 'hunks': hunks})
     return results
 
-def generate_condensed_diff_file(repo, diff_info, output_file):
-    """
-    Main orchestrator to process all files and write the summary.
-    """
-    summary_report = []
-
-    for file_item in diff_info:
-        filename = file_item['filename']
-        if not filename.endswith('.java'):
-            continue
-
-        # Step 1: Get changed lines from diff
-        changed_lines = parse_diff_lines(file_item['patch'])
-        
-        # Step 2: Fetch full file content from GitHub (Required for AST)
-        content = repo.get_contents(filename, ref=COMPARE_TAG).decoded_content
-        
-        # Step 3: AST Analysis
-        analysis = analyze_java_structure(content, changed_lines)
-        
-        # Step 4: Format as a summary
-        file_summary = f"File: {filename}\n"
-        file_summary += f"Package: {analysis['package']}\n"
-        file_summary += f"Modified Classes: {', '.join(analysis['modified_classes']) if analysis['modified_classes'] else 'None'}\n"
-        file_summary += f"Modified Methods: {', '.join(analysis['modified_methods']) if analysis['modified_methods'] else 'None'}\n"
-        file_summary += f"Spring Components/Endpoints: {', '.join(analysis['spring_components']) if analysis['spring_components'] else 'None'}\n"
-        file_summary += "-" * 50 + "\n"
-        
-        summary_report.append(file_summary)
-
-    with open(output_file, "w") as f:
-        f.write("### CONDENSED CODE CHANGE SUMMARY FOR LLM ###\n\n")
-        f.write("\n".join(summary_report))
-
-def main():
-    g = Github(GITHUB_TOKEN)
-    repo = g.get_repo(REPO_NAME)
+def generate_llm_summary(diff_text: str) -> str:
+    """Main function: Converts massive diffs into ultra-compact semantic summaries."""
+    files = parse_diff_text(diff_text)
+    release = ReleaseSummary()
     
-    print(f"Fetching diff between {BASE_TAG} and {COMPARE_TAG}...")
-    diff_info = get_github_diff_info(repo, BASE_TAG, COMPARE_TAG)
+    total_java, total_eps = 0, 0
+    all_endpoints = []
     
-    print("Analyzing Java AST and condensing changes...")
-    generate_condensed_diff_file(repo, diff_info, "llm_context_diff.txt")
-    print("Done! Summary saved to llm_context_diff.txt")
+    for f in files:
+        path = f['path']
+        is_java = path.endswith('.java')
+        is_config = any(path.endswith(x) for x in ['.yml', '.yaml', '.properties'])
+        
+        added = [l for h in f['hunks'] for l in h['added']]
+        removed = [l for h in f['hunks'] for l in h['removed']]
+        context = [l for h in f['hunks'] for l in h['context']]
+        
+        f_sum = FileSummary(path=path, status=f['status'])
+        
+        if is_java and (added or removed):
+            total_java += 1
+            ast_data = process_java_change(added, removed, context)
+            f_sum.package = ast_data['package']
+            
+            for c in ast_data['classes']:
+                c_change = ClassChange(name=c['name'], type=c['type'], component=c['component'], endpoints=c['endpoints'])
+                for m in c['methods']:
+                    c_change.methods.append(MethodChange(name=m['name'], intent=m['intent']))
+                f_sum.classes.append(c_change)
+                
+                all_endpoints.extend(c['endpoints'])
+                
+        elif is_config and (added or removed):
+            f_sum.config_intent = summarize_config_change(added, removed)
+            
+        elif added or removed:
+            f_sum.config_intent = f"Updated {len(added)} lines"
+            
+        release.files.append(f_sum)
+
+    total_eps = len(all_endpoints)
+    release.overview = f"Files changed: {len(files)} | Java: {total_java} | APIs impacted: {total_eps}"
+    
+    # Check for breaking indicators
+    for f in release.files:
+        if f.status == 'Deleted' and any(c.component == 'RestController' for c in f.classes):
+             release.breaking_indicators.append(f"Deleted Controller: {f.path}")
+
+    return format_for_llm(release)
+
+def format_for_llm(release: ReleaseSummary) -> str:
+    """Formats the data structure into pure natural language LLM context."""
+    output = [f"# Release Change Summary\n**Overview:** {release.overview}\n"]
+    
+    if release.breaking_indicators:
+        output.append("⚠️ **POTENTIAL BREAKING CHANGES:**\n" + "\n".join(f"- {b}" for b in release.breaking_indicators) + "\n")
+    
+    for f in release.files:
+        # Skip completely empty files
+        if not f.classes and not f.config_intent: continue
+        
+        header = f"## `{f.path}` ({f.status})"
+        if f.package: header += f" | Pkg: `{f.package}`"
+        output.append(header)
+        
+        for c in f.classes:
+            comp_str = f" [{c.component}]" if c.component else ""
+            output.append(f"- **{c.type} {c.name}**{comp_str}")
+            
+            if c.endpoints:
+                output.append(f"  - *Endpoints involved:* {', '.join(c.endpoints)}")
+                
+            for m in c.methods:
+                output.append(f"  - **{m.name}**: {m.intent}")
+                
+        if f.config_intent:
+            output.append(f"- **Config Change:** {f.config_intent}")
+            
+        output.append("") # Spacing
+        
+    return "\n".join(output)
+
+# ============================================================================
+# EXAMPLE USAGE
+# ============================================================================
 
 if __name__ == "__main__":
-    main()
+    print("started")
+    large_diff = """
+diff --git a/src/main/java/com/example/controller/UserController.java b/src/main/java/com/example/controller/UserController.java
+index 1234567..abcdefg 100644
+--- a/src/main/java/com/example/controller/UserController.java
++++ b/src/main/java/com/example/controller/UserController.java
+@@ -1,15 +1,22 @@
+ package com.example.controller;
+ 
++import com.example.dto.UserResponseDTO;
+ import com.example.service.UserService;
+ import org.springframework.web.bind.annotation.*;
++import org.springframework.http.ResponseEntity;
++import jakarta.validation.Valid;
+ 
+ @RestController
+ @RequestMapping("/api/v2/users")
+ public class UserController {
+ 
+     private final UserService userService;
++    private static final Logger log = LoggerFactory.getLogger(UserController.class);
+ 
+     @Autowired
+     public UserController(UserService userService) {
+@@ -17,10 +24,28 @@ public class UserController {
+     }
+ 
+     @GetMapping("/{id}")
+-    public User getUserById(@PathVariable Long id) {
+-        return userService.findById(id);
++    public ResponseEntity<UserResponseDTO> getUserById(@PathVariable Long id) {
++        log.debug("Fetching user with id: {}", id);
++        if (id == null) throw new IllegalArgumentException();
++        return ResponseEntity.ok(userService.findById(id));
+     }
+ 
++    @PostMapping
++    public ResponseEntity<UserResponseDTO> createUser(@Valid @RequestBody UserRequestDTO request) {
++        log.info("Creating new user");
++        return ResponseEntity.status(HttpStatus.CREATED).body(userService.save(request));
++    }
++
+diff --git a/src/main/java/com/example/model/Shape.java b/src/main/java/com/example/model/Shape.java
+new file mode 100644
+--- /dev/null
++++ b/src/main/java/com/example/model/Shape.java
+@@ -0,0 +1,5 @@
++package com.example.model;
++
++// Java 17 Sealed Class
++public sealed interface Shape permits Circle, Square {
++    double area();
+diff --git a/src/main/resources/application.yml b/src/main/resources/application.yml
+--- a/src/main/resources/application.yml
++++ b/src/main/resources/application.yml
+@@ -1,3 +1,6 @@
+ spring:
+   datasource:
+     url: jdbc:postgresql://localhost:5432/db
++    hikari:
++      maximum-pool-size: 10
++      minimum-idle: 5
+"""
+
+    print(generate_llm_summary(large_diff))

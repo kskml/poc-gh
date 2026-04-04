@@ -1,7 +1,7 @@
 """
-Hyper-Optimized Diff Summarizer for LLM Context
-Focus: Zero raw code in output. 100% behavioral/intent summaries.
-Uses Tree-Sitter to locate context, heuristics to summarize intent.
+Hyper-Optimized Diff Summarizer for LLM Context (v4)
+- Strictly excludes Tests, Docs, POMs, Build files
+- Deep Intent Extraction: Zero generic summaries. Raw logic is translated to Verb+Noun actions.
 """
 
 import re
@@ -10,27 +10,25 @@ import tree_sitter as ts
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 
-# Initialize Tree-sitter
 JAVA_LANGUAGE = ts.Language(tsjava.language())
 PARSER = ts.Parser(JAVA_LANGUAGE)
 
 # ============================================================================
-# ULTRA-COMPACT DATA STRUCTURES (No raw code stored here)
+# DATA STRUCTURES
 # ============================================================================
 
 @dataclass
 class MethodChange:
     name: str
-    intent: str  # e.g., "Added null-check validation and logging"
+    intent: str 
 
 @dataclass
 class ClassChange:
     name: str
     type: str
-    component: Optional[str] # e.g., "RestController"
+    component: Optional[str]
     endpoints: List[str] = field(default_factory=list)
     methods: List[MethodChange] = field(default_factory=list)
-    structural_change: str = "" # e.g., "Added record for immutable data"
 
 @dataclass
 class FileSummary:
@@ -38,129 +36,195 @@ class FileSummary:
     status: str
     package: Optional[str] = None
     classes: List[ClassChange] = field(default_factory=list)
-    config_intent: str = "" # For yml/properties files
+    config_intent: str = ""
 
 @dataclass
 class ReleaseSummary:
     overview: str = ""
     files: List[FileSummary] = field(default_factory=list)
-    breaking_indicators: List[str] = field(default_factory=list)
 
 # ============================================================================
-# STEP 1: INTENT EXTRACTION ENGINE (The Magic)
+# STEP 1: EXCLUSION ENGINE
 # ============================================================================
 
-INTENT_PATTERNS = [
-    (r'throw\s+new\s+\w+', 'Throws explicit exception'),
-    (r'if\s*\([^)]*==\s*null[^)]*\)', 'Added null-check guard'),
-    (r'if\s*\([^)]*!=\s*null[^)]*\)', 'Added null-check guard'),
-    (r'log\.(debug|info|warn|error|trace)', 'Added logging statement'),
-    (r'@Valid(?:ated)?\b', 'Added request validation'),
-    (r'@Transactional\s*\(', 'Added transaction boundary'),
-    (r'@Cacheable|@CacheEvict', 'Added caching layer'),
-    (r'ResponseEntity\.(ok|status|notFound|noContent)', 'Wrapped response in ResponseEntity'),
-    (r'\.stream\(\)\.map\(', 'Added stream-based DTO mapping'),
-    (r'\.orElseThrow\(', 'Replaced optional get with orElseThrow'),
-    (r'\.orElse\(null\)', 'Fallback to null if empty'),
-    (r'\.save\(|\.saveAll\(', 'Persisted entity to database'),
-    (r'\.deleteBy|\.remove\(', 'Deleted entity from database'),
-    (r'\.findById\(', 'Fetched entity by ID'),
-    (r'\.findAll\(|\.findAllBy', 'Queried multiple entities'),
-    (r'new\s+\w+DTO\(', 'Instantiated new Data Transfer Object'),
-    (r'public\s+record\s+\w+', 'Defined immutable Java 17 record'),
-    (r'sealed\s+(class|interface)', 'Defined Java 17 sealed type hierarchy'),
-    (r'permits\s+[\w,\s]+', 'Restricted inheritance (permits)'),
-    (r'hikari|maximum-pool|minimum-idle', 'Tuned database connection pool'),
-    (r'spring\.datasource\.url', 'Modified database connection string'),
+EXCLUDED_PATH_PATTERNS = [
+    r'^[^/]+/src/test/',         # Standard Maven/Gradle test dir
+    r'^[^/]+/src/integration-test/',
+    r'^[^/]+/src/it/',
+    r'(^|/)tests?(/|\.java$)',   # /test/ or /tests/ or Test.java
+    r'IT\.java$',                # Integration test suffix
+    r'Tests\.java$',
+    r'^README',                  # Docs
+    r'^[^/]+/docs/',             # Docs folder
+    r'^[^/]+/doc/',
+    r'pom\.xml$',                # Build files
+    r'build\.gradle(\.kts)?$',
+    r'settings\.gradle(\.kts)?$',
+    r'\.md$',                    # Markdown
+    r'\.txt$',
+    r'\.json$',                  # Exclude json configs like package.json
 ]
 
-def summarize_code_intent(lines: List[str]) -> List[str]:
-    """Translate raw code lines into human-readable behavioral intents."""
-    intents = set()
+def should_exclude_file(file_path: str) -> bool:
+    """Returns True if the file is a test, doc, or build file."""
+    # Normalize path separators
+    normalized_path = file_path.replace('\\', '/')
+    for pattern in EXCLUDED_PATH_PATTERNS:
+        if re.search(pattern, normalized_path, re.IGNORECASE):
+            return True
+    return False
+
+# ============================================================================
+# STEP 2: DEEP INTENT EXTRACTION ENGINE (No more "updated details")
+# ============================================================================
+
+# High-level patterns (Annotations, Framework specifics)
+INTENT_PATTERNS = [
+    (r'throw\s+new\s+\w+Exception', 'Threw explicit exception'),
+    (r'if\s*\([^)]*==\s*null[^)]*\)', 'Added null-check guard'),
+    (r'if\s*\([^)]*!=\s*null[^)]*\)', 'Added null-check guard'),
+    (r'if\s*\(\s*!\s*\w+\.isEmpty\(\)', 'Added empty-collection guard'),
+    (r'log\.(debug|info|warn|error)', 'Added diagnostic logging'),
+    (r'@Valid(?:ated)?\b', 'Enforced request validation'),
+    (r'@Transactional\s*\(', 'Applied transaction boundary'),
+    (r'@Cacheable|@CacheEvict', 'Integrated caching layer'),
+    (r'ResponseEntity\.(ok|status|notFound|noContent)', 'Wrapped response in HTTP entity'),
+    (r'\.orElseThrow\(', 'Enforced Optional presence with exception'),
+    (r'new\s+\w+Exception\(', 'Instantiated custom exception'),
+    (r'public\s+record\s+\w+', 'Defined immutable Java 17 record'),
+    (r'sealed\s+(class|interface)', 'Defined Java 17 sealed hierarchy'),
+    (r'hikari|maximum-pool|minimum-idle', 'Tuned database connection pool'),
+]
+
+# Verbs to look for in raw business logic
+ACTION_VERBS = [
+    'process', 'calculate', 'validate', 'transform', 'convert', 'parse', 
+    'execute', 'invoke', 'send', 'fetch', 'handle', 'check', 'evaluate', 
+    'initialize', 'assign', 'map', 'filter', 'sort', 'append', 'merge'
+]
+
+def extract_detailed_intent(lines: List[str]) -> str:
+    """Translates raw Java lines into rich, verb+noun semantic summaries."""
+    intents = []
     
     for line in lines:
         stripped = line.strip()
         if not stripped or stripped.startswith('//') or stripped.startswith('*'):
             continue
             
+        # 1. Check high-level patterns first
+        matched = False
         for pattern, intent in INTENT_PATTERNS:
             if re.search(pattern, stripped, re.IGNORECASE):
-                intents.add(intent)
-                
-    return list(intents)
+                if intent not in intents:
+                    intents.append(intent)
+                matched = True
+                break
+        if matched:
+            continue
 
-def infer_diff_type(added: List[str], removed: List[str]) -> str:
-    """Infer if this is an addition, modification, or removal block."""
-    if not removed and added: return "Added"
-    if not added and removed: return "Removed"
-    return "Modified"
+        # 2. Deep extraction for raw logic (Strip syntax to find Verb + Object)
+        clean = stripped
+        
+        # Remove access modifiers, return types, annotations
+        clean = re.sub(r'\b(public|private|protected|static|final|abstract|synchronized|native|transient|volatile|void|int|long|double|float|boolean|char|String|List|Set|Map|Optional|var)\b', '', clean, flags=re.IGNORECASE).strip()
+        clean = re.sub(r'@\w+(\([^)]*\))?\s*', '', clean).strip()
+        clean = re.sub(r'<[^>]+>', '', clean) # Remove generics
+        
+        if not clean or clean in ['{', '}', ';', '();', '{}']: 
+            continue
+
+        # Handle 'return' statements specifically
+        if clean.startswith('return '):
+            obj = clean.replace('return ', '').replace(';', '').strip()
+            if len(obj) > 5:
+                intents.append(f"Returned processed result: {obj[:40]}")
+            continue
+
+        # Look for method invocations (Verb matching)
+        verb_found = False
+        for verb in ACTION_VERBS:
+            # Match verb followed by parenthesis (e.g., process(data))
+            match = re.search(rf'\b{verb}\w*\s*\(\s*([^,)]+)', clean, re.IGNORECASE)
+            if match:
+                obj = match.group(1).strip()
+                obj = re.sub(r'^(this\.|super\.)', '', obj)
+                if len(obj) > 40: obj = obj[:40] + "..."
+                intents.append(f"{verb.capitalize()} {obj}")
+                verb_found = True
+                break
+                
+        if verb_found: 
+            continue
+
+        # Handle direct assignments to fields (e.g., this.status = Status.ACTIVE)
+        assign_match = re.match(r'(?:this\.)?(\w+)\s*=\s*([^;]+);?', clean)
+        if assign_match:
+            field = assign_match.group(1)
+            value = assign_match.group(2).strip()
+            # Ignore trivial loop counters or simple variables
+            if field not in ['i', 'j', 'k', 'count', 'result', 'str', 'tmp', 'e'] and len(value) > 2:
+                if len(value) > 40: value = value[:40] + "..."
+                intents.append(f"Assigned state: {field} = {value}")
+            continue
+            
+        # Absolute Fallback: If it's a line of code we couldn't parse but is > 10 chars
+        if len(stripped) > 15:
+            # Take first 4 meaningful words
+            words = [w for w in stripped.replace(';', '').replace('{', '').split() if len(w) > 2][:4]
+            if words:
+                intents.append(f"Executed logic: {' '.join(words)}")
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique_intents = []
+    for intent in intents:
+        if intent not in seen:
+            seen.add(intent)
+            unique_intents.append(intent)
+            
+    return "; ".join(unique_intents) if unique_intents else "Refactored internal execution block"
 
 # ============================================================================
-# STEP 2: CONTEXT-AWARE TREE-SITTER PARSER
+# STEP 3: CONTEXT-AWARE TREE-SITTER PARSER
 # ============================================================================
 
 def get_node_text(node: ts.Node, source_bytes: bytes) -> str:
     return source_bytes[node.start_byte:node.end_byte].decode('utf8', errors='ignore')
 
 def find_enclosing_method_name(node: ts.Node, source_bytes: bytes) -> Optional[str]:
-    """Walk up the tree from a changed line to find which method it belongs to."""
     current = node.parent
     while current:
         if current.type == 'method_declaration':
             name_node = current.child_by_field_name('name')
-            if name_node:
-                return get_node_text(name_node, source_bytes)
-        if current.type in ('class_declaration', 'interface_declaration', 'enum_declaration'):
-            break # Don't go outside the class
+            if name_node: return get_node_text(name_node, source_bytes)
+        if current.type in ('class_declaration', 'interface_declaration'): break
         current = current.parent
     return None
 
 def extract_endpoints_from_annotations(text: str) -> List[str]:
-    """Extract HTTP method and path without keeping raw annotations."""
     endpoints = []
-    # Normalize multiline annotations to single line
     text = re.sub(r'\s+', ' ', text)
-    
-    mappings = {
-        '@GetMapping': 'GET', '@PostMapping': 'POST', '@PutMapping': 'PUT',
-        '@DeleteMapping': 'DELETE', '@PatchMapping': 'PATCH'
-    }
-    
-    for ann, method in mappings.items():
+    for ann, method in {'@GetMapping': 'GET', '@PostMapping': 'POST', '@PutMapping': 'PUT', '@DeleteMapping': 'DELETE'}.items():
         if ann in text:
-            # Extract path
             match = re.search(rf'{ann}\s*\(\s*(?:value\s*=\s*)?["\']([^"\']+)["\']', text)
-            path = match.group(1) if match else '/'
-            endpoints.append(f"{method} {path}")
-            
+            endpoints.append(f"{method} {match.group(1) if match else '/'}")
     return endpoints
 
 def process_java_change(added: List[str], removed: List[str], context: List[str]) -> Dict:
-    """
-    Uses Tree-Sitter on the CONTEXT lines to figure out WHERE we are,
-    then maps the ADDED/REMOVED intents to that location.
-    """
-    # Combine context to make a valid enough block for Tree-Sitter
     context_code = "\n".join(context + added) 
     source_bytes = context_code.encode('utf8')
     tree = PARSER.parse(source_bytes)
+    root = tree.root_node
     
-    result = {
-        'package': None,
-        'classes': []
-    }
+    result = {'package': None, 'classes': []}
     
-    # Extract package via simple regex (faster than AST for this)
     for line in context:
         pkg_match = re.match(r'^\s*package\s+([\w.]+)', line)
         if pkg_match:
             result['package'] = pkg_match.group(1)
             break
 
-    # Find class and method context using Tree-Sitter
-    root = tree.root_node
-    
-    # We only care about the first class/interface in this snippet
     class_node = None
     for child in root.children:
         if child.type in ('class_declaration', 'interface_declaration', 'enum_declaration', 'record_declaration'):
@@ -168,13 +232,10 @@ def process_java_change(added: List[str], removed: List[str], context: List[str]
             break
             
     if not class_node:
-        # If no class found (e.g., top-level code or error), just return intents
-        intents = summarize_code_intent(added + removed)
-        if intents:
-            result['classes'].append({'type': 'Unknown', 'name': 'Unknown', 'component': None, 'endpoints': [], 'methods': [{'name': 'Block', 'intent': ", ".join(intents)}]})
+        intent = extract_detailed_intent(added + removed)
+        result['classes'].append({'type': 'Unknown', 'name': 'Unknown', 'component': None, 'endpoints': [], 'methods': [{'name': 'Block', 'intent': intent}]})
         return result
 
-    # Extract Class Info
     name_node = class_node.child_by_field_name('name')
     class_name = get_node_text(name_node, source_bytes) if name_node else "Unknown"
     class_type = class_node.type.replace('_declaration', '')
@@ -189,87 +250,62 @@ def process_java_change(added: List[str], removed: List[str], context: List[str]
             elif '@Repository' in ann_text: component = 'Repository'
             elif '@Configuration' in ann_text: component = 'Configuration'
 
-    # Extract Endpoints from added text block
     endpoints = extract_endpoints_from_annotations("\n".join(added))
     
-    # Map intents to specific methods
     method_intents = {}
-    
-    # To find methods, we look at added/removed lines in the context of the AST
     all_change_lines = added + removed
     
     for line in all_change_lines:
-        # Find this line in the AST
-        line_bytes = line.encode('utf8')
-        # Rough search for the node containing this text
         start_idx = context_code.find(line)
         if start_idx == -1: continue
         
-        node = root.named_descendant_for_byte_range(start_idx, start_idx + len(line_bytes))
+        node = root.named_descendant_for_byte_range(start_idx, start_idx + len(line.encode('utf8')))
         if not node: continue
         
         method_name = find_enclosing_method_name(node, source_bytes)
         if method_name:
             if method_name not in method_intents:
-                method_intents[method_name] = set()
-            # Tag if added or removed
-            if line in added:
-                method_intents[method_name].add("Added")
-            else:
-                method_intents[method_name].add("Removed")
+                method_intents[method_name] = {'added': [], 'removed': []}
+            if line in added: method_intents[method_name]['added'].append(line)
+            else: method_intents[method_name]['removed'].append(line)
 
-    # Generate final method summaries
     methods_summary = []
-    raw_intents = summarize_code_intent(all_change_lines)
     
     if method_intents:
-        for m_name, tags in method_intents.items():
-            action = " & ".join(tags)
-            # Combine action with behavioral intents
-            final_intent = f"{action}: {', '.join(raw_intents)}" if raw_intents else f"{action} logic"
+        for m_name, lines_dict in method_intents.items():
+            combined_lines = lines_dict['added'] + lines_dict['removed']
+            actions = []
+            if lines_dict['added'] and lines_dict['removed']: actions.append("Modified")
+            elif lines_dict['added']: actions.append("Added")
+            elif lines_dict['removed']: actions.append("Removed")
+            
+            # USE THE NEW DEEP EXTRACTOR HERE
+            detailed_intent = extract_detailed_intent(combined_lines)
+            final_intent = f"{' & '.join(actions)}: {detailed_intent}"
+            
             methods_summary.append({'name': m_name, 'intent': final_intent})
-    elif raw_intents:
-        # Happened outside a method (e.g., field injection)
-        methods_summary.append({'name': 'Class-level', 'intent': ", ".join(raw_intents)})
     else:
-        methods_summary.append({'name': 'Internal', 'intent': 'Updated implementation details'})
+        # Happened outside a method (fields, static blocks)
+        detailed_intent = extract_detailed_intent(all_change_lines)
+        methods_summary.append({'name': 'Class-level', 'intent': detailed_intent})
 
     result['classes'].append({
-        'type': class_type,
-        'name': class_name,
-        'component': component,
-        'endpoints': endpoints,
-        'methods': methods_summary
+        'type': class_type, 'name': class_name, 'component': component,
+        'endpoints': endpoints, 'methods': methods_summary
     })
-    
     return result
 
-# ============================================================================
-# STEP 3: CONFIG FILE PARSER (YML/Properties)
-# ============================================================================
-
 def summarize_config_change(added: List[str], removed: List[str]) -> str:
-    """Convert config changes to plain English."""
-    intents = summarize_code_intent(added + removed)
-    if intents:
-        return "; ".join(intents)
-        
-    # Fallback: just list the keys changed
-    keys = []
-    for line in added:
-        line = line.strip()
-        if ':' in line and not line.startswith('#'):
-            keys.append(line.split(':')[0].strip())
-    if keys:
-        return f"Modified keys: {', '.join(keys[:5])}"
-    return "Updated configuration"
+    intents = extract_detailed_intent(added + removed)
+    if intents != "Refactored internal execution block": return intents
+    keys = [line.split(':')[0].strip() for line in added if ':' in line and not line.startswith('#')]
+    return f"Modified properties: {', '.join(keys[:5])}" if keys else "Updated configuration values"
 
 # ============================================================================
 # STEP 4: MAIN PIPELINE
 # ============================================================================
 
 def parse_diff_text(diff_text: str) -> List[Dict]:
-    """Minimal diff parser to extract hunks efficiently."""
     diff_text = diff_text.replace('\r\n', '\n')
     file_sections = re.split(r'^diff --git ', diff_text, flags=re.MULTILINE)
     if file_sections and not file_sections[0].strip(): file_sections = file_sections[1:]
@@ -280,6 +316,10 @@ def parse_diff_text(diff_text: str) -> List[Dict]:
         match = re.match(r'a/(.+?)\s+b/(.+)', lines[0])
         if not match: continue
         
+        # Apply exclusion filter immediately
+        if should_exclude_file(match.group(2)): 
+            continue
+            
         status = 'Modified'
         if 'new file' in section[:200]: status = 'Added'
         elif 'deleted file' in section[:200]: status = 'Deleted'
@@ -296,16 +336,16 @@ def parse_diff_text(diff_text: str) -> List[Dict]:
                 elif line.startswith(' '): cur_hunk['context'].append(line[1:])
         if cur_hunk: hunks.append(cur_hunk)
         
-        results.append({'path': match.group(2), 'status': status, 'hunks': hunks})
+        # Only process if there are actual code changes
+        if any(h['added'] or h['removed'] for h in hunks):
+            results.append({'path': match.group(2), 'status': status, 'hunks': hunks})
+            
     return results
 
 def generate_llm_summary(diff_text: str) -> str:
-    """Main function: Converts massive diffs into ultra-compact semantic summaries."""
     files = parse_diff_text(diff_text)
     release = ReleaseSummary()
-    
-    total_java, total_eps = 0, 0
-    all_endpoints = []
+    total_java, all_endpoints = 0, []
     
     for f in files:
         path = f['path']
@@ -322,44 +362,27 @@ def generate_llm_summary(diff_text: str) -> str:
             total_java += 1
             ast_data = process_java_change(added, removed, context)
             f_sum.package = ast_data['package']
-            
             for c in ast_data['classes']:
                 c_change = ClassChange(name=c['name'], type=c['type'], component=c['component'], endpoints=c['endpoints'])
                 for m in c['methods']:
                     c_change.methods.append(MethodChange(name=m['name'], intent=m['intent']))
                 f_sum.classes.append(c_change)
-                
                 all_endpoints.extend(c['endpoints'])
-                
         elif is_config and (added or removed):
             f_sum.config_intent = summarize_config_change(added, removed)
-            
         elif added or removed:
-            f_sum.config_intent = f"Updated {len(added)} lines"
+            f_sum.config_intent = f"Updated resource file ({len(added)} added, {len(removed)} removed)"
             
         release.files.append(f_sum)
 
-    total_eps = len(all_endpoints)
-    release.overview = f"Files changed: {len(files)} | Java: {total_java} | APIs impacted: {total_eps}"
-    
-    # Check for breaking indicators
-    for f in release.files:
-        if f.status == 'Deleted' and any(c.component == 'RestController' for c in f.classes):
-             release.breaking_indicators.append(f"Deleted Controller: {f.path}")
-
+    release.overview = f"Files changed: {len(files)} | Java: {total_java} | APIs impacted: {len(all_endpoints)}"
     return format_for_llm(release)
 
 def format_for_llm(release: ReleaseSummary) -> str:
-    """Formats the data structure into pure natural language LLM context."""
     output = [f"# Release Change Summary\n**Overview:** {release.overview}\n"]
     
-    if release.breaking_indicators:
-        output.append("⚠️ **POTENTIAL BREAKING CHANGES:**\n" + "\n".join(f"- {b}" for b in release.breaking_indicators) + "\n")
-    
     for f in release.files:
-        # Skip completely empty files
         if not f.classes and not f.config_intent: continue
-        
         header = f"## `{f.path}` ({f.status})"
         if f.package: header += f" | Pkg: `{f.package}`"
         output.append(header)
@@ -367,87 +390,9 @@ def format_for_llm(release: ReleaseSummary) -> str:
         for c in f.classes:
             comp_str = f" [{c.component}]" if c.component else ""
             output.append(f"- **{c.type} {c.name}**{comp_str}")
-            
-            if c.endpoints:
-                output.append(f"  - *Endpoints involved:* {', '.join(c.endpoints)}")
-                
+            if c.endpoints: output.append(f"  - *Endpoints involved:* {', '.join(c.endpoints)}")
             for m in c.methods:
                 output.append(f"  - **{m.name}**: {m.intent}")
-                
-        if f.config_intent:
-            output.append(f"- **Config Change:** {f.config_intent}")
-            
-        output.append("") # Spacing
-        
+        if f.config_intent: output.append(f"- **Config Change:** {f.config_intent}")
+        output.append("")
     return "\n".join(output)
-
-# ============================================================================
-# EXAMPLE USAGE
-# ============================================================================
-
-if __name__ == "__main__":
-    print("started")
-    large_diff = """
-diff --git a/src/main/java/com/example/controller/UserController.java b/src/main/java/com/example/controller/UserController.java
-index 1234567..abcdefg 100644
---- a/src/main/java/com/example/controller/UserController.java
-+++ b/src/main/java/com/example/controller/UserController.java
-@@ -1,15 +1,22 @@
- package com.example.controller;
- 
-+import com.example.dto.UserResponseDTO;
- import com.example.service.UserService;
- import org.springframework.web.bind.annotation.*;
-+import org.springframework.http.ResponseEntity;
-+import jakarta.validation.Valid;
- 
- @RestController
- @RequestMapping("/api/v2/users")
- public class UserController {
- 
-     private final UserService userService;
-+    private static final Logger log = LoggerFactory.getLogger(UserController.class);
- 
-     @Autowired
-     public UserController(UserService userService) {
-@@ -17,10 +24,28 @@ public class UserController {
-     }
- 
-     @GetMapping("/{id}")
--    public User getUserById(@PathVariable Long id) {
--        return userService.findById(id);
-+    public ResponseEntity<UserResponseDTO> getUserById(@PathVariable Long id) {
-+        log.debug("Fetching user with id: {}", id);
-+        if (id == null) throw new IllegalArgumentException();
-+        return ResponseEntity.ok(userService.findById(id));
-     }
- 
-+    @PostMapping
-+    public ResponseEntity<UserResponseDTO> createUser(@Valid @RequestBody UserRequestDTO request) {
-+        log.info("Creating new user");
-+        return ResponseEntity.status(HttpStatus.CREATED).body(userService.save(request));
-+    }
-+
-diff --git a/src/main/java/com/example/model/Shape.java b/src/main/java/com/example/model/Shape.java
-new file mode 100644
---- /dev/null
-+++ b/src/main/java/com/example/model/Shape.java
-@@ -0,0 +1,5 @@
-+package com.example.model;
-+
-+// Java 17 Sealed Class
-+public sealed interface Shape permits Circle, Square {
-+    double area();
-diff --git a/src/main/resources/application.yml b/src/main/resources/application.yml
---- a/src/main/resources/application.yml
-+++ b/src/main/resources/application.yml
-@@ -1,3 +1,6 @@
- spring:
-   datasource:
-     url: jdbc:postgresql://localhost:5432/db
-+    hikari:
-+      maximum-pool-size: 10
-+      minimum-idle: 5
-"""
-
-    print(generate_llm_summary(large_diff))

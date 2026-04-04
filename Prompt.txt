@@ -1,211 +1,161 @@
-import re
-import json
+import os
+from github import Github
+from tree_sitter import Language, Parser
+import tree_sitter_java as tsjava
 
-# ==========================================
-# 1. CUSTOM GITHUB DIFF PARSER
-# ==========================================
-def _parse_github_diff_raw(diff_text: str):
-    current_file = None
-    added_lines_buffer = []
-    file_pattern = re.compile(r'^diff --git a/(.*) b/(.*)$')
+# Initialize Tree-Sitter Java
+JAVA_LANGUAGE = Language(tsjava.language())
+parser = Parser(JAVA_LANGUAGE)
+
+# --- CONFIGURATION ---
+GITHUB_TOKEN = "your_github_token"
+REPO_NAME = "owner/repo"
+BASE_TAG = "v1.0.0"
+COMPARE_TAG = "v1.1.0"
+
+def get_github_diff_info(repo, base, compare):
+    """
+    Fetches the comparison between two tags and returns a list of modified files 
+    and their changed line ranges.
+    """
+    comparison = repo.compare(base, compare)
+    files_data = []
     
-    if not diff_text or not isinstance(diff_text, str):
-        return
+    for file in comparison.files:
+        # We store the filename and the patch (diff)
+        # We will parse the patch to find changed line numbers
+        files_data.append({
+            "filename": file.filename,
+            "patch": file.patch,
+            "status": file.status
+        })
+    return files_data
 
-    for line in diff_text.split('\n'):
-        if not line or not isinstance(line, str):
-            continue
-            
-        file_match = file_pattern.match(line)
-        if file_match:
-            if current_file is not None:
-                yield current_file, added_lines_buffer
-            current_file = file_match.group(2)
-            added_lines_buffer = []
-            continue
-            
-        if current_file and line.startswith('+') and not line.startswith('+++'):
-            added_lines_buffer.append(line[1:]) 
-            
-    if current_file is not None:
-        yield current_file, added_lines_buffer
+def parse_diff_lines(patch):
+    """
+    Parses a git patch string to extract the line numbers that were modified.
+    """
+    changed_lines = set()
+    if not patch:
+        return changed_lines
 
-# ==========================================
-# 2. STRUCTURAL REGEX MAPPER
-# ==========================================
-def _clean_body_lines(lines: list) -> str:
-    cleaned = []
-    for line in lines:
-        if not line or not isinstance(line, str):
-            continue
-        stripped = line.strip()
-        if stripped and stripped != '{' and stripped != '}':
-            cleaned.append(stripped)
-    return "\n    ".join(cleaned)
+    for line in patch.split('\n'):
+        if line.startswith('@@'):
+            # Format: @@ -start,len +start,len @@
+            parts = line.split(' ')
+            added_part = parts[2] # e.g., +123,10
+            start_line = int(added_part.split(',')[0].replace('+', ''))
+            # Simplified: we mark the range of the hunk as modified
+            # In a production system, you'd iterate through the '+' lines specifically
+            changed_lines.add(start_line) 
+    return changed_lines
 
-def _filter_imports(import_lines: list) -> list:
-    filtered = []
-    skip_prefixes = ('java.lang.', 'java.util.', 'java.io.', 'java.net.', 'lombok.')
-    for imp in import_lines:
-        if imp and isinstance(imp, str) and not imp.startswith(skip_prefixes):
-            filtered.append(imp)
-    return filtered
+def get_node_text(node, source_code):
+    """Extracts the actual text of a node from the source code."""
+    return source_code[node.start_byte:node.end_byte].decode('utf-8')
 
-def _process_java_file(code_lines: list) -> dict:
-    imports = []
-    for line in code_lines:
-        if line and isinstance(line, str) and line.strip().startswith('import '):
-            imports.append(line.strip())
-            
-    filtered_imports = _filter_imports(imports)
+def analyze_java_structure(source_code, changed_lines):
+    """
+    Uses AST to find which classes, methods, and Spring components 
+    contain the changed lines.
+    """
+    tree = parser.parse(source_code)
+    root_node = tree.root_node
     
-    class_pattern = re.compile(r'^\s*(?:public|private|protected)?\s*(?:abstract|static)?\s*(class|interface|enum|record)\s+(\w+)')
-    method_pattern = re.compile(
-        r'^\s*(?:(@\w+(?:\([^)]*\))?)\s*)*'
-        r'(?:public|private|protected)?\s*' 
-        r'(?:static|final|abstract|synchronized|default)?\s*' 
-        r'([\w<>\[\],\s\?]+?)\s+' 
-        r'(\w+)\s*'
-        r'\(([^)]*)\)\s*' 
-        r'(?:throws\s+[\w,\s]+)?\s*' 
-        r'\{?\s*$' 
-    )
-    field_pattern = re.compile(
-        r'^\s*(?:(@\w+(?:\([^)]*\))?)\s*)*'
-        r'(?:private|protected|public)?\s*' 
-        r'([\w<>\[\]]+)\s+' 
-        r'(\w+)\s*[;=]' 
-    )
-    ann_pattern = re.compile(r'^\s*(@\w+(?:\([^)]*\))?)\s*$')
-    
-    classes_data = []
-    current_class = {"name": "Root", "type": "File", "annotations": [], "methods": []}
-    current_method = None
-    ann_buffer = []
-    
-    for line in code_lines:
-        if not line or not isinstance(line, str):
-            continue
-            
-        stripped = line.strip()
-        if not stripped: continue
+    results = {
+        "package": "",
+        "modified_classes": [],
+        "modified_methods": [],
+        "spring_components": []
+    }
+
+    # 1. Extract Package
+    pkg_node = root_node.children_get_by_type("package_declaration") # Simplified logic
+    # Search for package keyword
+    for child in root_node.children:
+        if child.type == 'package_declaration':
+            results["package"] = get_node_text(child, source_code)
+
+    # 2. Traverse AST to find modified elements
+    def traverse(node):
+        # Check if this node is a Class or Method
+        is_class = node.type == 'class_declaration'
+        is_method = node.type == 'method_declaration'
         
-        if ann_pattern.match(stripped):
-            ann_buffer.append(stripped)
-            continue
+        if is_class or is_method:
+            # Check if any changed line falls within this node's line range
+            node_start = node.start_point[0] + 1 # 0-indexed to 1-indexed
+            node_end = node.end_point[0] + 1
             
-        c_match = class_pattern.match(stripped)
-        if c_match:
-            if current_class["methods"]:
-                classes_data.append(current_class)
-            # SAFE EXTRACTION: Coerce regex groups to strings before calling .strip()
-            current_class = {
-                "name": (c_match.group(2) or "UnknownClass").strip(), 
-                "type": (c_match.group(1) or "Class").strip(), 
-                "annotations": list(ann_buffer), 
-                "methods": []
-            }
-            ann_buffer = []
-            current_method = None
-            continue
-            
-        m_match = method_pattern.match(stripped)
-        if m_match:
-            # SAFE EXTRACTION: Prevents 'NoneType has no attribute strip'
-            ret_type = (m_match.group(1) or "void").strip()
-            name = (m_match.group(2) or "unknownMethod").strip()
-            params = (m_match.group(3) or "").strip()
-            
-            signature = f"{ret_type} {name}({params})"
-            current_method = {
-                "signature": signature, 
-                "annotations": list(ann_buffer), 
-                "logic_body": []
-            }
-            current_class["methods"].append(current_method)
-            ann_buffer = []
-            continue
-            
-        f_match = field_pattern.match(stripped)
-        if f_match and not current_method:
-            # SAFE EXTRACTION: Prevents 'NoneType has no attribute strip'
-            f_type = (f_match.group(1) or "UnknownType").strip()
-            f_name = (f_match.group(2) or "unknownField").strip()
-            
-            signature = f"FIELD: {f_type} {f_name}"
-            current_class["methods"].append({
-                "signature": signature, 
-                "annotations": list(ann_buffer), 
-                "logic_body": [stripped]
-            })
-            ann_buffer = []
-            continue
-            
-        if current_method:
-            if stripped != '{' and stripped != '}':
-                current_method["logic_body"].append(stripped)
+            if any(line >= node_start and line <= node_end for line in changed_lines):
+                text = get_node_text(node, source_code)
                 
-    if current_class["methods"]:
-        classes_data.append(current_class)
-        
-    for cls in classes_data:
-        for method in cls["methods"]:
-            if isinstance(method["logic_body"], list):
-                method["logic_body"] = "\n    ".join(method["logic_body"])
-                
-    return {"imports": filtered_imports, "classes": classes_data}
+                if is_class:
+                    results["modified_classes"].append(text.split('{')[0].strip())
+                if is_method:
+                    # Extract signature only (up to the opening brace)
+                    signature = text.split('{')[0].strip()
+                    results["modified_methods"].append(signature)
 
-# ==========================================
-# 3. MAIN EXECUTION & JSON EXPORT
-# ==========================================
-def extract_structured_code(diff_text: str, output_json_path: str) -> None:
-    final_data = []
+        # Check for Spring Annotations (looking for @RestController, @Service, etc.)
+        if node.type == 'annotation':
+            anno_text = get_node_text(node, source_code)
+            if any(keyword in anno_text for keyword in ['@RestController', '@Service', '@Component', '@Repository', '@GetMapping', '@PostMapping']):
+                # We only care if this annotation is part of a modified section
+                node_line = node.start_point[0] + 1
+                if any(line >= node_line - 1 and line <= node_line + 1 for line in changed_lines):
+                    results["spring_components"].append(anno_text)
 
-    for file_path, added_lines in _parse_github_diff_raw(diff_text):
-        if not file_path or not isinstance(file_path, str):
+        for child in node.children:
+            traverse(child)
+
+    traverse(root_node)
+    return results
+
+def generate_condensed_diff_file(repo, diff_info, output_file):
+    """
+    Main orchestrator to process all files and write the summary.
+    """
+    summary_report = []
+
+    for file_item in diff_info:
+        filename = file_item['filename']
+        if not filename.endswith('.java'):
             continue
-        if not file_path.endswith('.java'): 
-            continue
-        if not added_lines: continue
 
-        file_data = _process_java_file(added_lines)
-        file_data["file"] = file_path
+        # Step 1: Get changed lines from diff
+        changed_lines = parse_diff_lines(file_item['patch'])
         
-        final_data.append(file_data)
-
-    with open(output_json_path, 'w', encoding='utf-8') as f:
-        json.dump(final_data, f, indent=4)
+        # Step 2: Fetch full file content from GitHub (Required for AST)
+        content = repo.get_contents(filename, ref=COMPARE_TAG).decoded_content
         
-    print(f"\nSuccess! Extraction saved to: {output_json_path}")
+        # Step 3: AST Analysis
+        analysis = analyze_java_structure(content, changed_lines)
+        
+        # Step 4: Format as a summary
+        file_summary = f"File: {filename}\n"
+        file_summary += f"Package: {analysis['package']}\n"
+        file_summary += f"Modified Classes: {', '.join(analysis['modified_classes']) if analysis['modified_classes'] else 'None'}\n"
+        file_summary += f"Modified Methods: {', '.join(analysis['modified_methods']) if analysis['modified_methods'] else 'None'}\n"
+        file_summary += f"Spring Components/Endpoints: {', '.join(analysis['spring_components']) if analysis['spring_components'] else 'None'}\n"
+        file_summary += "-" * 50 + "\n"
+        
+        summary_report.append(file_summary)
 
-# ==========================================
-# VERIFICATION TEST
-# ==========================================
+    with open(output_file, "w") as f:
+        f.write("### CONDENSED CODE CHANGE SUMMARY FOR LLM ###\n\n")
+        f.write("\n".join(summary_report))
+
+def main():
+    g = Github(GITHUB_TOKEN)
+    repo = g.get_repo(REPO_NAME)
+    
+    print(f"Fetching diff between {BASE_TAG} and {COMPARE_TAG}...")
+    diff_info = get_github_diff_info(repo, BASE_TAG, COMPARE_TAG)
+    
+    print("Analyzing Java AST and condensing changes...")
+    generate_condensed_diff_file(repo, diff_info, "llm_context_diff.txt")
+    print("Done! Summary saved to llm_context_diff.txt")
+
 if __name__ == "__main__":
-    tricky_diff = """
-diff --git a/src/main/java/com/app/Logic.java b/src/main/java/com/app/Logic.java
-index 1234567..abcdefg 100644
---- a/src/main/java/com/app/Logic.java
-+++ b/src/main/java/com/app/Logic.java
-@@ -10,4 +10,15 @@ public class Logic {
-+    @Autowired
-+    private PaymentGateway gateway;
-+
-+    @Override
-+    public boolean process(OrderDto order) {
-+        if (order.getAmount() > 100) {
-+            List<String> risks = new ArrayList<>();
-+            risks.add("High Value");
-+            return gateway.charge(order);
-+        }
-+        return false;
-+    }
- }
-"""
-
-    output_file = "./verified_output.json"
-    extract_structured_code(tricky_diff, output_file)
-    
-    with open(output_file, 'r') as f:
-        print("JSON Output Preview:")
-        print(json.dumps(json.load(f), indent=2))
+    main()

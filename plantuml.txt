@@ -1,47 +1,55 @@
 import base64
 import os
+import re
 from openai import OpenAI
 
-# Initialize the OpenAI client
-# Make sure you have OPENAI_API_KEY in your environment variables
+# Initialize client
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 def encode_image(image_path):
-    """
-    Encodes an image file into a base64 string required for the API.
-    """
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode('utf-8')
 
-def convert_c4_image_to_plantuml(image_path, output_path="output.puml"):
+def clean_plantuml_output(raw_text):
     """
-    Sends a C4 image to GPT-4o and retrieves PlantUML code.
+    Removes markdown blocks and conversational filler that breaks PlantUML parsers.
     """
+    # Remove markdown code blocks (e.g., ```plantuml ... ```)
+    # This regex looks for ```plantuml or ``` and removes it, keeping the content inside
+    code = re.sub(r'```(plantuml)?', '', raw_text)
     
-    # The System Prompt defined in Part 1
+    # Remove common conversational openers if they exist
+    # Remove anything before the first !include or @startuml
+    match = re.search(r'(!include|@startuml)', code)
+    if match:
+        code = code[match.start():]
+        
+    return code.strip()
+
+def convert_c4_image_to_plantuml(image_path, output_path="output.puml"):
+    
+    # The Robust Prompt from above
     system_prompt = """
-    You are an expert Software Architect specialized in the C4 Model and PlantUML.
-    Your task is to analyze the provided image of a C4 architecture diagram (Context, Container, or Component level) and convert it into valid, runnable PlantUML code.
+    You are an expert PlantUML developer specializing in the C4 model.
+    Task: Convert the provided image into valid, error-free PlantUML code.
 
-    Strict Syntax Requirements:
-    1. Use the standard C4 PlantUML library syntax.
-    2. Start the code with: !include <C4/C4_Context.puml> (or C4_Container/C4_Component based on the diagram type).
-    3. Define elements using these specific macros:
-       - Person(personAlias, "Label", "Description")
-       - System(systemAlias, "Label", "Description")
-       - System_Ext(systemAlias, "Label", "Description")
-       - Container(containerAlias, "Label", "Technology", "Description")
-       - Db(containerAlias, "Label", "Technology", "Description")
-    4. Define relationships using: Rel(from, to, "Label", "Technology")
-    5. If there are layout directions (Left to Right), add: LAYOUT_WITH_LEGEND() or LAYOUT_LANDSCAPE().
+    CRITICAL RULES TO AVOID SYNTAX ERRORS:
+    1. IDENTIFY THE LEVEL FIRST:
+       - If the image shows high-level boxes (People, external systems, single system box), it is a CONTEXT diagram.
+       - If the image shows internal details (Web App, Database, API inside a box), it is a CONTAINER diagram.
+    2. MATCH THE LIBRARY:
+       - For CONTEXT: You MUST start with `!include <C4/C4_Context.puml>` and ONLY use macros: Person, System, System_Ext, Rel.
+       - For CONTAINER: You MUST start with `!include <C4/C4_Container.puml>` and use macros: Person, System, System_Ext, Container, ContainerDb, Rel.
+    3. SYNTAX STRICTNESS:
+       - Do NOT use standard PlantUML keywords like `actor`, `rectangle`, `database`, or `package`.
+       - Only use the C4 specific macros listed above.
+       - Every macro must have the correct number of arguments (e.g., Rel(from, to, "label", "tech")).
+       - Ensure all strings are enclosed in double quotes " ".
+    4. CLEANLINESS:
+       - Do NOT output markdown code blocks (```). Output the raw code only.
+       - Do NOT output introductory text like "Here is the code".
 
-    Instructions:
-    - Do not include markdown formatting (like ```plantuml) in the output. Return only the raw code.
-    - Extract all text labels accurately.
-    - Maintain the relative positioning of elements as best as possible using arrow directions.
-    - Ensure the code is syntactically correct and can be rendered immediately.
-
-    Output: Only the PlantUML code.
+    Output the final PlantUML code.
     """
 
     base64_image = encode_image(image_path)
@@ -50,7 +58,7 @@ def convert_c4_image_to_plantuml(image_path, output_path="output.puml"):
         print(f"Analyzing {image_path}...")
         
         response = client.chat.completions.create(
-            model="gpt-4o", # gpt-4o is recommended for Vision tasks
+            model="gpt-4o", 
             messages=[
                 {
                     "role": "system",
@@ -59,45 +67,39 @@ def convert_c4_image_to_plantuml(image_path, output_path="output.puml"):
                 {
                     "role": "user",
                     "content": [
-                        {
-                            "type": "text", 
-                            "text": "Convert this C4 diagram into PlantUML code."
-                        },
+                        {"type": "text", "text": "Convert this C4 diagram to code."},
                         {
                             "type": "image_url",
                             "image_url": {
                                 "url": f"data:image/png;base64,{base64_image}",
-                                "detail": "high" # High detail is crucial for reading diagram text
+                                "detail": "high"
                             }
                         }
                     ]
                 }
             ],
-            temperature=0.1 # Low temperature for deterministic structural code
+            temperature=0.1
         )
 
-        # Extract the content
-        plantuml_code = response.choices[0].message.content
+        raw_code = response.choices[0].message.content
+        clean_code = clean_plantuml_output(raw_code)
 
-        # Clean up: Remove markdown blocks if the AI ignored instructions
-        if "```plantuml" in plantuml_code:
-            plantuml_code = plantuml_code.replace("```plantuml", "")
-        if "```" in plantuml_code:
-            plantuml_code = plantuml_code.replace("```", "")
-
-        # Save to file
+        # Save cleaned code
         with open(output_path, "w") as f:
-            f.write(plantuml_code)
+            f.write(clean_code)
         
-        print(f"Success! PlantUML code saved to {output_path}")
-        return plantuml_code
+        print(f"Success! Cleaned code saved to {output_path}")
+        
+        # Basic validation check
+        if "!include" not in clean_code:
+            print("WARNING: The generated code might be missing the library include.")
+            
+        return clean_code
 
     except Exception as e:
         print(f"An error occurred: {e}")
         return None
 
-# --- Usage Example ---
+# Run it
 if __name__ == "__main__":
-    # Replace with your actual image file name
-    input_image = "c4_diagram.png" 
-    convert_c4_image_to_plantuml(input_image)
+    convert_c4_image_to_plantuml("c4_diagram.png")

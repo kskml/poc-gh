@@ -1,126 +1,1032 @@
-import base64
+#!/usr/bin/env python3
+"""
+=============================================================================
+  Image-to-PlantUML Converter (Python Script)
+=============================================================================
+
+  Converts architecture diagram images (PNG, JPG, etc.) into valid PlantUML
+  code using AI Vision analysis (z-ai-web-dev-sdk).
+
+  Supported Diagram Types:
+    - Auto-Detect        : AI determines the diagram type automatically
+    - Sequence           : Interaction between participants over time
+    - C4 Context         : System context with people and external systems
+    - C4 Container       : Containers (apps, APIs, databases) within a system
+    - C4 Deployment      : Deployment infrastructure (servers, cloud, K8s)
+    - C4 Component       : Components within a container
+    - UML Class          : Classes, attributes, methods, relationships
+    - UML Component      : Software components and interfaces
+    - UML Activity       : Workflow and process flows
+    - UML Use Case       : Actors and use cases
+
+  Usage:
+    # Basic: auto-detect diagram type
+    python image_to_plantuml.py --image my_diagram.png
+
+    # Specify diagram type
+    python image_to_plantuml.py --image seq_diagram.png --type sequence
+
+    # With additional context hint
+    python image_to_plantuml.py --image c4.png --type c4-context \
+        --context "The central system is Order Service"
+
+    # Provide multiple images for comparison
+    python image_to_plantuml.py --image diag1.png --image diag2.png --type auto
+
+    # Custom output file
+    python image_to_plantuml.py --image my_diagram.png --output my_code.puml
+
+  Dependencies:
+    - Python 3.10+
+    - z-ai CLI tool (must be installed and accessible via PATH)
+    - rich (for beautiful terminal output) -- optional but recommended
+
+=============================================================================
+"""
+
+import argparse
+import json
 import os
 import re
-from openai import OpenAI
-from PIL import Image
-import io
+import subprocess
+import sys
+import textwrap
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
 
-# Initialize client
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-def resize_image_for_ocr(image_path, max_width=1536):
+# ═══════════════════════════════════════════════════════════════════════════
+# STEP 1: DIAGRAM TYPE CONFIGURATION
+# ═══════════════════════════════════════════════════════════════════════════
+# Each diagram type has a specialized prompt that instructs the AI Vision
+# model on what elements to look for and how to structure the PlantUML output.
+
+DIAGRAM_PROMPTS: dict[str, dict] = {
+    "auto": {
+        "label": "Auto-Detect",
+        "description": "AI determines the diagram type automatically",
+        "prompt": (
+            "Analyze this architecture diagram image and convert it to valid PlantUML code.\n\n"
+            "INSTRUCTIONS:\n"
+            "1. FIRST determine what type of diagram this is (sequence, class, component,\n"
+            "   deployment, use case, activity, C4 context, C4 container, etc.)\n"
+            "2. Carefully extract ALL elements visible in the diagram\n"
+            "3. Preserve ALL relationships, labels, and annotations exactly as shown\n"
+            "4. Choose the appropriate PlantUML syntax for that diagram type\n"
+            "5. If it's a C4 model, use the appropriate C4 PlantUML macro include\n\n"
+            "IMPORTANT RULES:\n"
+            "- Output ONLY the PlantUML code, nothing else\n"
+            "- Include @startuml and @enduml tags\n"
+            "- Use correct arrow syntax for the identified diagram type\n"
+            "- Preserve all text labels exactly as shown in the image\n"
+            "- If text is blurry/unclear, make your best reasonable interpretation\n"
+            "- Wrap the code in ```plantuml code block"
+        ),
+    },
+    "sequence": {
+        "label": "Sequence Diagram",
+        "description": "Interaction between participants over time",
+        "prompt": (
+            "This is a SEQUENCE DIAGRAM. Analyze the image and convert it to valid PlantUML code.\n\n"
+            "ELEMENTS TO IDENTIFY:\n"
+            "1. All participants/actors (entities listed at the top)\n"
+            "2. All messages between participants in order (top to bottom)\n"
+            "3. Message types:\n"
+            "   - Synchronous calls: -> (solid arrow)\n"
+            "   - Asynchronous calls: --> (open arrow)\n"
+            "   - Return messages: --> (dashed, use -->>)\n"
+            "   - Self-messages (loops on same participant)\n"
+            "4. Activation boxes (thin rectangles on lifelines)\n"
+            "5. Combined fragments: alt, opt, loop, par, critical, break\n"
+            "6. Notes and comments attached to the diagram\n"
+            "7. Group boxes with labels\n\n"
+            "OUTPUT RULES:\n"
+            "- Start with @startuml\n"
+            "- Use 'participant' keyword for each entity\n"
+            "- Use correct arrow notation (->, -->, -->>, -\\, \\\\)\n"
+            "- Use 'alt/opt/loop/par' blocks for combined fragments\n"
+            "- End with @enduml\n"
+            "- Wrap the code in ```plantuml code block"
+        ),
+    },
+    "c4-context": {
+        "label": "C4 Context Diagram",
+        "description": "System context showing people and external systems",
+        "prompt": (
+            "This is a C4 MODEL CONTEXT DIAGRAM. Analyze the image and convert it to PlantUML.\n\n"
+            "ELEMENTS TO IDENTIFY:\n"
+            "1. The central system being designed (System boundary)\n"
+            "2. All external actors (people, roles) shown as stick figures or person icons\n"
+            "3. All external systems that interact with the central system\n"
+            "4. Relationship labels/descriptions between entities (e.g., 'Uses', 'Sends data to')\n"
+            "5. System boundary name and its visual boundary box\n"
+            "6. Legend if present\n\n"
+            "PLANTUML FORMAT (use C4 macro):\n"
+            "@startuml\n"
+            "!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Context.puml\n\n"
+            "Person(personAlias, 'Label', 'Optional Description')\n"
+            "System(systemAlias, 'Label', 'Optional Description')\n"
+            "System_Ext(externalAlias, 'Label', 'Optional Description')\n"
+            "System_Boundary(boundaryAlias, 'Boundary Label') {\n"
+            "  ...internal system...\n"
+            "}\n"
+            "Rel(from, to, 'Label', 'Optional Technology')\n\n"
+            "OUTPUT RULES:\n"
+            "- Use C4_Context.puml include\n"
+            "- Use Person() for human actors, System() for the main system\n"
+            "- Use System_Ext() for external systems\n"
+            "- Use Rel() for relationships with descriptive labels\n"
+            "- Wrap the code in ```plantuml code block"
+        ),
+    },
+    "c4-container": {
+        "label": "C4 Container Diagram",
+        "description": "Containers (apps, APIs, databases) within a system",
+        "prompt": (
+            "This is a C4 MODEL CONTAINER DIAGRAM. Analyze the image and convert it to PlantUML.\n\n"
+            "ELEMENTS TO IDENTIFY:\n"
+            "1. The system boundary and its name\n"
+            "2. All containers within the boundary:\n"
+            "   - Web applications (e.g., React, Angular)\n"
+            "   - Mobile applications\n"
+            "   - API/REST services (e.g., Spring Boot, Express)\n"
+            "   - Databases (e.g., PostgreSQL, MongoDB)\n"
+            "   - Message brokers (e.g., RabbitMQ, Kafka)\n"
+            "   - File systems / Blob storage\n"
+            "3. External actors or systems outside the boundary\n"
+            "4. Technologies used by each container\n"
+            "5. All relationships between containers with labels\n\n"
+            "PLANTUML FORMAT (use C4 macro):\n"
+            "@startuml\n"
+            "!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml\n\n"
+            "Person(actorAlias, 'Label')\n"
+            "System_Boundary(boundaryAlias, 'System Name') {\n"
+            "  Container(appAlias, 'Label', 'Description', 'Technology')\n"
+            "  ContainerDb(dbAlias, 'Label', 'Description', 'Technology')\n"
+            "  ContainerQueue(queueAlias, 'Label', 'Description', 'Technology')\n"
+            "}\n"
+            "Rel(from, to, 'Label', 'Technology/Protocol')\n\n"
+            "OUTPUT RULES:\n"
+            "- Use C4_Container.puml include\n"
+            "- Use Container(), ContainerDb(), ContainerQueue() as appropriate\n"
+            "- Include technology for each container\n"
+            "- Wrap the code in ```plantuml code block"
+        ),
+    },
+    "c4-deployment": {
+        "label": "C4 Deployment Diagram",
+        "description": "Deployment infrastructure (servers, cloud, Kubernetes)",
+        "prompt": (
+            "This is a C4 MODEL DEPLOYMENT DIAGRAM. Analyze the image and convert it to PlantUML.\n\n"
+            "ELEMENTS TO IDENTIFY:\n"
+            "1. All deployment nodes/infrastructure:\n"
+            "   - Physical servers\n"
+            "   - Virtual machines\n"
+            "   - Cloud regions/availability zones\n"
+            "   - Kubernetes clusters/namespaces\n"
+            "   - Docker containers\n"
+            "2. Containers deployed on each node\n"
+            "3. Technologies/frameworks for each container\n"
+            "4. Communication paths between deployment nodes\n"
+            "5. Load balancers, firewalls, CDN, API gateways\n"
+            "6. Network boundaries and environments (dev/staging/prod)\n\n"
+            "PLANTUML FORMAT (use C4 macro):\n"
+            "@startuml\n"
+            "!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Deployment.puml\n\n"
+            "DeploymentNode(nodeAlias, 'Label', 'Description', 'Technology') {\n"
+            "  Container(containerAlias, 'Label', 'Technology')\n"
+            "}\n"
+            "Rel(from, to, 'Label', 'Protocol')\n\n"
+            "OUTPUT RULES:\n"
+            "- Use C4_Deployment.puml include\n"
+            "- Use DeploymentNode() for each infrastructure node\n"
+            "- Nest containers inside deployment nodes\n"
+            "- Wrap the code in ```plantuml code block"
+        ),
+    },
+    "c4-component": {
+        "label": "C4 Component Diagram",
+        "description": "Components within a container",
+        "prompt": (
+            "This is a C4 MODEL COMPONENT DIAGRAM. Analyze the image and convert it to PlantUML.\n\n"
+            "ELEMENTS TO IDENTIFY:\n"
+            "1. All components within the system boundary:\n"
+            "   - Controllers / API endpoints\n"
+            "   - Services / Business logic\n"
+            "   - Repositories / Data access\n"
+            "   - Gateways / External connectors\n"
+            "   - Message handlers\n"
+            "2. Component technologies (Spring, .NET, Python, etc.)\n"
+            "3. Interfaces between components (provided/required)\n"
+            "4. External systems or actors\n"
+            "5. Database components\n\n"
+            "PLANTUML FORMAT (use C4 macro):\n"
+            "@startuml\n"
+            "!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml\n\n"
+            "Component(compAlias, 'Label', 'Description', 'Technology')\n"
+            "ComponentDb(dbAlias, 'Label', 'Description', 'Technology')\n"
+            "Rel(from, to, 'Label', 'Technology')\n\n"
+            "OUTPUT RULES:\n"
+            "- Use C4_Component.puml include\n"
+            "- Use Component(), ComponentDb() as appropriate\n"
+            "- Wrap the code in ```plantuml code block"
+        ),
+    },
+    "class-diagram": {
+        "label": "UML Class Diagram",
+        "description": "Classes, attributes, methods, and relationships",
+        "prompt": (
+            "This is a UML CLASS DIAGRAM. Analyze the image and convert it to PlantUML.\n\n"
+            "ELEMENTS TO IDENTIFY:\n"
+            "1. All classes with their names (each box is a class)\n"
+            "2. Attributes (top section) with types and visibility:\n"
+            "   + public, - private, # protected, ~ package\n"
+            "3. Methods (bottom section) with parameters, return types, visibility\n"
+            "4. Relationship types:\n"
+            "   - Inheritance (extends): <|-- (hollow triangle arrow)\n"
+            "   - Implementation (implements): <|.. (dashed hollow triangle)\n"
+            "   - Association: --> (solid arrow)\n"
+            "   - Aggregation: o-- (hollow diamond)\n"
+            "   - Composition: *-- (filled diamond)\n"
+            "   - Dependency: ..> (dashed arrow)\n"
+            "5. Multiplicity/cardinality (1, 0..*, 1..*, etc.)\n"
+            "6. Abstract classes (italic or <<abstract>>)\n"
+            "7. Interfaces (<<interface>>)\n"
+            "8. Enums (<<enumeration>>)\n\n"
+            "OUTPUT RULES:\n"
+            "- Use 'class ClassName {' syntax with methods/attributes\n"
+            "- Use correct relationship arrows with multiplicities\n"
+            "- Wrap the code in ```plantuml code block"
+        ),
+    },
+    "component-diagram": {
+        "label": "UML Component Diagram",
+        "description": "Software components and interfaces",
+        "prompt": (
+            "This is a UML COMPONENT DIAGRAM. Analyze the image and convert it to PlantUML.\n\n"
+            "ELEMENTS TO IDENTIFY:\n"
+            "1. All components (large rectangles with component name)\n"
+            "2. Provided interfaces (lollipop circles on component edge)\n"
+            "3. Required interfaces (socket/half-circle on component edge)\n"
+            "4. Dependencies between components (dashed arrows)\n"
+            "5. Subsystems or packages grouping components\n"
+            "6. Ports and connectors\n"
+            "7. Delegation connectors\n\n"
+            "OUTPUT RULES:\n"
+            "- Use [ComponentName] or component keyword\n"
+            "- Use interface keyword for interfaces\n"
+            "- Use () notation for lollipop interfaces\n"
+            "- Use --() notation for socket interfaces\n"
+            "- Wrap the code in ```plantuml code block"
+        ),
+    },
+    "activity-diagram": {
+        "label": "UML Activity Diagram",
+        "description": "Workflow and process flows",
+        "prompt": (
+            "This is a UML ACTIVITY DIAGRAM. Analyze the image and convert it to PlantUML.\n\n"
+            "ELEMENTS TO IDENTIFY:\n"
+            "1. Initial node (filled circle at start)\n"
+            "2. Final node (bullseye circle at end)\n"
+            "3. Action nodes (rounded rectangles with labels)\n"
+            "4. Decision/merge nodes (diamonds) with guard conditions [condition]\n"
+            "5. Fork/join nodes (thick horizontal bars for parallel flows)\n"
+            "6. Control flow arrows between nodes\n"
+            "7. Swimlanes/partitions (vertical or horizontal bands)\n"
+            "8. Notes and constraints\n\n"
+            "OUTPUT RULES:\n"
+            "- Use 'start' and 'stop' keywords\n"
+            "- Use ':' for action labels (e.g., :Action Name;)\n"
+            "- Use 'if/then/else/endif' for decisions\n"
+            "- Use 'fork/fork again/end fork' for parallel flows\n"
+            "- Use '|Swimlane|' for partitions\n"
+            "- Wrap the code in ```plantuml code block"
+        ),
+    },
+    "usecase-diagram": {
+        "label": "UML Use Case Diagram",
+        "description": "Actors and use cases",
+        "prompt": (
+            "This is a UML USE CASE DIAGRAM. Analyze the image and convert it to PlantUML.\n\n"
+            "ELEMENTS TO IDENTIFY:\n"
+            "1. All actors (stick figures) with their names\n"
+            "2. The system boundary (rectangle) and its name\n"
+            "3. All use cases (ellipses) inside the boundary\n"
+            "4. Association lines between actors and use cases\n"
+            "5. <<include>> relationships (dashed arrow with <<include>>)\n"
+            "6. <<extend>> relationships (dashed arrow with <<extend>>)\n"
+            "7. Generalization between actors or use cases\n\n"
+            "OUTPUT RULES:\n"
+            "- Use 'actor ActorName' for each actor\n"
+            "- Use rectangle for system boundary\n"
+            "- Use 'usecase (Use Case Name)' for each use case\n"
+            "- Use '-->' for associations\n"
+            "- Use '.>' for include/extend relationships\n"
+            "- Wrap the code in ```plantuml code block"
+        ),
+    },
+}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# STEP 2: TERMINAL OUTPUT FORMATTING (uses Rich if available)
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Check if rich is available for beautiful terminal output
+try:
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.syntax import Syntax
+    from rich.markdown import Markdown
+    from rich.progress import Progress, SpinnerColumn, TextColumn
+    from rich import box
+
+    console = Console()
+    USE_RICH = True
+except ImportError:
+    USE_RICH = False
+
+
+def print_header():
+    """Print the script header banner."""
+    if USE_RICH:
+        console.print(
+            Panel(
+                "[bold violet]Image-to-PlantUML Converter[/bold violet]\n"
+                "[dim]Convert architecture diagram images to valid PlantUML code using AI Vision[/dim]",
+                box=box.DOUBLE_EDGE,
+                border_style="violet",
+            )
+        )
+    else:
+        print("=" * 60)
+        print("  Image-to-PlantUML Converter")
+        print("  Convert architecture diagrams to PlantUML using AI Vision")
+        print("=" * 60)
+
+
+def print_step(step_num: int, title: str, description: str = ""):
+    """Print a step indicator."""
+    if USE_RICH:
+        console.print(
+            f"  [bold violet][{step_num}][/bold violet] "
+            f"[bold]{title}[/bold]"
+            f"{'[dim] - ' + description + '[/dim]' if description else ''}"
+        )
+    else:
+        print(f"\n  [{step_num}] {title}" + (f" - {description}" if description else ""))
+
+
+def print_success(message: str):
+    """Print a success message."""
+    if USE_RICH:
+        console.print(f"  [bold green]✓[/bold green] {message}")
+    else:
+        print(f"  [✓] {message}")
+
+
+def print_error(message: str):
+    """Print an error message."""
+    if USE_RICH:
+        console.print(f"  [bold red]✗[/bold red] {message}")
+    else:
+        print(f"  [✗] {message}", file=sys.stderr)
+
+
+def print_info(message: str):
+    """Print an info message."""
+    if USE_RICH:
+        console.print(f"  [dim]  {message}[/dim]")
+    else:
+        print(f"    {message}")
+
+
+def print_code(code: str, language: str = "plantuml"):
+    """Print code with syntax highlighting."""
+    if USE_RICH:
+        syntax = Syntax(code, language, theme="monokai", line_numbers=True)
+        console.print(syntax)
+    else:
+        for i, line in enumerate(code.split("\n"), 1):
+            print(f"  {i:3d} | {line}")
+
+
+def print_separator():
+    """Print a visual separator."""
+    if USE_RICH:
+        console.print("[dim]" + "─" * 56 + "[/dim]")
+    else:
+        print("  " + "-" * 56)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# STEP 3: INPUT VALIDATION
+# ═══════════════════════════════════════════════════════════════════════════
+
+SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+MAX_FILE_SIZE_MB = 20
+
+
+def validate_image_path(path: str) -> Path:
     """
-    Resizes the image to optimize it for GPT-4o's Vision capabilities.
-    Images that are too large often result in poor OCR.
+    Validate that the image file exists, has a supported format,
+    and is within the size limit.
+
+    Args:
+        path: String path to the image file.
+
+    Returns:
+        Path object for the validated image.
+
+    Raises:
+        FileNotFoundError: If the file doesn't exist.
+        ValueError: If the file format is unsupported or size exceeds limit.
     """
-    try:
-        img = Image.open(image_path)
-        if img.width > max_width:
-            ratio = max_width / img.width
-            new_height = int(img.height * ratio)
-            img = img.resize((max_width, new_height), Image.LANCZOS)
-            
-            # Save to a byte buffer to return base64 directly without saving file
-            buffered = io.BytesIO()
-            img_format = img.format if img.format else 'PNG'
-            img.save(buffered, format=img_format)
-            return base64.b64encode(buffered.getvalue()).decode('utf-8'), img_format.lower()
-        else:
-            # If no resize needed, read normally
-            with open(image_path, "rb") as image_file:
-                return base64.b64encode(image_file.read()).decode('utf-8'), 'png'
-    except Exception as e:
-        print(f"Error processing image: {e}")
-        return None, None
+    file_path = Path(path).resolve()
 
-def clean_output(text):
-    # Remove markdown blocks
-    text = re.sub(r'```(plantuml)?', '', text)
-    # Remove text before the first !include or @startuml
-    match = re.search(r'(!include|@startuml)', text)
-    if match:
-        text = text[match.start():]
-    return text.strip()
+    if not file_path.exists():
+        raise FileNotFoundError(f"Image file not found: {file_path}")
 
-def generate_c4_code(image_path, output_path="output.puml"):
-    
-    # This prompt forces the AI to perform OCR first (Step 1) before coding (Step 2)
-    system_prompt = """
-    You are an expert at reading diagrams and converting them to code.
-    
-    Task: Convert the C4 diagram image to PlantUML.
-
-    Process:
-    1. EXTRACT: Look at the image and extract ALL text labels from every box and arrow. 
-       - If a box has no text, label it "Unknown_Box".
-       - If an arrow has no text, label it "uses".
-    2. MAP: Decide if it is Context or Container level.
-       - Context: Use !include <C4/C4_Context.puml> and macros (Person, System, System_Ext).
-       - Container: Use !include <C4/C4_Container.puml> and macros (Person, System, Container, ContainerDb).
-    3. CODE: Write the PlantUML code using the extracted labels.
-
-    CRITICAL: You must output code for EVERY visible box. Do not leave the body empty.
-    """
-
-    # 1. Resize image for better OCR performance
-    base64_image, img_format = resize_image_for_ocr(image_path)
-    
-    if not base64_image:
-        print("Failed to process image.")
-        return
-
-    try:
-        print(f"Processing image (optimized for Vision AI)...")
-        
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text", 
-                            "text": "Read all text in this image and generate the PlantUML code. Do not skip any elements."
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/{img_format};base64,{base64_image}",
-                                "detail": "high"
-                            }
-                        }
-                    ]
-                }
-            ],
-            temperature=0.0, # Zero temperature for strict adherence
-            max_tokens=4096  # Ensure enough space for code
+    if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+        raise ValueError(
+            f"Unsupported file format: {file_path.suffix}\n"
+            f"  Supported formats: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
         )
 
-        raw_code = response.choices[0].message.content
-        final_code = clean_output(raw_code)
+    file_size_mb = file_path.stat().st_size / (1024 * 1024)
+    if file_size_mb > MAX_FILE_SIZE_MB:
+        raise ValueError(
+            f"File too large: {file_size_mb:.1f}MB (max {MAX_FILE_SIZE_MB}MB)"
+        )
 
-        # VALIDATION CHECK
-        # If the code is super short, the AI likely failed OCR
-        if len(final_code) < 200:
-            print("\n" + "="*50)
-            print("WARNING: The generated code is too short.")
-            print("The AI likely failed to read the text from the image.")
-            print("Here is what the AI returned (Raw):")
-            print(raw_code)
-            print("="*50 + "\n")
+    return file_path
+
+
+def validate_diagram_type(diagram_type: str) -> str:
+    """
+    Validate that the diagram type is recognized.
+
+    Args:
+        diagram_type: String identifier for the diagram type.
+
+    Returns:
+        Validated diagram type string.
+
+    Raises:
+        ValueError: If the diagram type is not recognized.
+    """
+    if diagram_type not in DIAGRAM_PROMPTS:
+        valid_types = ", ".join(sorted(DIAGRAM_PROMPTS.keys()))
+        raise ValueError(
+            f"Unknown diagram type: '{diagram_type}'\n"
+            f"  Valid types: {valid_types}"
+        )
+    return diagram_type
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# STEP 4: AI VISION ANALYSIS
+# ═══════════════════════════════════════════════════════════════════════════
+
+def build_vision_prompt(diagram_type: str, additional_context: str = "") -> str:
+    """
+    Build the complete prompt for the AI Vision model by combining
+    the diagram-type-specific prompt with any additional user context.
+
+    This is where the magic happens — the prompt engineering determines
+    how accurately the AI can identify and convert diagram elements.
+
+    Args:
+        diagram_type: The type of diagram (e.g., 'sequence', 'c4-context').
+        additional_context: Optional extra hints from the user.
+
+    Returns:
+        The complete prompt string to send to the Vision model.
+    """
+    # Get the base prompt for this diagram type
+    base_prompt = DIAGRAM_PROMPTS[diagram_type]["prompt"]
+
+    # If the user provided additional context, append it
+    if additional_context and additional_context.strip():
+        context_block = (
+            f"\n\nADDITIONAL USER CONTEXT:\n"
+            f"The user provided these extra hints about the diagram:\n"
+            f"{additional_context.strip()}\n\n"
+            f"Use this context to improve accuracy where the image is ambiguous."
+        )
+        base_prompt += context_block
+
+    return base_prompt
+
+
+def call_vision_model(
+    image_paths: list[Path],
+    prompt: str,
+) -> str:
+    """
+    Call the z-ai Vision CLI tool to analyze one or more images.
+
+    This function spawns a subprocess to run the `z-ai vision` CLI command,
+    passing the image file(s) and the analysis prompt. The CLI returns
+    JSON containing the AI's response.
+
+    Args:
+        image_paths: List of Path objects pointing to image files.
+        prompt: The analysis prompt to send to the Vision model.
+
+    Returns:
+        The raw text content from the AI's response.
+
+    Raises:
+        RuntimeError: If the CLI command fails.
+    """
+    # Build the command arguments
+    cmd = [
+        "z-ai",
+        "vision",
+        "--prompt", prompt,
+    ]
+
+    # Add each image file
+    for img_path in image_paths:
+        cmd.extend(["--image", str(img_path)])
+
+    # Use a temp file for JSON output to avoid shell escaping issues
+    tmp_output = f"/tmp/plantuml_vision_response_{datetime.now().strftime('%Y%m%d%H%M%S')}.json"
+    cmd.extend(["--output", tmp_output])
+
+    print_info("Executing AI Vision model (this may take 10-30 seconds)...")
+
+    try:
+        # Run the z-ai vision command
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,  # 2 minute timeout for complex diagrams
+        )
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Vision CLI failed (exit code {result.returncode}):\n"
+                f"  {result.stderr.strip()}"
+            )
+
+        # Read the JSON response
+        with open(tmp_output, "r", encoding="utf-8") as f:
+            response_data = json.load(f)
+
+        # Clean up temp file
+        os.unlink(tmp_output)
+
+        # Extract the content from the response
+        # The z-ai CLI returns JSON with the model's response
+        if isinstance(response_data, dict):
+            # Try common response structures
+            content = (
+                response_data.get("content")
+                or response_data.get("choices", [{}])[0].get("message", {}).get("content")
+                or response_data.get("response")
+                or response_data.get("text")
+                or json.dumps(response_data)
+            )
+        elif isinstance(response_data, str):
+            content = response_data
         else:
-            print(f"Success! Code saved to {output_path}")
+            content = json.dumps(response_data)
 
-        with open(output_path, "w") as f:
-            f.write(final_code)
+        return str(content)
 
-        return final_code
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("Vision analysis timed out after 120 seconds. Try a simpler image.")
+    except FileNotFoundError:
+        raise RuntimeError(
+            "'z-ai' CLI tool not found. Ensure z-ai-web-dev-sdk is installed and 'z-ai' is in your PATH."
+        )
+    finally:
+        # Ensure temp file is cleaned up
+        if os.path.exists(tmp_output):
+            try:
+                os.unlink(tmp_output)
+            except OSError:
+                pass
 
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        return None
+
+# ═══════════════════════════════════════════════════════════════════════════
+# STEP 5: EXTRACT AND CLEAN PLANTUML CODE
+# ═══════════════════════════════════════════════════════════════════════════
+
+def extract_plantuml_code(raw_response: str) -> str:
+    """
+    Extract clean PlantUML code from the AI's raw text response.
+
+    The AI may wrap the code in markdown code blocks (```plantuml ... ```)
+    or include extra text. This function extracts only the valid PlantUML code.
+
+    Extraction strategy (in order of precedence):
+    1. Look for ```plantuml code blocks
+    2. Look for ``` code blocks containing PlantUML indicators
+    3. Look for @startuml ... @enduml directly
+    4. Return the raw response cleaned of markdown formatting
+
+    Args:
+        raw_response: The raw text from the AI Vision model.
+
+    Returns:
+        Clean PlantUML code string.
+    """
+    # Strategy 1: Extract from ```plantuml code block
+    plantuml_block_match = re.search(r"```plantuml\s*\n(.*?)\n```", raw_response, re.DOTALL)
+    if plantuml_block_match:
+        return plantuml_block_match.group(1).strip()
+
+    # Strategy 2: Extract from any ``` code block that looks like PlantUML
+    code_block_match = re.search(r"```\s*\n(.*?)\n```", raw_response, re.DOTALL)
+    if code_block_match:
+        code = code_block_match.group(1).strip()
+        # Check if it contains PlantUML indicators
+        plantuml_indicators = [
+            "@startuml", "participant", "actor", "rectangle",
+            "System(", "Container(", "Component(", "class ",
+            "usecase", "node", "component", "Rel(", "BiRel(",
+            "start", "stop", "|", "if ", "fork",
+        ]
+        if any(indicator in code for indicator in plantuml_indicators):
+            return code
+
+    # Strategy 3: Extract between @startuml and @enduml
+    uml_match = re.search(r"@startuml\s*(.*?)@enduml", raw_response, re.DOTALL)
+    if uml_match:
+        return f"@startuml{uml_match.group(1)}@enduml".strip()
+
+    # Strategy 4: Return the raw response, cleaned of markdown artifacts
+    cleaned = raw_response.strip()
+    cleaned = re.sub(r"^```\w*\s*\n?", "", cleaned)
+    cleaned = re.sub(r"\n?```\s*$", "", cleaned)
+    return cleaned
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# STEP 6: SAVE OUTPUT
+# ═══════════════════════════════════════════════════════════════════════════
+
+def save_plantuml_file(
+    plantuml_code: str,
+    output_path: Path,
+    diagram_type: str,
+) -> Path:
+    """
+    Save the generated PlantUML code to a file.
+
+    The file is saved with a .puml extension. If no output path is specified,
+    a filename is auto-generated based on the diagram type and timestamp.
+
+    Args:
+        plantuml_code: The PlantUML code to save.
+        output_path: The desired output path (None for auto-generated).
+        diagram_type: The diagram type (used for auto-naming).
+
+    Returns:
+        Path to the saved file.
+    """
+    # Auto-generate filename if not specified
+    if output_path is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"diagram_{diagram_type}_{timestamp}.puml"
+        output_path = Path(filename)
+
+    # Ensure .puml extension
+    if output_path.suffix.lower() != ".puml":
+        output_path = output_path.with_suffix(".puml")
+
+    # Write the file
+    output_path.write_text(plantuml_code, encoding="utf-8")
+
+    return output_path.resolve()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# STEP 7: GENERATE RENDERING URL
+# ═══════════════════════════════════════════════════════════════════════════
+
+def generate_preview_url(plantuml_code: str) -> str:
+    """
+    Generate a PlantUML server URL to preview the diagram.
+
+    Uses the PlantUML web server (plantuml.com) to render the diagram
+    as an SVG image. The code is encoded to be URL-safe.
+
+    Args:
+        plantuml_code: The PlantUML code to render.
+
+    Returns:
+        URL string that renders the diagram as SVG.
+    """
+    import base64
+
+    # Encode the PlantUML code for the URL
+    encoded = base64.b64encode(plantuml_code.encode("utf-8")).decode("ascii")
+    # Make URL-safe (PlantUML format)
+    encoded = encoded.replace("+", "-").replace("/", "_").rstrip("=")
+
+    return f"https://www.plantuml.com/plantuml/svg/{encoded}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# STEP 8: GENERATE STATISTICS
+# ═══════════════════════════════════════════════════════════════════════════
+
+def count_diagram_elements(code: str) -> dict[str, int]:
+    """
+    Count the number of elements and relationships in the PlantUML code.
+
+    This provides a quick summary of how many components the AI identified.
+
+    Args:
+        code: The PlantUML code.
+
+    Returns:
+        Dictionary with counts for elements, relationships, and total lines.
+    """
+    lines = [l for l in code.split("\n") if l.strip() and not l.strip().startswith("'")]
+
+    element_patterns = [
+        r"participant\s+", r"actor\s+", r"rectangle\s+",
+        r"System\s*\(", r"Container\s*\(", r"Component\s*\(",
+        r"ContainerDb\s*\(", r"ContainerQueue\s*\(",
+        r"Boundary\s*\(", r"Entity\s*\(", r"Control\s*\(",
+        r"Person\s*\(", r"DeploymentNode\s*\(",
+        r"class\s+", r"interface\s+", r"usecase\s+",
+        r"node\s+", r"component\s+",
+    ]
+
+    elements = 0
+    for pattern in element_patterns:
+        elements += len(re.findall(pattern, code))
+
+    # Count relationships (arrows and Rel/BiRel calls)
+    relationships = len(re.findall(r"(-->|->>|->|-->>|-\.>|<\.\-|\.\.>|Rel\(|BiRel\()", code))
+
+    return {
+        "total_lines": len(lines),
+        "elements": elements,
+        "relationships": relationships,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# STEP 9: MAIN CONVERSION PIPELINE
+# ═══════════════════════════════════════════════════════════════════════════
+
+def convert_image_to_plantuml(
+    image_paths: list[Path],
+    diagram_type: str = "auto",
+    additional_context: str = "",
+    output_path: Optional[Path] = None,
+    save_json: bool = False,
+) -> tuple[str, Path, dict]:
+    """
+    Main conversion pipeline: Image → AI Vision Analysis → PlantUML Code → File.
+
+    This orchestrates the entire conversion process:
+    1. Validates inputs
+    2. Builds the specialized AI prompt
+    3. Calls the Vision model to analyze the image(s)
+    4. Extracts clean PlantUML code from the AI response
+    5. Saves the output to a .puml file
+    6. Returns statistics and metadata
+
+    Args:
+        image_paths: List of paths to architecture diagram images.
+        diagram_type: Type of diagram ('auto' for auto-detection).
+        additional_context: Extra hints for the AI.
+        output_path: Where to save the .puml file (None = auto-generate).
+        save_json: Whether to also save the raw AI response as JSON.
+
+    Returns:
+        Tuple of (plantuml_code, output_file_path, statistics).
+
+    Raises:
+        Various errors from validation or Vision CLI.
+    """
+    # ── 9.1 Validate all image files ──
+    validated_paths = []
+    for path in image_paths:
+        validated = validate_image_path(str(path))
+        validated_paths.append(validated)
+
+    # ── 9.2 Validate diagram type ──
+    diagram_type = validate_diagram_type(diagram_type)
+
+    # ── 9.3 Build the AI Vision prompt ──
+    # This prompt is tailored to the diagram type and instructs the AI
+    # on exactly what elements to look for and how to format the output.
+    vision_prompt = build_vision_prompt(diagram_type, additional_context)
+
+    # ── 9.4 Call the AI Vision model ──
+    # The Vision model examines the image pixels, identifies all visual
+    # elements (boxes, arrows, text, shapes), understands their semantic
+    # meaning, and generates equivalent PlantUML code.
+    raw_response = call_vision_model(validated_paths, vision_prompt)
+
+    # ── 9.5 Extract clean PlantUML code from AI response ──
+    # The AI may wrap code in markdown blocks or add explanatory text.
+    # This step strips away everything except the pure PlantUML code.
+    plantuml_code = extract_plantuml_code(raw_response)
+
+    # ── 9.6 Save to file ──
+    output_file = save_plantuml_file(plantuml_code, output_path, diagram_type)
+
+    # ── 9.7 Optionally save raw JSON response ──
+    if save_json:
+        json_path = output_file.with_suffix(".json")
+        json_data = {
+            "diagram_type": diagram_type,
+            "images": [str(p) for p in validated_paths],
+            "raw_response": raw_response,
+            "plantuml_code": plantuml_code,
+            "timestamp": datetime.now().isoformat(),
+        }
+        json_path.write_text(json.dumps(json_data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    # ── 9.8 Generate statistics ──
+    stats = count_diagram_elements(plantuml_code)
+
+    return plantuml_code, output_file, stats
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# STEP 10: CLI INTERFACE
+# ═══════════════════════════════════════════════════════════════════════════
+
+def main():
+    """Parse arguments and run the conversion pipeline."""
+    parser = argparse.ArgumentParser(
+        description="Convert architecture diagram images to PlantUML code using AI Vision.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""
+            Examples:
+              # Auto-detect diagram type
+              python image_to_plantuml.py --image my_diagram.png
+
+              # Specify diagram type
+              python image_to_plantuml.py --image seq.png --type sequence
+
+              # With context hints
+              python image_to_plantuml.py --image c4.png --type c4-context \\
+                  --context "The central system is Order Service"
+
+              # Multiple images
+              python image_to_plantuml.py --image diag1.png --image diag2.png
+
+              # Custom output path
+              python image_to_plantuml.py --image my.png --output ./output/my_code.puml
+
+            Supported Diagram Types:
+              auto, sequence, c4-context, c4-container, c4-deployment,
+              c4-component, class-diagram, component-diagram, activity-diagram,
+              usecase-diagram
+        """),
+    )
+
+    parser.add_argument(
+        "--image", "-i",
+        type=str,
+        action="append",
+        default=None,
+        help="Path to the architecture diagram image (can specify multiple times)",
+    )
+    parser.add_argument(
+        "--type", "-t",
+        type=str,
+        default="auto",
+        choices=sorted(DIAGRAM_PROMPTS.keys()),
+        help="Diagram type (default: auto-detect)",
+    )
+    parser.add_argument(
+        "--context", "-c",
+        type=str,
+        default="",
+        help="Additional context or hints for the AI (optional)",
+    )
+    parser.add_argument(
+        "--output", "-o",
+        type=str,
+        default=None,
+        help="Output file path for the .puml file (default: auto-generated)",
+    )
+    parser.add_argument(
+        "--save-json",
+        action="store_true",
+        help="Also save the raw AI response as a JSON file",
+    )
+    parser.add_argument(
+        "--list-types",
+        action="store_true",
+        help="List all supported diagram types and exit",
+    )
+
+    args = parser.parse_args()
+
+    # ── List types mode ──
+    if args.list_types:
+        print_header()
+
+        if not args.image:
+            pass  # --image not needed for --list-types
+
+        if USE_RICH:
+            table = Table(
+                title="Supported Diagram Types",
+                box=box.ROUNDED,
+                show_header=True,
+                header_style="bold violet",
+            )
+            table.add_column("Type ID", style="cyan")
+            table.add_column("Name", style="green")
+            table.add_column("Description")
+            for type_id, info in sorted(DIAGRAM_PROMPTS.items()):
+                table.add_row(type_id, info["label"], info["description"])
+            console.print(table)
+        else:
+            print(f"\n  {'Type ID':<22} {'Name':<28} Description")
+            print(f"  {'-'*22} {'-'*28} {'-'*30}")
+            for type_id, info in sorted(DIAGRAM_PROMPTS.items()):
+                print(f"  {type_id:<22} {info['label']:<28} {info['description']}")
+        sys.exit(0)
+
+    # ── Main conversion flow ──
+    print_header()
+
+    # Validate that images were provided (except for --list-types)
+    if not args.image:
+        parser.error("the following arguments are required: --image/-i")
+
+    image_paths = [Path(p) for p in args.image]
+    output_path = Path(args.output) if args.output else None
+
+    # Print configuration
+    print_step(0, "Configuration")
+    print_info(f"Diagram type:    {DIAGRAM_PROMPTS[args.type]['label']} ({args.type})")
+    print_info(f"Image file(s):   {[str(p) for p in image_paths]}")
+    print_info(f"Additional context: {'Yes' if args.context else 'None'}")
+    print_info(f"Output file:     {'Auto-generated' if not output_path else str(output_path)}")
+
+    print_separator()
+
+    try:
+        # Run the conversion pipeline
+        plantuml_code, output_file, stats = convert_image_to_plantuml(
+            image_paths=image_paths,
+            diagram_type=args.type,
+            additional_context=args.context,
+            output_path=output_path,
+            save_json=args.save_json,
+        )
+
+        # ── Print results ──
+        print_separator()
+        print_step(1, "AI Vision Analysis Complete")
+        print_success(f"Diagram type: {DIAGRAM_PROMPTS[args.type]['label']}")
+        print_success(f"Elements identified: {stats['elements']}")
+        print_success(f"Relationships mapped: {stats['relationships']}")
+        print_success(f"Total lines of code: {stats['total_lines']}")
+
+        print_separator()
+        print_step(2, "Generated PlantUML Code")
+        print_code(plantuml_code)
+
+        print_separator()
+        print_step(3, "Output Saved")
+        print_success(f"File: {output_file}")
+        if args.save_json:
+            print_success(f"JSON: {output_file.with_suffix('.json')}")
+
+        # ── Generate preview URL ──
+        print_separator()
+        print_step(4, "Preview URL")
+        preview_url = generate_preview_url(plantuml_code)
+        if USE_RICH:
+            console.print(f"  [cyan]{preview_url}[/cyan]")
+        else:
+            print(f"  {preview_url}")
+        print_info("Open this URL in your browser to see the rendered diagram")
+
+        print_separator()
+        print_success("Conversion complete!")
+
+    except (FileNotFoundError, ValueError) as e:
+        print_error(str(e))
+        sys.exit(1)
+    except RuntimeError as e:
+        print_error(str(e))
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print_error("\nConversion cancelled by user.")
+        sys.exit(130)
+
 
 if __name__ == "__main__":
-    # Ensure you have a file named c4_diagram.png in the same folder
-    generate_c4_code("c4_diagram.png")
+    main()

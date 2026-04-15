@@ -1,0 +1,103 @@
+import base64
+import os
+from openai import OpenAI
+
+# Initialize the OpenAI client
+# Make sure you have OPENAI_API_KEY in your environment variables
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+def encode_image(image_path):
+    """
+    Encodes an image file into a base64 string required for the API.
+    """
+    with open(image_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode('utf-8')
+
+def convert_c4_image_to_plantuml(image_path, output_path="output.puml"):
+    """
+    Sends a C4 image to GPT-4o and retrieves PlantUML code.
+    """
+    
+    # The System Prompt defined in Part 1
+    system_prompt = """
+    You are an expert Software Architect specialized in the C4 Model and PlantUML.
+    Your task is to analyze the provided image of a C4 architecture diagram (Context, Container, or Component level) and convert it into valid, runnable PlantUML code.
+
+    Strict Syntax Requirements:
+    1. Use the standard C4 PlantUML library syntax.
+    2. Start the code with: !include <C4/C4_Context.puml> (or C4_Container/C4_Component based on the diagram type).
+    3. Define elements using these specific macros:
+       - Person(personAlias, "Label", "Description")
+       - System(systemAlias, "Label", "Description")
+       - System_Ext(systemAlias, "Label", "Description")
+       - Container(containerAlias, "Label", "Technology", "Description")
+       - Db(containerAlias, "Label", "Technology", "Description")
+    4. Define relationships using: Rel(from, to, "Label", "Technology")
+    5. If there are layout directions (Left to Right), add: LAYOUT_WITH_LEGEND() or LAYOUT_LANDSCAPE().
+
+    Instructions:
+    - Do not include markdown formatting (like ```plantuml) in the output. Return only the raw code.
+    - Extract all text labels accurately.
+    - Maintain the relative positioning of elements as best as possible using arrow directions.
+    - Ensure the code is syntactically correct and can be rendered immediately.
+
+    Output: Only the PlantUML code.
+    """
+
+    base64_image = encode_image(image_path)
+
+    try:
+        print(f"Analyzing {image_path}...")
+        
+        response = client.chat.completions.create(
+            model="gpt-4o", # gpt-4o is recommended for Vision tasks
+            messages=[
+                {
+                    "role": "system",
+                    "content": system_prompt
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text", 
+                            "text": "Convert this C4 diagram into PlantUML code."
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{base64_image}",
+                                "detail": "high" # High detail is crucial for reading diagram text
+                            }
+                        }
+                    ]
+                }
+            ],
+            temperature=0.1 # Low temperature for deterministic structural code
+        )
+
+        # Extract the content
+        plantuml_code = response.choices[0].message.content
+
+        # Clean up: Remove markdown blocks if the AI ignored instructions
+        if "```plantuml" in plantuml_code:
+            plantuml_code = plantuml_code.replace("```plantuml", "")
+        if "```" in plantuml_code:
+            plantuml_code = plantuml_code.replace("```", "")
+
+        # Save to file
+        with open(output_path, "w") as f:
+            f.write(plantuml_code)
+        
+        print(f"Success! PlantUML code saved to {output_path}")
+        return plantuml_code
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return None
+
+# --- Usage Example ---
+if __name__ == "__main__":
+    # Replace with your actual image file name
+    input_image = "c4_diagram.png" 
+    convert_c4_image_to_plantuml(input_image)

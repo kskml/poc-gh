@@ -10,64 +10,57 @@ def encode_image(image_path):
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode('utf-8')
 
-def clean_plantuml_output(raw_text):
-    """
-    Removes markdown blocks and conversational filler that breaks PlantUML parsers.
-    """
-    # Remove markdown code blocks (e.g., ```plantuml ... ```)
-    # This regex looks for ```plantuml or ``` and removes it, keeping the content inside
-    code = re.sub(r'```(plantuml)?', '', raw_text)
-    
-    # Remove common conversational openers if they exist
-    # Remove anything before the first !include or @startuml
-    match = re.search(r'(!include|@startuml)', code)
+def clean_output(text):
+    # Remove markdown blocks if present
+    text = re.sub(r'```(plantuml)?', '', text)
+    # Remove text before the first !include or @startuml
+    match = re.search(r'(!include|@startuml)', text)
     if match:
-        code = code[match.start():]
-        
-    return code.strip()
+        text = text[match.start():]
+    return text.strip()
 
-def convert_c4_image_to_plantuml(image_path, output_path="output.puml"):
+def generate_c4_code(image_path, output_path="output.puml"):
     
-    # The Robust Prompt from above
+    # The Force-Content Prompt
     system_prompt = """
-    You are an expert PlantUML developer specializing in the C4 model.
-    Task: Convert the provided image into valid, error-free PlantUML code.
+    You are an expert Software Architect and PlantUML generator.
+    Task: Convert the C4 architecture image into fully populated PlantUML code.
 
-    CRITICAL RULES TO AVOID SYNTAX ERRORS:
-    1. IDENTIFY THE LEVEL FIRST:
-       - If the image shows high-level boxes (People, external systems, single system box), it is a CONTEXT diagram.
-       - If the image shows internal details (Web App, Database, API inside a box), it is a CONTAINER diagram.
-    2. MATCH THE LIBRARY:
-       - For CONTEXT: You MUST start with `!include <C4/C4_Context.puml>` and ONLY use macros: Person, System, System_Ext, Rel.
-       - For CONTAINER: You MUST start with `!include <C4/C4_Container.puml>` and use macros: Person, System, System_Ext, Container, ContainerDb, Rel.
-    3. SYNTAX STRICTNESS:
-       - Do NOT use standard PlantUML keywords like `actor`, `rectangle`, `database`, or `package`.
-       - Only use the C4 specific macros listed above.
-       - Every macro must have the correct number of arguments (e.g., Rel(from, to, "label", "tech")).
-       - Ensure all strings are enclosed in double quotes " ".
-    4. CLEANLINESS:
-       - Do NOT output markdown code blocks (```). Output the raw code only.
-       - Do NOT output introductory text like "Here is the code".
+    CRITICAL: You MUST populate the body of the diagram. Do not output only headers/footers.
 
-    Output the final PlantUML code.
+    RULES:
+    1. Library Selection:
+       - If the diagram shows high-level concepts (User -> System), use: !include <C4/C4_Context.puml>
+       - If the diagram shows internal components (Web App, Database), use: !include <C4/C4_Container.puml>
+    2. Element Extraction:
+       - Identify EVERY box in the image.
+       - If you cannot read the text clearly on a box, assign it a generic name like "System_A", "Component_B", or "Database_1".
+       - You MUST NOT skip any visible element.
+    3. Relationship Extraction:
+       - Identify EVERY arrow connecting the boxes.
+       - Use the Rel macro: Rel(Source, Target, "Label", "Tech").
+       - If the label is unreadable, use "Uses" or "Interacts".
+    4. Syntax:
+       - Use standard C4 macros: Person, System, System_Ext, Container, ContainerDb, Rel.
+       - Do NOT use standard PlantUML shapes (rectangle, actor).
+
+    Output:
+    Output the complete PlantUML code starting with @startuml and ending with @enduml. Ensure there is code between the start and end tags.
     """
 
     base64_image = encode_image(image_path)
 
     try:
-        print(f"Analyzing {image_path}...")
+        print(f"Generating code for {image_path}...")
         
         response = client.chat.completions.create(
-            model="gpt-4o", 
+            model="gpt-4o",
             messages=[
-                {
-                    "role": "system",
-                    "content": system_prompt
-                },
+                {"role": "system", "content": system_prompt},
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Convert this C4 diagram to code."},
+                        {"type": "text", "text": "Analyze this C4 diagram and write the full PlantUML code."},
                         {
                             "type": "image_url",
                             "image_url": {
@@ -78,28 +71,31 @@ def convert_c4_image_to_plantuml(image_path, output_path="output.puml"):
                     ]
                 }
             ],
-            temperature=0.1
+            temperature=0.1,
+            # Explicitly setting max_tokens to ensure it has space to write the definitions
+            max_tokens=2048 
         )
 
         raw_code = response.choices[0].message.content
-        clean_code = clean_plantuml_output(raw_code)
+        final_code = clean_output(raw_code)
 
-        # Save cleaned code
+        # Save the file
         with open(output_path, "w") as f:
-            f.write(clean_code)
-        
-        print(f"Success! Cleaned code saved to {output_path}")
-        
-        # Basic validation check
-        if "!include" not in clean_code:
-            print("WARNING: The generated code might be missing the library include.")
+            f.write(final_code)
             
-        return clean_code
+        # Validation Check
+        # We check if the file is suspiciously short (less than 150 chars usually means just headers)
+        if len(final_code) < 150:
+            print("WARNING: The generated code is very short. The model might have missed the content.")
+            print("Generated content:", final_code)
+        else:
+            print(f"Success! Code saved to {output_path}")
+
+        return final_code
 
     except Exception as e:
-        print(f"An error occurred: {e}")
+        print(f"Error: {e}")
         return None
 
-# Run it
 if __name__ == "__main__":
-    convert_c4_image_to_plantuml("c4_diagram.png")
+    generate_c4_code("c4_diagram.png")

@@ -2,16 +2,39 @@ import base64
 import os
 import re
 from openai import OpenAI
+from PIL import Image
+import io
 
 # Initialize client
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-def encode_image(image_path):
-    with open(image_path, "rb") as image_file:
-        return base64.b64encode(image_file.read()).decode('utf-8')
+def resize_image_for_ocr(image_path, max_width=1536):
+    """
+    Resizes the image to optimize it for GPT-4o's Vision capabilities.
+    Images that are too large often result in poor OCR.
+    """
+    try:
+        img = Image.open(image_path)
+        if img.width > max_width:
+            ratio = max_width / img.width
+            new_height = int(img.height * ratio)
+            img = img.resize((max_width, new_height), Image.LANCZOS)
+            
+            # Save to a byte buffer to return base64 directly without saving file
+            buffered = io.BytesIO()
+            img_format = img.format if img.format else 'PNG'
+            img.save(buffered, format=img_format)
+            return base64.b64encode(buffered.getvalue()).decode('utf-8'), img_format.lower()
+        else:
+            # If no resize needed, read normally
+            with open(image_path, "rb") as image_file:
+                return base64.b64encode(image_file.read()).decode('utf-8'), 'png'
+    except Exception as e:
+        print(f"Error processing image: {e}")
+        return None, None
 
 def clean_output(text):
-    # Remove markdown blocks if present
+    # Remove markdown blocks
     text = re.sub(r'```(plantuml)?', '', text)
     # Remove text before the first !include or @startuml
     match = re.search(r'(!include|@startuml)', text)
@@ -21,37 +44,33 @@ def clean_output(text):
 
 def generate_c4_code(image_path, output_path="output.puml"):
     
-    # The Force-Content Prompt
+    # This prompt forces the AI to perform OCR first (Step 1) before coding (Step 2)
     system_prompt = """
-    You are an expert Software Architect and PlantUML generator.
-    Task: Convert the C4 architecture image into fully populated PlantUML code.
+    You are an expert at reading diagrams and converting them to code.
+    
+    Task: Convert the C4 diagram image to PlantUML.
 
-    CRITICAL: You MUST populate the body of the diagram. Do not output only headers/footers.
+    Process:
+    1. EXTRACT: Look at the image and extract ALL text labels from every box and arrow. 
+       - If a box has no text, label it "Unknown_Box".
+       - If an arrow has no text, label it "uses".
+    2. MAP: Decide if it is Context or Container level.
+       - Context: Use !include <C4/C4_Context.puml> and macros (Person, System, System_Ext).
+       - Container: Use !include <C4/C4_Container.puml> and macros (Person, System, Container, ContainerDb).
+    3. CODE: Write the PlantUML code using the extracted labels.
 
-    RULES:
-    1. Library Selection:
-       - If the diagram shows high-level concepts (User -> System), use: !include <C4/C4_Context.puml>
-       - If the diagram shows internal components (Web App, Database), use: !include <C4/C4_Container.puml>
-    2. Element Extraction:
-       - Identify EVERY box in the image.
-       - If you cannot read the text clearly on a box, assign it a generic name like "System_A", "Component_B", or "Database_1".
-       - You MUST NOT skip any visible element.
-    3. Relationship Extraction:
-       - Identify EVERY arrow connecting the boxes.
-       - Use the Rel macro: Rel(Source, Target, "Label", "Tech").
-       - If the label is unreadable, use "Uses" or "Interacts".
-    4. Syntax:
-       - Use standard C4 macros: Person, System, System_Ext, Container, ContainerDb, Rel.
-       - Do NOT use standard PlantUML shapes (rectangle, actor).
-
-    Output:
-    Output the complete PlantUML code starting with @startuml and ending with @enduml. Ensure there is code between the start and end tags.
+    CRITICAL: You must output code for EVERY visible box. Do not leave the body empty.
     """
 
-    base64_image = encode_image(image_path)
+    # 1. Resize image for better OCR performance
+    base64_image, img_format = resize_image_for_ocr(image_path)
+    
+    if not base64_image:
+        print("Failed to process image.")
+        return
 
     try:
-        print(f"Generating code for {image_path}...")
+        print(f"Processing image (optimized for Vision AI)...")
         
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -60,42 +79,48 @@ def generate_c4_code(image_path, output_path="output.puml"):
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Analyze this C4 diagram and write the full PlantUML code."},
+                        {
+                            "type": "text", 
+                            "text": "Read all text in this image and generate the PlantUML code. Do not skip any elements."
+                        },
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": f"data:image/png;base64,{base64_image}",
+                                "url": f"data:image/{img_format};base64,{base64_image}",
                                 "detail": "high"
                             }
                         }
                     ]
                 }
             ],
-            temperature=0.1,
-            # Explicitly setting max_tokens to ensure it has space to write the definitions
-            max_tokens=2048 
+            temperature=0.0, # Zero temperature for strict adherence
+            max_tokens=4096  # Ensure enough space for code
         )
 
         raw_code = response.choices[0].message.content
         final_code = clean_output(raw_code)
 
-        # Save the file
-        with open(output_path, "w") as f:
-            f.write(final_code)
-            
-        # Validation Check
-        # We check if the file is suspiciously short (less than 150 chars usually means just headers)
-        if len(final_code) < 150:
-            print("WARNING: The generated code is very short. The model might have missed the content.")
-            print("Generated content:", final_code)
+        # VALIDATION CHECK
+        # If the code is super short, the AI likely failed OCR
+        if len(final_code) < 200:
+            print("\n" + "="*50)
+            print("WARNING: The generated code is too short.")
+            print("The AI likely failed to read the text from the image.")
+            print("Here is what the AI returned (Raw):")
+            print(raw_code)
+            print("="*50 + "\n")
         else:
             print(f"Success! Code saved to {output_path}")
+
+        with open(output_path, "w") as f:
+            f.write(final_code)
 
         return final_code
 
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"An error occurred: {e}")
         return None
 
 if __name__ == "__main__":
+    # Ensure you have a file named c4_diagram.png in the same folder
     generate_c4_code("c4_diagram.png")

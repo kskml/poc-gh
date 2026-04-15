@@ -4,21 +4,16 @@ from openai import OpenAI
 from PIL import Image
 import io
 
-# Initialize the OpenAI client (make sure OPENAI_API_KEY is set in your environment variables)
+# Initialize the OpenAI client
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 def encode_image(image_path):
-    """
-    Loads an image and encodes it into base64 format required by the OpenAI API.
-    """
+    """Loads an image and encodes it into base64 format."""
     try:
-        # Open image to ensure it exists and is valid, also compressing if necessary
         with Image.open(image_path) as img:
-            # Convert to RGB if RGBA (to avoid PNG transparency issues in some viewers)
             if img.mode == 'RGBA':
                 img = img.convert('RGB')
             
-            # Resize if too large to save tokens (OpenAI limit is usually 20MB, but smaller is faster)
             max_size = (1024, 1024)
             img.thumbnail(max_size)
 
@@ -31,39 +26,44 @@ def encode_image(image_path):
 
 def generate_plantuml_from_image(image_path):
     """
-    Sends the image to GPT-4o with the system prompt and returns the PlantUML code.
+    Sends the image to GPT-4o with a FIXED system prompt to handle C4 libraries correctly.
     """
     base64_image = encode_image(image_path)
     if not base64_image:
         return None
 
-    # The System Prompt defined in the previous section
+    # --- UPDATED SYSTEM PROMPT ---
     system_prompt = """
     You are an expert Software Architect and a PlantUML generator. Your goal is to analyze the uploaded architecture image and convert it into valid, error-free PlantUML code.
 
     Follow these rules strictly:
     1. Identify the diagram type:
        - If it is a Sequence Diagram, use 'participant', '->', 'activate', 'deactivate'.
-       - If it is a C4 Model (Context or Container), use '!include C4_Context.puml' or '!include C4_Container.puml', 'System', 'Person', 'Rel'.
+       - If it is a C4 Model (Context or Container), use the REMOTE PUBLIC URL includes. 
+         DO NOT use local includes (e.g., '!include C4_Container.puml') because the user does not have these files.
+         
+         USE THESE URLS INSTEAD:
+         - Context: '!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Context.puml'
+         - Container: '!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml'
+         
        - If it is a generic Architecture/Deployment diagram, use standard rectangles, nodes, and cloud components.
 
     2. Visual Estimation:
-       - Since text inside the image might be blurry or small, infer the logical names of components based on their position and context.
-       - Preserve the spatial hierarchy: if Box A is inside Box B, nest them in the PlantUML code.
+       - Infer logical names if text is blurry (e.g., "Database", "Auth Service", "Client App").
+       - Preserve spatial hierarchy.
 
     3. Output Format:
        - Provide ONLY the raw PlantUML code starting with @startuml and ending with @enduml.
        - Do NOT provide markdown formatting (like ```plantuml).
-       - Do NOT include introductory text or explanations. Just the code.
+       - Do NOT include introductory text.
 
     4. Syntax Validity:
-       - Ensure all relationships have valid arrow syntax.
-       - Ensure all labels are closed properly.
+       - Ensure all arrows and labels are valid.
     """
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o", # GPT-4o is recommended for best vision capabilities
+            model="gpt-4o",
             messages=[
                 {
                     "role": "system",
@@ -80,19 +80,19 @@ def generate_plantuml_from_image(image_path):
                             "type": "image_url",
                             "image_url": {
                                 "url": f"data:image/png;base64,{base64_image}",
-                                "detail": "high" # Use "high" for OCR and diagram details
+                                "detail": "high"
                             }
                         }
                     ]
                 }
             ],
-            temperature=0.2, # Low temperature for deterministic code generation
+            temperature=0.2,
             max_tokens=2000
         )
 
         content = response.choices[0].message.content
         
-        # Cleanup: Remove markdown code blocks if the model ignored instructions
+        # Cleanup: Remove markdown code blocks if present
         if "```plantuml" in content:
             content = content.replace("```plantuml", "").replace("```", "")
         
@@ -108,7 +108,6 @@ def save_plantuml_file(plantuml_code, output_filename="diagram.puml"):
     print(f"Successfully saved PlantUML code to {output_filename}")
 
 if __name__ == "__main__":
-    # Update this path to your image file
     input_image = "architecture.png"
     
     if os.path.exists(input_image):
@@ -122,4 +121,4 @@ if __name__ == "__main__":
         else:
             print("Failed to generate code.")
     else:
-        print(f"File {input_image} not found. Please place a png file in the directory.")
+        print(f"File {input_image} not found.")

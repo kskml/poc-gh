@@ -1,0 +1,29 @@
+write a java method to validate a password
+
+What to say about it: "Unreadable regex. Silent failure on nulls. Terrible user experience because it doesn't tell you why it failed."
+============
+
+write a java method to validate a password. Must have 8 chars, 1 uppercase, 1 lowercase, 1 number, 1 special character.
+
+What to say about it: "Better! It got rid of the regex. But the AI still defaulted to returning a boolean. Why? Because in coding tutorials, validators return booleans. But in enterprise software, we need to tell the user what to fix."
+===================
+
+You are a senior Java developer. We are validating user passwords for a web application.
+
+TASK: Write a Java method to validate a password according to our security rules.
+
+CONSTRAINTS:
+- Rules: Minimum 8 characters, at least 1 uppercase, 1 lowercase, 1 digit, 1 special character.
+- DO NOT use a single massive Regex. Use a loop with Character class methods for readability.
+- DO NOT return a boolean. If validation fails, throw a custom `InvalidPasswordException` with a message listing ALL the rules the user failed to meet (e.g., "Password must contain at least one digit").
+- Handle null inputs by throwing an IllegalArgumentException.
+
+FORMAT: 
+Provide the PasswordValidator class and the custom InvalidPasswordException class. Use Java 17.
+
+What to say about it:
+
+"Look at the errors List. The AI understood that we want to collect all errors, not just fail on the first one. That is brilliant UX."
+"Look at the exception message. It will literally say: 'Password must contain at least one digit, contain at least one special character.'"
+"It handled the null upfront."
+"This is code you can confidently push to production with zero manual edits."

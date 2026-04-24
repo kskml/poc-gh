@@ -1,0 +1,572 @@
+#!/usr/bin/env python3
+"""
+Markdown to PDF Converter with LOCAL PlantUML Support
+Self-healing: Auto-detects and reports missing dependencies
+GitHub Actions ready
+"""
+
+import re
+import sys
+import base64
+import subprocess
+import shutil
+from pathlib import Path
+from typing import Optional, Tuple
+
+
+# =============================================================================
+# Dependency Checker
+# =============================================================================
+
+class DependencyChecker:
+    """Checks and reports missing dependencies"""
+    
+    REQUIRED = {
+        'python_packages': ['markdown', 'weasyprint', 'plantuml'],
+        'system_commands': ['java'],
+        'optional_commands': ['dot'],  # Graphviz
+    }
+    
+    def __init__(self):
+        self.missing_python = []
+        self.missing_system = []
+        self.missing_optional = []
+        self.all_ok = True
+    
+    def check_all(self) -> bool:
+        """Run all dependency checks"""
+        self._check_python_packages()
+        self._check_system_commands()
+        self._report()
+        return self.all_ok
+    
+    def _check_python_packages(self):
+        """Check Python package imports"""
+        for pkg in self.REQUIRED['python_packages']:
+            try:
+                __import__(pkg)
+            except ImportError:
+                self.missing_python.append(pkg)
+                self.all_ok = False
+    
+    def _check_system_commands(self):
+        """Check system command availability"""
+        for cmd in self.REQUIRED['system_commands']:
+            if not shutil.which(cmd):
+                self.missing_system.append(cmd)
+                self.all_ok = False
+        
+        for cmd in self.REQUIRED['optional_commands']:
+            if not shutil.which(cmd):
+                self.missing_optional.append(cmd)
+    
+    def _report(self):
+        """Print dependency status"""
+        print("=" * 60)
+        print("DEPENDENCY CHECK")
+        print("=" * 60)
+        
+        if self.missing_python:
+            print("\n❌ Missing Python packages:")
+            for pkg in self.missing_python:
+                print(f"   - {pkg}")
+            print(f"\n   Fix: pip install {' '.join(self.missing_python)}")
+        
+        if self.missing_system:
+            print("\n❌ Missing system dependencies:")
+            for cmd in self.missing_system:
+                print(f"   - {cmd}")
+            if 'java' in self.missing_system:
+                print("\n   For GitHub Actions, add this step:")
+                print("   - uses: actions/setup-java@v4")
+                print("     with:")
+                print("       distribution: 'temurin'")
+                print("       java-version: '17'")
+                print("\n   For local install:")
+                print("   - Ubuntu: sudo apt install default-jre")
+                print("   - macOS: brew install openjdk")
+        
+        if self.missing_optional:
+            print("\n⚠️  Missing optional (for better diagrams):")
+            for cmd in self.missing_optional:
+                print(f"   - {cmd}")
+            if 'dot' in self.missing_optional:
+                print("\n   Fix: sudo apt install graphviz")
+        
+        if self.all_ok:
+            print("\n✓ All dependencies satisfied")
+            if self.missing_optional:
+                print("  (Some optional dependencies missing)")
+        
+        print("=" * 60)
+
+
+def check_dependencies() -> bool:
+    """Global dependency check"""
+    checker = DependencyChecker()
+    return checker.check_all()
+
+
+# =============================================================================
+# PlantUML Handler (Local Only)
+# =============================================================================
+
+class LocalPlantUMLRenderer:
+    """Renders PlantUML locally using Java - no network calls"""
+    
+    def __init__(self):
+        self.plantuml_jar = self._get_plantuml_jar()
+        self._java_available = shutil.which('java') is not None
+    
+    def _get_plantuml_jar(self) -> Path:
+        """Get or download plantuml.jar"""
+        from plantuml import PlantUML as PlantUMLClass
+        
+        # The plantuml package stores jar in its own location
+        # Let's find it or trigger download
+        try:
+            p = PlantUMLClass()
+            # Access internal jar path
+            if hasattr(p, 'jar_path') and p.jar_path:
+                return Path(p.jar_path)
+        except:
+            pass
+        
+        # Fallback: download manually
+        jar_path = Path.home() / '.local' / 'share' / 'plantuml' / 'plantuml.jar'
+        if not jar_path.exists():
+            jar_path.parent.mkdir(parents=True, exist_ok=True)
+            self._download_plantuml_jar(jar_path)
+        
+        return jar_path
+    
+    def _download_plantuml_jar(self, jar_path: Path):
+        """Download plantuml.jar from official source"""
+        import urllib.request
+        
+        url = "https://github.com/plantuml/plantuml/releases/download/v1.2024.3/plantuml-1.2024.3.jar"
+        print(f"Downloading plantuml.jar...")
+        
+        try:
+            urllib.request.urlretrieve(url, jar_path)
+            print(f"✓ Downloaded to {jar_path}")
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to download plantuml.jar: {e}\n"
+                f"Please download manually from: {url}"
+            )
+    
+    def render_to_base64(self, plantuml_code: str, format: str = 'png') -> str:
+        """Render PlantUML to base64 image (local only)"""
+        if not self._java_available:
+            raise RuntimeError(
+                "Java not found. PlantUML requires Java runtime.\n"
+                "Install with: sudo apt install default-jre"
+            )
+        
+        # Clean code
+        code = self._clean_plantuml_code(plantuml_code)
+        
+        # Create temp files
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_file = Path(tmpdir) / "input.puml"
+            output_file = Path(tmpdir) / f"output.{format}"
+            
+            # Write input
+            input_file.write_text(code, encoding='utf-8')
+            
+            # Run PlantUML locally
+            cmd = [
+                'java',
+                '-jar', str(self.plantuml_jar),
+                '-t' + format,
+                '-o', str(output_file.parent),
+                str(input_file)
+            ]
+            
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=60
+                )
+                
+                if result.returncode != 0:
+                    raise RuntimeError(f"PlantUML error: {result.stderr}")
+                
+                # Read output
+                actual_output = output_file.parent / f"input.{format}"
+                if not actual_output.exists():
+                    raise RuntimeError("PlantUML did not generate output")
+                
+                with open(actual_output, 'rb') as f:
+                    image_data = f.read()
+                
+            except subprocess.TimeoutExpired:
+                raise RuntimeError("PlantUML rendering timed out")
+        
+        # Encode to base64
+        mime_type = 'image/png' if format == 'png' else 'image/svg+xml'
+        base64_str = base64.b64encode(image_data).decode('utf-8')
+        return f"data:{mime_type};base64,{base64_str}"
+    
+    def _clean_plantuml_code(self, code: str) -> str:
+        """Clean and normalize PlantUML code"""
+        code = code.strip()
+        code = re.sub(r'@startuml\s*', '', code, flags=re.IGNORECASE)
+        code = re.sub(r'@enduml\s*$', '', code, flags=re.IGNORECASE)
+        return f"@startuml\n{code.strip()}\n@enduml"
+
+
+# =============================================================================
+# PDF Styling
+# =============================================================================
+
+PDF_CSS = """
+@page {
+    size: A4;
+    margin: 2cm;
+    @bottom-center {
+        content: counter(page);
+        font-size: 10pt;
+        color: #666;
+    }
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 11pt;
+    line-height: 1.6;
+    color: #333;
+}
+
+h1 {
+    color: #1a1a2e;
+    border-bottom: 3px solid #3498db;
+    padding-bottom: 10px;
+    font-size: 24pt;
+    margin-top: 0;
+    page-break-after: avoid;
+}
+
+h2 {
+    color: #16213e;
+    border-bottom: 1px solid #ddd;
+    padding-bottom: 8px;
+    font-size: 18pt;
+    margin-top: 30px;
+    page-break-after: avoid;
+}
+
+h3 {
+    color: #0f3460;
+    font-size: 14pt;
+    margin-top: 25px;
+    page-break-after: avoid;
+}
+
+p {
+    text-align: justify;
+    margin-bottom: 12px;
+}
+
+table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 20px 0;
+    font-size: 10pt;
+}
+
+tr { page-break-inside: avoid; }
+thead { display: table-header-group; }
+
+th {
+    background-color: #2c3e50;
+    color: white;
+    font-weight: 600;
+    padding: 12px 10px;
+    text-align: left;
+}
+
+td {
+    padding: 10px;
+    border: 1px solid #ddd;
+}
+
+tr:nth-child(even) { background-color: #f8f9fa; }
+
+pre {
+    background-color: #282c34;
+    color: #abb2bf;
+    border-radius: 6px;
+    padding: 16px;
+    overflow-x: auto;
+    font-size: 9pt;
+    font-family: 'Fira Code', 'Consolas', monospace;
+    page-break-inside: avoid;
+}
+
+code {
+    background-color: #f0f0f0;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 9pt;
+}
+
+pre code {
+    background-color: transparent;
+    color: inherit;
+    padding: 0;
+}
+
+blockquote {
+    border-left: 4px solid #3498db;
+    margin: 20px 0;
+    padding: 15px 20px;
+    background-color: #f8f9fa;
+    color: #555;
+}
+
+ul, ol { margin-bottom: 15px; padding-left: 25px; }
+li { margin-bottom: 6px; }
+
+.plantuml-container {
+    text-align: center;
+    margin: 25px 0;
+    page-break-inside: avoid;
+}
+
+.plantuml-container img {
+    max-width: 100%;
+    height: auto;
+    border-radius: 4px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+}
+
+img {
+    max-width: 100%;
+    height: auto;
+}
+
+hr {
+    border: none;
+    border-top: 1px solid #ddd;
+    margin: 30px 0;
+}
+
+a { color: #3498db; text-decoration: none; }
+strong { color: #2c3e50; }
+
+.error {
+    background-color: #ffebee;
+    border: 1px solid #ef5350;
+    color: #c62828;
+    padding: 15px;
+    border-radius: 4px;
+    margin: 15px 0;
+}
+
+.warning {
+    background-color: #fff3e0;
+    border: 1px solid #ff9800;
+    color: #e65100;
+    padding: 15px;
+    border-radius: 4px;
+    margin: 15px 0;
+}
+"""
+
+
+# =============================================================================
+# Main Converter
+# =============================================================================
+
+class MarkdownToPDFConverter:
+    """Converts Markdown with PlantUML to PDF (100% local)"""
+    
+    def __init__(self, skip_dependency_check: bool = False):
+        self.skip_check = skip_dependency_check
+        self.image_counter = 0
+        self.plantuml_renderer = None
+        self.plantuml_enabled = False
+        
+        # Check dependencies unless skipped
+        if not skip_dependency_check:
+            self._init_plantuml()
+        
+        self.md_extensions = [
+            'tables',
+            'fenced_code',
+            'codehilite',
+            'toc',
+            'nl2br',
+            'sane_lists',
+        ]
+    
+    def _init_plantuml(self):
+        """Initialize PlantUML renderer if available"""
+        if not shutil.which('java'):
+            print("⚠️  Java not found - PlantUML diagrams will show as code blocks")
+            self.plantuml_enabled = False
+            return
+        
+        try:
+            self.plantuml_renderer = LocalPlantUMLRenderer()
+            self.plantuml_enabled = True
+            print("✓ PlantUML rendering enabled (local)")
+        except Exception as e:
+            print(f"⚠️  PlantUML init failed: {e}")
+            self.plantuml_enabled = False
+    
+    def process_plantuml_blocks(self, text: str) -> str:
+        """Replace PlantUML blocks with images or fallback"""
+        pattern = r'```(?:plantuml|puml)\s*\n(.*?)```'
+        
+        def replace_block(match):
+            plantuml_code = match.group(1)
+            self.image_counter += 1
+            
+            if not self.plantuml_enabled:
+                # Fallback: show as styled code block with warning
+                return (
+                    f'<div class="warning">'
+                    f'<strong>⚠️ PlantUML Diagram {self.image_counter}</strong><br>'
+                    f'<small>Java not available - showing raw code</small>'
+                    f'</div>'
+                    f'<pre><code>{self._escape_html(plantuml_code)}</code></pre>'
+                )
+            
+            try:
+                base64_img = self.plantuml_renderer.render_to_base64(plantuml_code)
+                return (
+                    f'<div class="plantuml-container">'
+                    f'<img src="{base64_img}" alt="PlantUML Diagram {self.image_counter}"/>'
+                    f'</div>'
+                )
+            except Exception as e:
+                return (
+                    f'<div class="error">'
+                    f'<strong>PlantUML Error (Diagram {self.image_counter}):</strong><br>'
+                    f'{self._escape_html(str(e))}'
+                    f'</div>'
+                    f'<pre><code>{self._escape_html(plantuml_code)}</code></pre>'
+                )
+        
+        return re.sub(pattern, replace_block, text, flags=re.DOTALL)
+    
+    def _escape_html(self, text: str) -> str:
+        """Escape HTML special characters"""
+        return (text
+                .replace('&', '&amp;')
+                .replace('<', '&lt;')
+                .replace('>', '&gt;')
+                .replace('"', '&quot;'))
+    
+    def markdown_to_html(self, markdown_text: str) -> str:
+        """Convert Markdown to HTML"""
+        processed = self.process_plantuml_blocks(markdown_text)
+        html_body = markdown.markdown(processed, extensions=self.md_extensions)
+        
+        return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+    {html_body}
+</body>
+</html>"""
+    
+    def convert_string(self, markdown_text: str, output_path: str = None) -> bytes:
+        """Convert Markdown string to PDF"""
+        from weasyprint import HTML, CSS
+        
+        html_content = self.markdown_to_html(markdown_text)
+        html = HTML(string=html_content)
+        css = CSS(string=PDF_CSS)
+        pdf_bytes = html.write_pdf(stylesheets=[css])
+        
+        if output_path:
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(output_path, 'wb') as f:
+                f.write(pdf_bytes)
+            print(f"✓ PDF saved: {output_path}")
+        
+        return pdf_bytes
+    
+    def convert_file(self, input_path: str, output_path: str = None) -> bytes:
+        """Convert Markdown file to PDF"""
+        input_file = Path(input_path)
+        
+        if not input_file.exists():
+            raise FileNotFoundError(f"Input not found: {input_path}")
+        
+        if output_path is None:
+            output_path = str(input_file.with_suffix('.pdf'))
+        
+        print(f" Converting: {input_path}")
+        
+        with open(input_file, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        return self.convert_string(content, output_path)
+
+
+# =============================================================================
+# CLI
+# =============================================================================
+
+def main():
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description='Convert Markdown to PDF (local PlantUML, GitHub Actions ready)',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python md2pdf.py report.md
+  python md2pdf.py report.md -o output.pdf
+  python md2pdf.py report.md --check-deps
+
+GitHub Actions: All dependencies auto-installed via workflow
+"""
+    )
+    
+    parser.add_argument('input', nargs='?', help='Input Markdown file')
+    parser.add_argument('-o', '--output', help='Output PDF path')
+    parser.add_argument('--check-deps', action='store_true', help='Check dependencies only')
+    parser.add_argument('--skip-check', action='store_true', help='Skip dependency check')
+    
+    args = parser.parse_args()
+    
+    # Dependency check mode
+    if args.check_deps:
+        check_dependencies()
+        sys.exit(0 if DependencyChecker().all_ok else 1)
+    
+    # Require input file
+    if not args.input:
+        parser.print_help()
+        sys.exit(1)
+    
+    # Run conversion
+    try:
+        converter = MarkdownToPDFConverter(skip_dependency_check=args.skip_check)
+        converter.convert_file(args.input, args.output)
+        print("✓ Done!")
+    except FileNotFoundError as e:
+        print(f"✗ {e}")
+        sys.exit(1)
+    except ImportError as e:
+        print(f"✗ Missing package: {e}")
+        print("  Fix: pip install -r requirements.txt")
+        sys.exit(1)
+    except Exception as e:
+        print(f"✗ Error: {e}")
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()

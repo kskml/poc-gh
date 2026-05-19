@@ -1,0 +1,93 @@
+mkdir litellm-copilot
+cd litellm-copilot
+
+services:
+  litellm:
+    image: docker.litellm.ai/berriai/litellm:main-latest
+    container_name: litellm-proxy
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./config.yaml:/app/config.yaml
+    command: >
+      --config /app/config.yaml
+      --port 4000
+    environment:
+      DATABASE_URL: "postgresql://llmproxy:dbpassword9090@db:5432/litellm"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16
+    container_name: litellm-db
+    environment:
+      POSTGRES_DB: litellm
+      POSTGRES_USER: llmproxy
+      POSTGRES_PASSWORD: dbpassword9090
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d litellm -U llmproxy"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:
+
+model_list:
+  - model_name: github_copilot/gpt-4
+    litellm_params:
+      model: github_copilot/gpt-4
+
+  - model_name: github_copilot/gpt-4o
+    litellm_params:
+      model: github_copilot/gpt-4o
+
+  - model_name: github_copilot/text-embedding-ada-002
+    model_info:
+      mode: embedding
+    litellm_params:
+      model: github_copilot/text-embedding-ada-002
+
+general_settings:
+  master_key: sk-local-dev-master-key   # change this to a strong key
+  database_url: "postgresql://llmproxy:dbpassword9090@db:5432/litellm"
+
+
+
+curl -X POST http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer sk-local-dev-master-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "github_copilot/gpt-4",
+    "messages": [{"role": "user", "content": "hello"}]
+  }'
+
+
+
+curl -X POST http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer sk-local-dev-master-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "github_copilot/gpt-4",
+    "messages": [{"role": "user", "content": "Write a Java main class that prints Hello World"}]
+  }'
+
+
+
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:4000/v1",
+    api_key="sk-local-dev-master-key",   # proxy master key, not a GitHub key
+)
+
+resp = client.chat.completions.create(
+    model="github_copilot/gpt-4",
+    messages=[{"role": "user", "content": "Explain this Java code: ..."}],
+)
+print(resp.choices[0].message.content)

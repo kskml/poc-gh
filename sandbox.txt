@@ -1,3 +1,18 @@
+You are an expert software architect and devops engineer.
+preapare a container based sandbox where following tools should be available:
+
+opencode
+Git
+IDE, lightweight like VSCode
+restricted bash
+whitelisted : weburls, commands
+possibility to login to the container via podman
+
+First explain the concept and its benefit with mermaid diagram.
+then explain the structure and simpler implementation part with podman
+
+setup is with mac OS
+
 Structure & Simpler Implementation
 
 To make this easy to maintain, we strip away the over-engineering (no iptables, no SSH, no complex entrypoints) and rely on Podman's native isolation plus rbash and Squid. 
@@ -12,8 +27,14 @@ sandbox/
 1. Containerfile (Simplified)
 
 We use a single stage. We install packages, create the user, set up the restricted bin directory, and drop in the configs.
-dockerfile
+# Syntax uses cross-platform support
 FROM ubuntu:22.04
+
+# Target architecture is automatically injected by Podman (amd64 or arm64)
+ARG TARGETARCH
+# Pass the correct opencode URL at build time. 
+# (Replace the URL below with the actual release URL from the opencode repo)
+ARG OPENCODE_URL="https://github.com/YOUR_ORG/opencode/releases/latest/download/opencode-linux-${TARGETARCH}"
 
 # 1. Install all required OS packages + code-server
 RUN apt-get update && apt-get install -y \
@@ -22,9 +43,10 @@ RUN apt-get update && apt-get install -y \
     && curl -fsSL https://code-server.dev/install.sh | sh \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. Install opencode (adjust URL to the actual binary release)
-RUN curl -fsSL "https://github.com/sst/opencode/releases/latest/download/opencode-linux-amd64" \
-         -o /usr/local/bin/opencode && chmod +x /usr/local/bin/opencode
+# 2. Install opencode using the dynamic URL
+RUN echo "Downloading opencode from: ${OPENCODE_URL}" && \
+    curl -fsSL "${OPENCODE_URL}" -o /usr/local/bin/opencode && \
+    chmod +x /usr/local/bin/opencode
 
 # 3. Create sandbox user with rbash as the default shell
 RUN useradd -m -s /bin/rbash sandbox
@@ -38,7 +60,6 @@ RUN while read cmd; do \
             ln -s "$(command -v "$cmd")" "/opt/sandbox/bin/$cmd"; \
         fi; \
     done < /tmp/allowed-commands.list && \
-    # Explicitly link opencode since it's in /usr/local/bin
     ln -s /usr/local/bin/opencode /opt/sandbox/bin/opencode && \
     chown -R root:root /opt/sandbox/bin
 
@@ -51,7 +72,7 @@ COPY allowed-urls.list /etc/squid/allowed-urls.list
 COPY squid.conf /etc/squid/squid.conf
 RUN mkdir -p /var/spool/squid && squid -z
 
-# 7. Configure Supervisor (to run Squisk & Code-Server)
+# 7. Configure Supervisor
 COPY supervisord.conf /etc/supervisord.conf
 
 # 8. Setup Workspace

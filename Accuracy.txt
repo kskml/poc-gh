@@ -1,157 +1,27 @@
-You are an expert AI prompt engineer and AI python application developer 
-I have built an application which identifies architecture gaps in a architecture doc confluence page against the code base summary. It identifies architecture gaps and provides corrective actions as well. If the confluence section has diagram and if it needs update, it generates the updated diagram as well.
-As it's a big document, so splitting it in sections and calling LLM for each section along with code summary. 
-This is in an iteration and then
-Accumulating all the responses and generating a markdown report.
-It's working but observed few issues:
-1. The updated diagram has most of the time syntax issue or illegal character issue.
-2. Accuracy is the main concern.
-3. Generated diagram text is overlapped 
+IDE & Environment Management Examples
+Example: The .copilotignore file
+Create a .copilotignore file in your root directory. This stops Copilot from spending tokens reading files that don't help it write logic.
 
-Suggest or provide ideas or approaches to handle above issue. Thinking of using a second model as critic which verify or fix the generated response.
+# .copilotignore
 
-List good ideas and suggest the best one for above issues 
+# Lockfiles are massive and contain no useful logic
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
 
-Also if any blog or link for Llm response accuracy improvement, provide link as well
+# Minified files are token sinks
+*.min.js
+*.min.css
 
+# Generated code / Build outputs
+dist/
+build/
+node_modules/
 
-GLM-5.1
-
-You are an expert AI prompt engineer and AI python application developer 
-I have built an application which identifies architecture gaps in a architecture doc confluence page against the code base summary. It identifies architecture gaps and provides corrective actions as well. If the confluence section has diagram and if it needs update, it generates the updated diagram as well.
-As it's a big document, so splitting it in sections and calling LLM for each section along with code summary. 
-This is in an iteration and then
-Accumulating all the responses and generating a markdown report.
-It's working but observed few issues:
-1. The updated diagram has most of the time syntax issue or illegal character issue.
-2. Accuracy is the main concern.
-3. Generated diagram text is overlapped 
-
-Suggest or provide ideas or approaches to handle above issue. Thinking of using a second model as critic which verify or fix the generated response.
-
-List good ideas and suggest the best one for above issues 
-
-Also if any blog or link for Llm response accuracy improvement, provide link as well 
-
-Thought Process
+# Large data files
+*.csv
+*.json.backup
 
 
 
 
-
-
-
-
-
-Based on your detailed description and the search results, I'll analyze your three core issues and propose a structured solution. The key is to address each problem with a combination of prompt engineering, architectural patterns, and validation loops.
-
-🔍 Problem Analysis & Root Causes
-Your issues stem from the inherent challenges of LLMs in generating structured, precise, and visually accurate output from complex context.
-
-Syntax Error
-
-Inaccuracy
-
-Overlap
-
-Input: Section + Code Summary
-
-LLM Generation
-
-Output Validation
-
-Diagram Fixer
-
-Accuracy Critic
-
-Layout Refiner
-
-Validated Diagram
-
-Final Report
-
-💡 Ideas & Approaches for Each Issue
-1. Diagram Syntax & Illegal Character Issues
-Root Cause: LLMs often generate Mermaid syntax with small errors (missing brackets, illegal characters, incorrect subgraph definitions) that are valid in natural language but invalid in code 
-community.lucid
- .
-
-Ideas:
-
-Dedicated Syntax Repair Prompt: Create a second prompt specifically for fixing Mermaid syntax. Pass the generated diagram through this "repair" step before rendering.
-Syntax Validation Library: Integrate a Python library like pymermaid or mermaid-py to parse and validate the generated Mermaid code. On failure, feed the error message back to the LLM for correction.
-Constrained Decoding: Use a grammar-based decoding approach (if your framework supports it) to force the LLM to only output valid Mermaid tokens.
-2. Architecture Gap & Corrective Action Accuracy
-Root Cause: LLMs can hallucinate or miss gaps, especially when processing long documents in sections. They may also lack the "ground truth" of the full codebase context 
-reddit
-+1
- .
-
-Ideas:
-
-Multi-Agent Critic System: Implement a "Critic" agent whose sole job is to review the initial LLM's output for logical consistency, completeness, and accuracy against the provided code summary 
-k2view
-+1
- .
-RAG-Augmented Generation: Instead of (or in addition to) splitting the document, use Retrieval-Augmented Generation (RAG). Embed the entire architecture document and codebase summary, and retrieve the most relevant chunks for each section to provide richer, more accurate context 
-itrexgroup
- .
-Chain-of-Verification (CoVe): Prompt the LLM to first generate its response, then immediately verify it step-by-step. "List the identified gaps. Now, for each gap, verify it exists in the code summary provided."
-3. Diagram Text Overlap & Layout Issues
-Root Cause: LLMs struggle with spatial reasoning and generating layout instructions that prevent overlap, especially in complex diagrams with many nodes 
-reddit
-+1
- .
-
-Ideas:
-
-Separate Generation & Layout: Use a two-stage process:
-LLM generates diagram content (nodes, edges, labels) in a simple JSON/YAML format.
-A deterministic layout engine (like dagre, elkjs, or even Mermaid's built-in layout) arranges the elements without overlap. You can then convert this layout back to Mermaid syntax.
-Explicit Layout Constraints in Prompt: Add explicit instructions to your prompt: "Ensure no text labels overlap. Use direction TB for top-to-bottom flow. Use linkStyle to space arrows. If necessary, use subgraph to group related nodes and reduce clutter."
-Post-Processing Overlap Detection: Write a simple script to detect bounding box overlaps in the rendered diagram (using a headless browser or image analysis). If detected, flag it for a second LLM pass focused only on layout adjustment.
-🏆 Recommended Best Approach: Hybrid Multi-Agent System with Validation Loops
-The most effective solution combines multiple ideas into a robust pipeline. Simply adding a "critic" model is not enough, as research shows LLMs struggle to reliably self-correct reasoning without external feedback 
-arxiv
-+1
- .
-
-Invalid
-
-Inaccurate
-
-Overlap
-
-Section & Code Summary
-
-Generator LLM
-
-Initial Draft
-
-Validation Layer
-
-Syntax Validator
-pymermaid/mermaid-py
-
-Accuracy Critic LLM
-
-Layout Analyzer
-
-Syntax Repair LLM
-
-Refinement LLM
-
-Layout Adjuster LLM
-
-Validated Draft
-
-Final Diagram & Report
-
-Implementation Steps:
-Generator Agent: Your current LLM call that produces the initial gap analysis and diagram.
-Validation Layer: This is the core addition. Run three checks in parallel or sequence:
-Syntax Validation: Use a Python library to validate the Mermaid code. On failure, pass the diagram and error to a Syntax Repair LLM with a focused prompt ("Fix the syntax errors in this Mermaid code: [error message]").
-Accuracy Critique: Use a second LLM (can be a smaller, cheaper model) as the Critic. Provide it with the original section, code summary, and the Generator's output. Prompt: "Critique this analysis for accuracy and completeness. List any missed gaps or incorrect actions." Feed this critique back to a Refinement LLM to improve the analysis.
-Layout Analysis: Use a simple script to parse the diagram nodes and edges. Run a basic overlap detection algorithm. If issues are found, pass the diagram to a Layout Adjuster LLM with a prompt focused solely on improving spacing and clarity.
-Orchestrator: A simple script that manages this pipeline, handling retries and aggregating the final, validated output.
-This approach directly addresses all three issues with specialized, focused interventions, which is more effective than a single, general-purpose critic model.

@@ -1,217 +1,328 @@
-h1. [System Name] — Software Architecture Document (SWE.2 / arc42)
+{toc}
 
-*Document Control*
-||Field||Value||
-|System / ECU|[System Name]|
-|ASPICE Process|SWE.2 — Software Architectural Design|
-|arc42 Version|9 (4+1 view model)|
-|Status|Draft|
-|Author / Architect|[Name]|
-|Baseline / Commit|[Tag / SHA]|
+h1. 1. Introduction and Goals
 
-----
+*Purpose of this document:* Define the software architecture for the *[POC Name]* proof-of-concept based on the arc42 template.
 
-h2. 1. Introduction and Goals
+h3. 1.1 Requirements Overview
 
-h3. 1.1 Purpose
-[One-paragraph statement: what this architecture defines, which system it belongs to, and the SWE.2 scope — static decomposition, dynamic behavior, component interfaces, and resource allocation of software requirements to components.]
+| # | Requirement | Category | Priority |
+|---|------------|----------|----------|
+| R1 | *[Describe core functional requirement]* | Functional | Must |
+| R2 | *[Describe another requirement]* | Functional | Must |
+| R3 | *[Describe quality requirement, e.g., latency, throughput]* | Quality | Should |
+| R4 | *[Describe constraint, e.g., must run on X]* | Constraint | Must |
 
-h3. 1.2 Quality Goals (Top 3–5)
-||#||Quality Goal||Scenario / Metric (measurable)||Traceability||
-|1|[e.g. Timing]|[e.g. end-to-end latency < 20 ms @ 100% load]|[SR-NNN]|
-|2|[Safety]|[ASIL D, no single-point faults]|[SR-NNN]|
-|3|[Reliability]|[MTBF > 50k h]|[SR-NNN]|
+h3. 1.2 Quality Goals
+
+| # | Quality Goal | Description |
+|---|-------------|-------------|
+| Q1 | *[e.g., Performance]* | *[e.g., API response time < 200ms at p99]* |
+| Q2 | *[e.g., Availability]* | *[e.g., 99.5% uptime during business hours]* |
+| Q3 | *[e.g., Scalability]* | *[e.g., Horizontal scaling to handle N concurrent requests]* |
 
 h3. 1.3 Stakeholders
-||Stakeholder||Concern||Expectation||
-|System Owner|[cost, schedule]|[...]|
-|Safety Manager|[ASIL compliance]|[...]|
-|SW Developer|[clarity, buildability]|[...]|
+
+| Role | Name | Interest |
+|------|------|---------|
+| *[e.g., Product Owner]* | *[Name]* | *[What they care about]* |
+| *[e.g., DevOps Lead]* | *[Name]* | *[What they care about]* |
+| *[e.g., Security Officer]* | *[Name]* | *[What they care about]* |
 
 ----
 
-h2. 2. Drivers and Constraints
+h1. 2. Architecture Constraints and Drivers
 
-h3. 2.1 Functional Drivers
-* [Top-level functional requirements driving the architecture]
-* [Each tagged with SR-ID for traceability]
+h3. 2.1 Technical Constraints
 
-h3. 2.2 Technical Constraints
-||ID||Constraint||Source||
-|TC-1|[e.g. AUTOSAR Classic 4.4]|[Platform spec]|
-|TC-2|[e.g. 32-bit MCU, 512 KB RAM]|[HW spec]|
-|TC-3|[e.g. MISRA-C:2012 Mandatory]|[Coding standard]|
+|| Constraint || Source || Impact ||
+| *[e.g., Must use organization's Kubernetes cluster]* | *[e.g., Platform team]* | *[e.g., All services must be containerized]* |
+| *[e.g., Data residency requirement]* | *[e.g., Compliance]* | *[e.g., Database must remain in region X]* |
+| *[e.g., Budget limits POC to 2 environments only]* | *[e.g., Management]* | *[e.g., No dedicated staging environment]* |
 
-h3. 2.3 Organizational & Standards Constraints
-* [ISO 26262, ASPICE 4.0, ISO 21434 (Cybersecurity), GDPR, ...]
+h3. 2.2 Organizational Constraints
 
-h3. 2.4 Assumptions
-* [Assumption — and impact if wrong]
+|| Constraint || Impact ||
+| *[e.g., Team size limited to N developers]* | *[e.g., Architecture must remain simple]* |
+| *[e.g., Must use approved toolchain]* | *[e.g., Limits technology choices]* |
 
-----
+h3. 2.3 Conventions
 
-h2. 3. Use Case View (4+1 — Scenarios)
-
-h3. 3.1 Use Case Catalog
-||UC-ID||Use Case||Priority||Implements SR||
-|UC-01|[primary actor action]|High|[SR-NNN]|
-|UC-02|[...]|Medium|[SR-NNN]|
-
-h3. 3.2 Architecturally Significant Scenarios
-*UC-01: [name]*
-* *Actor:* [...]
-* *Precondition:* [...]
-* *Main flow:* 1. ... 2. ... 3. ...
-* *Postcondition:* [...]
-* *Architectural impact:* [which components, which NFRs stressed]
+* *[e.g., All APIs must follow REST conventions and OpenAPI 3.0 specification]*
+* *[e.g., Event-driven communication uses async messaging]*
+* *[e.g., All configuration externalized, no hard-coded values]*
 
 ----
 
-h2. 4. Context View (System Boundary)
+h1. 3. System Scope and Context
 
-*(Insert Context Diagram here - e.g., PlantUML macro or draw.io)*
+h3. 3.1 Business Context
 
-h3. 4.1 External Interfaces
-||Interface||Direction||Protocol||Type||Traceability||
-|IF-01 CAN-FD|In/Out|CAN 2.0B / ISO 11898|Signal|[SR-NNN]|
-|IF-02 SOME/IP|Out|Ethernet / SOME/IP-SD|Service|[SR-NNN]|
-|IF-03 UDS|In|DoIP / ISO 14229|Diagnostic|[SR-NNN]|
+*Describe the business domain and how this POC fits into the broader product landscape.*
 
-----
+h3. 3.2 System Context Diagram
 
-h2. 5. Logical View (Static Decomposition)
+{info:title=Instructions}
+Replace the placeholder below with your actual system context diagram. Use Confluence's draw.io plugin, PlantUML macro, or embed an image.
+{info}
 
-*(Insert Component/Block Diagram here - e.g., PlantUML macro or draw.io)*
+{panel:title=System Context Diagram}
+*[Insert C4 System Context diagram here]*
 
-h3. 5.1 Component Catalog
-||ID||Component||Responsibility||Allocates SR||ASIL||
-|C-01|[name]|[one-line purpose]|[SR-NNN, SR-NNN]|[B/D]|
-|C-02|[name]|[...]|[SR-NNN]|[Q/A/B/C/D]|
+*Show your system as a central box, surrounded by:*
+* *External users/actors*
+* *Upstream systems (providers)*
+* *Downstream systems (consumers)*
+* *External interfaces (APIs, message queues, SaaS)*
+{panel}
 
-h3. 5.2 Component Interfaces (Internal)
-||Provider||Consumer||Operation||Signature||Error Behavior||
-|C-01|C-02|[opName]|[ret opName(in1: T, in2: T)]|[E_NOT_OK / E_TIMEOUT]|
+h3. 3.3 External Interfaces
 
-----
-
-h2. 6. Dynamic View (Runtime Behavior)
-
-h3. 6.1 Sequence: [UC-01 / scenario name]
-*(Insert Sequence Diagram here)*
-
-h3. 6.2 State Machine: [component name]
-*(Insert State Machine Diagram here)*
-
-h3. 6.3 Concurrency & Synchronization
-* *Tasks / threads:* [list, priorities, scheduling]
-* *Shared resources / locks:* [critical sections, locking strategy]
-* *Timing budget (wcet / deadline):* [table or ref]
+| Interface | Direction | Technology | Protocol | Description |
+|-----------|-----------|------------|----------|-------------|
+| *[e.g., Client API]* | *[Inbound]* | *[e.g., REST]* | *[e.g., HTTPS/JSON]* | *[What data flows through this interface]* |
+| *[e.g., Event Publish]* | *[Outbound]* | *[e.g., Messaging]* | *[e.g., AMQP]* | *[What events are published]* |
+| *[e.g., Legacy System]* | *[Outbound]* | *[e.g., gRPC]* | *[e.g., HTTP/2]* | *[What data is fetched/sent]* |
 
 ----
 
-h2. 7. Data Model View
+h1. 4. Solution Strategy
 
-*(Insert Entity-Relationship or Class Diagram here)*
+*Briefly describe the overall architectural approach chosen for this POC.*
 
-h3. 7.1 Data Dictionary (excerpt)
-||Name||Type||Unit||Range||Persistency||Owner||
-|[signal]|uint16|ms|0..65535|NVM|C-02|
-|[calParam]|float32|deg|-90..90|Flash|C-01|
+* *[Describe the primary architectural pattern, e.g., API Gateway + Microservices]*
+* *[Describe the communication style, e.g., synchronous REST for queries, async events for commands]*
+* *[Describe the data strategy, e.g., database-per-service, event sourcing]*
+* *[Describe the deployment strategy, e.g., containerized on Kubernetes]*
 
-h3. 7.2 Persistence & Calibration
-* *NVM layout:* [module, blocks, CRC scheme]
-* *Flash calibration:* [versioning, fallback, integrity check]
+{tip}Keep this section concise. Detailed decisions belong in Section 9 (Architecture Decisions).{tip}
 
 ----
 
-h2. 8. Deployment View (Physical)
+h1. 5. Building Block View (Logical View)
 
-*(Insert Deployment Diagram here)*
+h3. 5.1 Overall System Layering
 
-h3. 8.1 Resource Budget
-||Component||CPU Load (%)||RAM (KB)||Flash (KB)||NVM (bytes)||
-|C-01|<5>|<8>|<24>|<128>|
-|C-02|<3>|<4>|<12>|<64>|
-|*Total*|*<50>*|*<200>*|*<1024>*|*<2048>*|
+{info:title=Instructions}
+Replace the placeholder with your C4 Container or Component diagram. Use draw.io, PlantUML, or embed an image.
+{info}
 
-----
+{panel:title=Logical Architecture Diagram}
+*[Insert C4 Container diagram here]*
 
-h2. 9. Security View
+*Show the major building blocks and their relationships:*
+* *API Gateway / Ingress Controller*
+* *Core microservices*
+* *Shared infrastructure (message broker, cache, identity provider)*
+* *Data stores*
+{panel}
 
-h3. 9.1 Threat Analysis (excerpt)
-||ID||Threat (STRIDE)||Asset||Risk||Control||
-|T-01|Spoofing on CAN bus|Signal integrity|H|CRC + SecOC|
-|T-02|Tampering of OTA image|Firmware|H|Sig + Rollback|
-|T-03|Info disclosure of NVM|Personal data|M|Encryption at rest|
+h3. 5.2 Building Block Overview
 
-h3. 9.2 Security Controls
-* *Secure boot:* [chain of trust, HSM usage]
-* *SecOC / Authentication:* [which signals]
-* *Key management:* [HSM, key rotation, key storage]
-* *Access control:* [UDS security levels, roles]
+| Building Block | Responsibility | Technology | Interface |
+|---------------|---------------|------------|----------|
+| *[e.g., API Gateway]* | *[Routing, rate limiting, auth delegation]* | *[e.g., Kong / Envoy]* | *[REST API to clients]* |
+| *[e.g., Service A]* | *[Core business capability X]* | *[e.g., Framework of choice]* | *[Internal REST/gRPC]* |
+| *[e.g., Service B]* | *[Core business capability Y]* | *[e.g., Framework of choice]* | *[Internal REST/gRPC]* |
+| *[e.g., Message Broker]* | *[Async event distribution]* | *[e.g., RabbitMQ / Kafka]* | *[AMQP / native protocol]* |
+| *[e.g., Database]* | *[Persistent storage]* | *[e.g., PostgreSQL / MongoDB]* | *[SQL / driver protocol]* |
 
-h3. 9.3 Trust Boundaries
-*(Insert Trust Zone Diagram here)*
+h3. 5.3 Important Interfaces
 
-----
+{code:title=Example: API Contract Snippet}
+// Service A -> Service B internal contract
+GET /api/v1/resources/{id}
+Response: { "id": "...", "status": "...", "data": { ... } }
+{code}
 
-h2. 10. Crosscutting Concepts
-||Concept||Description||
-|Logging & Tracing|[levels, sinks, formats, ring buffer]|
-|Error handling|[fault model, E_NOT_OK propagation, default values]|
-|Configuration mgmt|[variant handling, pre-compile/post-build]|
-|Diagnostics (UDS)|[DTC handling, snapshot, UDS service map]|
-|Memory mgmt|[static alloc only, no malloc in safety path]|
-
-----
-
-h2. 11. Architectural Decisions (ADRs)
-
-h3. ADR-001: [decision title]
-* *Status:* [Proposed | Accepted | Deprecated | Superseded]
-* *Date:* [YYYY-MM-DD]
-* *Context:* [why a decision is needed; alternatives considered]
-* *Decision:* [what was decided]
-* *Consequences:* [positive / negative; impact on NFRs]
-* *Alternatives:* [opt A — rejected because...; opt B — rejected because...]
-* *Traceability:* [SR-NNN, TC-NNN]
+*Document key internal API contracts, event schemas, or shared data formats here.*
 
 ----
 
-h2. 12. Quality Requirements (NFRs)
+h1. 6. Runtime View (Dynamic View)
 
-h3. 12.1 Quality Tree
-*(Insert Quality Tree Diagram here)*
+h3. 6.1 Use Case Overview
 
-h3. 12.2 Quality Scenarios
-||QS-ID||Scenario||Stimulus/Response||Metric||Traceability||
-|QS-01|[peak load]|[load 100%, response]|[P99 < 20ms]|[SR-NNN]|
-|QS-02|[fault injection]|[single-point fault]|[no violation of SG]|[SR-NNN]|
+| # | Use Case | Description | Primary Actor |
+|---|----------|-------------|---------------|
+| UC-1 | *[e.g., Create Order]* | *[End-to-end flow description]* | *[e.g., Client App]* |
+| UC-2 | *[e.g., Process Payment]* | *[End-to-end flow description]* | *[e.g., Payment Service]* |
+| UC-3 | *[e.g., Query Status]* | *[End-to-end flow description]* | *[e.g., Client App]* |
+
+h3. 6.2 Runtime Scenario: *[Select Primary Use Case]*
+
+{info:title=Instructions}
+Describe the most important runtime flow step-by-step. Include a sequence diagram if possible.
+{info}
+
+{panel:title=Sequence Diagram}
+*[Insert sequence diagram here showing the runtime interaction between building blocks]*
+{panel}
+
+*Step-by-step flow:*
+# *[Actor sends request to API Gateway]*
+# *[Gateway authenticates and routes to Service A]*
+# *[Service A validates input and publishes event to Message Broker]*
+# *[Service B consumes event and processes business logic]*
+# *[Service B updates Database and publishes result event]*
+# *[Service A receives result and returns response to Actor via Gateway]*
+
+h3. 6.3 Error and Exception Scenarios
+
+| Scenario | Handling Strategy |
+|----------|-------------------|
+| *[e.g., Downstream service unavailable]* | *[e.g., Circuit breaker opens, return cached response or 503]* |
+| *[e.g., Invalid input data]* | *[e.g., Return 400 with validation error details]* |
+| *[e.g., Message processing failure]* | *[e.g., Retry with exponential backoff, then DLQ]* |
 
 ----
 
-h2. 13. Risks and Technical Debt
-||ID||Risk / Debt||Likelihood||Impact||Mitigation / Owner||
-|R-01|[external API unstable]|H|H|[mock now, contract test before Baseline]|
-|TD-01|[hardcoded config]|—|M|[refactor in SWE.3, ticket-NNN]|
+h1. 7. Deployment View
+
+{info:title=Instructions}
+Insert your deployment/environment diagram showing infrastructure topology.
+{info}
+
+{panel:title=Deployment Diagram}
+*[Insert C4 Deployment diagram or infrastructure diagram here]*
+
+*Show:*
+* *Environments (dev, staging, prod if applicable)*
+* *Infrastructure nodes (VMs, containers, managed services)*
+* *Network zones and boundaries*
+* *External dependencies*
+{panel}
+
+h3. 7.1 Infrastructure Overview
+
+| Component | Specification | Environment |
+|-----------|--------------|-------------|
+| *[e.g., Application Server]* | *[e.g., 2 vCPU, 4GB RAM, containerized]* | *[e.g., K8s cluster]* |
+| *[e.g., Database]* | *[e.g., Managed PostgreSQL, db.t3.medium]* | *[e.g., Cloud provider]* |
+| *[e.g., Message Broker]* | *[e.g., 3-node RabbitMQ cluster]* | *[e.g., K8s cluster]* |
+| *[e.g., Cache]* | *[e.g., Redis, 1GB]* | *[e.g., K8s or managed]* |
 
 ----
 
-h2. 14. Traceability Matrix (SWE.2 BP6)
-||SR-ID||Requirement (short)||Component||Use Case||Quality Scenario||Detailed Design (SWE.3)||
-|SR-001|[...]|C-01|UC-01|QS-01|DD-001|
-|SR-002|[...]|C-02|UC-02|QS-02|DD-002|
+h1. 8. Cross-cutting Concepts
+
+h3. 8.1 Security
+
+{warning:title=Important}
+Document authentication, authorization, data protection, and any compliance requirements here.
+{warning}
+
+|| Aspect || Approach ||
+| Authentication | *[e.g., OAuth 2.0 / OIDC via Identity Provider]* |
+| Authorization | *[e.g., RBAC with fine-grained permissions per service]* |
+| Transport Encryption | *[e.g., TLS 1.2+ for all external and internal communication]* |
+| Data Encryption at Rest | *[e.g., AES-256 for stored PII/sensitive data]* |
+| Secret Management | *[e.g., HashiCorp Vault / cloud secret manager]* |
+| Input Validation | *[e.g., Schema validation at API Gateway + service level]* |
+| Audit Logging | *[e.g., Immutable audit trail for all state-changing operations]* |
+
+h3. 8.2 Observability
+
+|| Concern || Approach ||
+| Logging | *[e.g., Structured JSON logs, centralized in ELK/Datadog]* |
+| Metrics | *[e.g., Prometheus + Grafana, RED metrics per service]* |
+| Tracing | *[e.g., OpenTelemetry, distributed trace across all services]* |
+| Alerting | *[e.g., Alert on error rate > 1% or p99 latency > 500ms]* |
+
+h3. 8.3 Resilience
+
+* *[e.g., Circuit breaker pattern for downstream calls (e.g., Resilience4j / Polly)]*
+* *[e.g., Retry with exponential backoff for transient failures]*
+* *[e.g., Health check endpoints on all services for load balancer probes]*
+* *[e.g., Graceful degradation with fallback responses]*
+
+h3. 8.4 Configuration Management
+
+* *[e.g., Environment variables for deployment-specific config]*
+* *[e.g., Externalized config via ConfigMap/Consul at runtime]*
+* *[e.g., Feature flags for toggling POC capabilities]*
 
 ----
 
-h2. 15. Open Issues
-||ID||Issue||Owner||Due||
-|OI-01|[unresolved interface]|[name]|[date]|
+h1. 9. Architecture Decisions
+
+{info:title=Instructions}
+Record significant architecture decisions using a lightweight ADR (Architecture Decision Record) format.
+{info}
+
+|| # || Decision || Context || Chosen Option || Consequences ||
+| ADR-1 | *[e.g., Communication Pattern]* | *[e.g., Services need to exchange data in near-real-time]* | *[e.g., Async messaging via broker]* | *[e.g., Added complexity but better decoupling and resilience]* |
+| ADR-2 | *[e.g., Data Storage Strategy]* | *[e.g., Each service owns its data, no shared DB]* | *[e.g., Database-per-service]* | *[e.g., Strong consistency requires explicit orchestration]* |
+| ADR-3 | *[e.g., API Style]* | *[e.g., External clients need simple, well-documented API]* | *[e.g., REST + OpenAPI 3.0]* | *[e.g., Easy consumption, but less efficient for high-throughput internal calls]* |
+| ADR-4 | *[e.g., Deployment Platform]* | *[e.g., Need container orchestration and scaling]* | *[e.g., Kubernetes]* | *[e.g., Operational overhead but industry-standard portability]* |
 
 ----
 
-h2. 16. Glossary
-||Term||Definition||Source||
-|ASIL|Automotive Safety Integrity Level|ISO 26262|
-|SecOC|Secure Onboard Communication|AUTOSAR|
-|SG|Safety Goal|ISO 26262|
+h1. 10. Data Model
+
+{info:title=Instructions}
+Describe the core domain entities and their relationships. Use an ER diagram or domain model.
+{info}
+
+{panel:title=Domain Model / ER Diagram}
+*[Insert domain model or ER diagram here]*
+{panel}
+
+h3. 10.1 Core Entities
+
+| Entity | Key Attributes | Owner Service | Description |
+|--------|----------------|---------------|-------------|
+| *[e.g., Order]* | *[id, status, customerId, createdAt]* | *[e.g., Order Service]* | *[Represents a customer order]* |
+| *[e.g., Customer]* | *[id, name, email]* | *[e.g., Customer Service]* | *[Customer profile data]* |
+| *[e.g., Payment]* | *[id, orderId, amount, status]* | *[e.g., Payment Service]* | *[Payment transaction record]* |
+
+h3. 10.2 Data Flow
+
+*Briefly describe how data moves between services and stores:*
+* *[e.g., Client creates Order via API -> Order Service stores in Order DB -> Event published -> Payment Service processes]*
+* *[e.g., Query flow: Client requests order status -> API Gateway -> Order Service reads from Order DB]*
+
+----
+
+h1. 11. Quality Scenarios
+
+| # | Scenario | Source | Expected Response |
+|---|----------|--------|------------------|
+| QS-1 | *[e.g., Peak load of N concurrent users]* | *[e.g., Load test]* | *[e.g., p99 latency < 200ms, 0% error rate]* |
+| QS-2 | *[e.g., Database node failure]* | *[e.g., Chaos engineering]* | *[e.g., Automatic failover, < 30s downtime]* |
+| QS-3 | *[e.g., New developer onboards]* | *[e.g., Team feedback]* | *[e.g., Can deploy and run system locally within 1 day]* |
+
+----
+
+h1. 12. Risks and Technical Debt
+
+h3. 12.1 Known Risks
+
+|| Risk || Likelihood || Impact || Mitigation ||
+| *[e.g., Third-party API instability]* | *[Medium]* | *[High]* | *[e.g., Circuit breaker + fallback data]* |
+| *[e.g., Team unfamiliar with chosen tech]* | *[Medium]* | *[Medium]* | *[e.g., Spike / time-boxed proof-of-concept]* |
+| *[e.g., Data model may not scale]* | *[Low]* | *[High]* | *[e.g., Design for partitioning from day one]* |
+
+h3. 12.2 Technical Debt (POC-Specific)
+
+* *[e.g., Hardcoded configurations that should be externalized before production]*
+* *[e.g., Missing integration tests for cross-service flows]*
+* *[e.g., No automated database migration pipeline yet]*
+
+----
+
+h1. 13. Glossary
+
+|| Term || Definition ||
+| *[Term 1]* | *[Definition]* |
+| *[Term 2]* | *[Definition]* |
+| *[Term 3]* | *[Definition]* |
+
+----
+
+h1. 14. Open Issues
+
+| # | Issue | Status | Owner | Due Date |
+|---|-------|--------|-------|----------|
+| OI-1 | *[e.g., Finalize identity provider integration approach]* | *[Open]* | *[Name]* | *[Date]* |
+| OI-2 | *[e.g., Decide on event schema versioning strategy]* | *[Open]* | *[Name]* | *[Date]* |

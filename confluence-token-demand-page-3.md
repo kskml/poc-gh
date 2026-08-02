@@ -1,19 +1,19 @@
 # AI Coding Assistant Token Demand Framework
 
-> **Version 6.1 · Updated 2026-08-02 · Owner: Engineering Platform · Status: Draft for review**
->
-> A shared, team-readable model for estimating **how many tokens an AI coding assistant
-> consumes on a Jira story — before you start it** — and for budgeting sprints and months on
-> that basis. This page is **token-only**: token demand is a property of the work (how much
-> the assistant reads and writes), not of what a token costs. No pricing, no credits.
->
-> Companion artifacts: CLI calculator `token-demand-estimator.py` · calibration form
-> `token-usage-data-form.html` · full spec `token-demand-analysis-report.md` ·
-> concept guide `token-demand-estimation-framework.md`.
-
 ---
 
 ## 1. Overview
+
+Estimate *before the work happens* how many tokens AI coding assistant will consume on a task.
+**Token estimates are the durable output.**
+
+**Core principle:** token demand is a product of **how much the agent reads** (input)
+and **how much it writes** (output), multiplied by **how many round-trips** it takes.
+Everything else is a multiplier on one of those three numbers.
+
+```
+Total tokens ≈ turns × (avg input per turn + avg output per turn)
+```
 
 **Every engineer should be able to answer in 60 seconds: "how many tokens will this story
 cost the AI coding assistant?"**

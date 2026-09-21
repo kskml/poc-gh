@@ -1,0 +1,2323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Token Optimizer · Interactive guide to context, prompt & related engineering</title>
+<meta name="description" content="Interactive tool for LLM token optimization: cost calculator, technique explorer, compression ladder, model-mixing calculator, cache-stability harness, and 50+ open-source repos.">
+<style>
+/* ==========================================================================
+   Token Optimizer — single-file interactive tool
+   Style: GitHub-dark, frosted-glass header, pill buttons, monospace numerics
+   Synthesizes: ashy-dune quick guide + sukurcf detailed playbook + olivomarco docs
+   ========================================================================== */
+
+:root {
+  /* GitHub-dark palette */
+  --bg:        #0d1117;
+  --bg-2:      #161b22;
+  --bg-3:      #21262d;
+  --border:    #30363d;
+  --border-2:  #484f58;
+  --text:      #e6edf3;
+  --text-2:    #8b949e;
+  --text-3:    #6e7681;
+  --accent:    #7ee787;   /* GitHub green */
+  --blue:      #58a6ff;   /* GitHub blue */
+  --purple:    #bc8cff;
+  --amber:     #d29922;
+  --red:       #f85149;
+  --pink:      #f778ba;
+  --tier-light: #7ee787;
+  --tier-vers: #58a6ff;
+  --tier-pow:  #f778ba;
+
+  /* Diagram colors (lifted from olivomarco SVGs) */
+  --c-system:    #2563eb;
+  --c-instr:    #16a34a;
+  --c-tools:    #d97706;
+  --c-history:  #7c3aed;
+  --c-retrieved:#0891b2;
+  --c-user:     #dc2626;
+  --c-reasoning:#be185d;
+
+  /* Typography */
+  --font-ui:    'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono:  'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  /* Layout */
+  --nav-h:     56px;
+  --max-w:     1280px;
+  --r-sm:      6px;
+  --r-md:      12px;
+  --r-lg:      16px;
+  --r-pill:    999px;
+}
+
+[data-theme="light"] {
+  --bg:        #ffffff;
+  --bg-2:      #f6f8fa;
+  --bg-3:      #eaeef2;
+  --border:    #d0d7de;
+  --border-2:  #8c959f;
+  --text:      #1f2328;
+  --text-2:    #656d76;
+  --text-3:    #848d97;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; height: 100%; }
+body {
+  font-family: var(--font-ui);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'cv11', 'ss01';
+}
+button, input, select, textarea { font: inherit; color: inherit; }
+a { color: var(--blue); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code { font-family: var(--font-mono); background: var(--bg-2); padding: 2px 6px; border-radius: 4px; font-size: 0.88em; }
+.num { font-variant-numeric: tabular-nums; font-feature-settings: 'tnum'; }
+
+/* ----- Top nav ----- */
+.topnav {
+  position: sticky; top: 0; z-index: 100;
+  height: var(--nav-h);
+  display: flex; align-items: center; gap: 16px;
+  padding: 0 20px;
+  background: rgba(13, 17, 23, 0.78);
+  backdrop-filter: saturate(180%) blur(12px);
+  -webkit-backdrop-filter: saturate(180%) blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+[data-theme="light"] .topnav { background: rgba(255,255,255,0.82); }
+.brand {
+  font-weight: 700; letter-spacing: -0.01em;
+  display: flex; align-items: center; gap: 8px;
+  color: var(--text); text-decoration: none; white-space: nowrap;
+}
+.brand-mark {
+  width: 24px; height: 24px;
+  background: linear-gradient(135deg, var(--accent) 0%, var(--blue) 100%);
+  border-radius: 6px;
+  display: inline-block;
+}
+.nav-links {
+  display: flex; gap: 2px; flex: 1; justify-content: center;
+  flex-wrap: wrap; row-gap: 0;
+  overflow-x: auto; scrollbar-width: none;
+}
+.nav-links::-webkit-scrollbar { display: none; }
+.nav-link {
+  padding: 6px 11px; border-radius: var(--r-pill);
+  color: var(--text-2); font-size: 13px; font-weight: 500;
+  cursor: pointer; border: 1px solid transparent;
+  white-space: nowrap; transition: all 0.15s;
+}
+.nav-link:hover { background: var(--bg-2); color: var(--text); }
+.nav-link.active { background: var(--bg-3); color: var(--text); border-color: var(--border); }
+.nav-actions { display: flex; align-items: center; gap: 8px; }
+.icon-btn {
+  width: 32px; height: 32px; border-radius: var(--r-pill);
+  border: 1px solid var(--border); background: var(--bg-2);
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; color: var(--text-2); transition: all 0.15s;
+}
+.icon-btn:hover { color: var(--text); border-color: var(--border-2); background: var(--bg-3); }
+
+/* ----- Layout ----- */
+.view {
+  display: none;
+  max-width: var(--max-w);
+  margin: 0 auto;
+  padding: 32px 20px 80px;
+}
+.view.active { display: block; animation: fade 0.25s ease; }
+@keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+/* ----- Hero ----- */
+.hero { text-align: center; padding: 48px 0 24px; }
+.hero h1 {
+  font-size: clamp(28px, 5vw, 44px); font-weight: 800;
+  letter-spacing: -0.03em; margin: 0 0 12px;
+  background: linear-gradient(135deg, var(--text) 0%, var(--text-2) 100%);
+  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+}
+.hero p { color: var(--text-2); font-size: 17px; max-width: 640px; margin: 0 auto 32px; }
+.hero-cta { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+.btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 10px 20px; border-radius: var(--r-pill);
+  font-weight: 600; font-size: 14px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--bg-2);
+  color: var(--text); transition: all 0.15s;
+}
+.btn:hover { background: var(--bg-3); border-color: var(--border-2); }
+.btn.primary { background: var(--accent); color: #0d1117; border-color: var(--accent); }
+.btn.primary:hover { background: #6ed476; border-color: #6ed476; }
+
+/* ----- Stat counters ----- */
+.stat-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px; margin: 48px 0;
+}
+.stat-card {
+  background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: var(--r-lg); padding: 24px;
+  position: relative; overflow: hidden;
+}
+.stat-card::before {
+  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+  background: var(--accent);
+}
+.stat-card.blue::before { background: var(--blue); }
+.stat-card.purple::before { background: var(--purple); }
+.stat-card.amber::before { background: var(--amber); }
+.stat-value {
+  font-family: var(--font-mono); font-size: 36px; font-weight: 700;
+  letter-spacing: -0.02em; color: var(--text);
+}
+.stat-label { color: var(--text-2); font-size: 13px; margin-top: 4px; }
+.stat-note { color: var(--text-3); font-size: 12px; margin-top: 8px; }
+
+/* ----- Cards & grids ----- */
+.card {
+  background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: var(--r-lg); padding: 20px;
+  transition: border-color 0.15s;
+}
+.card h3 { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
+.card p { color: var(--text-2); margin: 0; font-size: 14px; }
+
+.section-title { font-size: 24px; font-weight: 700; letter-spacing: -0.01em; margin: 40px 0 8px; }
+.section-sub { color: var(--text-2); margin: 0 0 24px; font-size: 15px; }
+
+.grid { display: grid; gap: 16px; }
+.grid-2 { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+.grid-3 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.grid-4 { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+
+/* ----- Pill / badge ----- */
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 10px; border-radius: var(--r-pill);
+  font-size: 12px; font-weight: 600;
+  background: var(--bg-3); color: var(--text-2);
+  border: 1px solid var(--border);
+}
+.pill.green { background: rgba(126,231,135,0.12); color: var(--accent); border-color: rgba(126,231,135,0.3); }
+.pill.blue  { background: rgba(88,166,255,0.12); color: var(--blue);  border-color: rgba(88,166,255,0.3); }
+.pill.amber { background: rgba(210,153,34,0.12); color: var(--amber); border-color: rgba(210,153,34,0.3); }
+.pill.pink  { background: rgba(247,120,186,0.12); color: var(--pink);  border-color: rgba(247,120,186,0.3); }
+.pill.red   { background: rgba(248,81,73,0.12);  color: var(--red);   border-color: rgba(248,81,73,0.3); }
+
+/* ----- Form controls ----- */
+.field { margin-bottom: 18px; }
+.field label { display: block; font-size: 13px; color: var(--text-2); margin-bottom: 6px; font-weight: 500; }
+.field label .val { float: right; color: var(--text); font-family: var(--font-mono); font-weight: 600; }
+input[type="text"], input[type="number"], select, textarea {
+  width: 100%; padding: 10px 12px;
+  background: var(--bg-3); border: 1px solid var(--border);
+  border-radius: var(--r-sm); color: var(--text);
+  font-size: 14px; transition: border-color 0.15s;
+}
+input[type="text"]:focus, input[type="number"]:focus, select:focus, textarea:focus {
+  outline: none; border-color: var(--blue);
+}
+input[type="range"] {
+  -webkit-appearance: none; appearance: none;
+  width: 100%; height: 6px;
+  background: var(--bg-3); border-radius: 3px; outline: none;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 18px; height: 18px; border-radius: 50%;
+  background: var(--accent); cursor: pointer;
+  border: 2px solid var(--bg);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 18px; height: 18px; border-radius: 50%;
+  background: var(--accent); cursor: pointer;
+  border: 2px solid var(--bg);
+}
+.radio-group, .check-group { display: flex; flex-wrap: wrap; gap: 8px; }
+.radio, .check {
+  padding: 8px 14px; border-radius: var(--r-pill);
+  border: 1px solid var(--border); background: var(--bg-2);
+  cursor: pointer; font-size: 13px; font-weight: 500;
+  color: var(--text-2); transition: all 0.15s;
+  user-select: none;
+}
+.radio:hover, .check:hover { color: var(--text); border-color: var(--border-2); }
+.radio.active, .check.active {
+  background: var(--accent); color: #0d1117;
+  border-color: var(--accent); font-weight: 600;
+}
+
+/* ----- Cost breakdown display ----- */
+.cost-display {
+  font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+}
+.cost-line {
+  display: flex; justify-content: space-between;
+  padding: 10px 0; border-bottom: 1px dashed var(--border);
+  font-size: 14px;
+}
+.cost-line:last-child { border-bottom: none; }
+.cost-line .lbl { color: var(--text-2); }
+.cost-line .val { color: var(--text); font-weight: 600; }
+.cost-line.total {
+  border-top: 2px solid var(--border); border-bottom: none;
+  padding-top: 14px; margin-top: 8px;
+  font-size: 18px; font-weight: 700;
+}
+.cost-line.total .val { color: var(--accent); }
+
+/* ----- Anatomy diagram ----- */
+.anatomy-stack {
+  display: flex; flex-direction: column; gap: 4px;
+  width: 100%; max-width: 520px; margin: 0 auto;
+}
+.anatomy-layer {
+  position: relative;
+  padding: 14px 18px;
+  border-radius: var(--r-md);
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: all 0.2s;
+  color: white; font-weight: 600;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.anatomy-layer:hover { transform: translateX(4px); }
+.anatomy-layer .pct { font-family: var(--font-mono); font-size: 12px; opacity: 0.9; }
+.anatomy-tooltip {
+  position: absolute; left: 100%; top: 50%; transform: translateY(-50%);
+  margin-left: 12px; padding: 10px 14px;
+  background: var(--bg-3); border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  width: 280px; font-weight: 400; font-size: 12px;
+  color: var(--text-2);
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.2s; z-index: 10;
+}
+.anatomy-layer:hover .anatomy-tooltip { opacity: 1; }
+
+/* ----- Filter chips ----- */
+.chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; }
+.chip {
+  padding: 5px 12px; border-radius: var(--r-pill);
+  background: var(--bg-2); border: 1px solid var(--border);
+  color: var(--text-2); font-size: 12px; font-weight: 500;
+  cursor: pointer; transition: all 0.15s;
+}
+.chip:hover { color: var(--text); }
+.chip.active { background: var(--accent); color: #0d1117; border-color: var(--accent); }
+
+/* ----- Technique cards ----- */
+.tech-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+.tech-card {
+  background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: 14px;
+  cursor: pointer; transition: all 0.15s;
+}
+.tech-card:hover { border-color: var(--border-2); background: var(--bg-3); }
+.tech-card.expanded { border-color: var(--blue); }
+.tech-card h4 { margin: 0 0 4px; font-size: 14px; font-weight: 600; }
+.tech-meta { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.tech-detail {
+  margin-top: 12px; padding-top: 12px;
+  border-top: 1px solid var(--border);
+  display: none; font-size: 13px; color: var(--text-2);
+}
+.tech-card.expanded .tech-detail { display: block; }
+
+/* ----- Bar chart (language tax) ----- */
+.bar-chart { display: flex; flex-direction: column; gap: 8px; }
+.bar-row {
+  display: grid; grid-template-columns: 100px 1fr 80px;
+  align-items: center; gap: 12px;
+}
+.bar-label { font-size: 13px; color: var(--text-2); }
+.bar-track { background: var(--bg-3); height: 24px; border-radius: 4px; overflow: hidden; }
+.bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--blue));
+  transition: width 0.4s ease;
+  display: flex; align-items: center; padding-left: 8px;
+  font-size: 11px; color: #0d1117; font-weight: 600;
+}
+.bar-value { font-family: var(--font-mono); font-size: 13px; color: var(--text); text-align: right; }
+
+/* ----- Compression ladder ----- */
+.ladder-display {
+  background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: 16px;
+  font-family: var(--font-mono); font-size: 13px;
+  white-space: pre-wrap; word-break: break-word;
+  min-height: 120px;
+}
+.level-row {
+  display: grid; grid-template-columns: 100px 1fr 80px 60px;
+  gap: 12px; align-items: center;
+  padding: 12px 0; border-bottom: 1px solid var(--border);
+}
+.level-row.active { background: var(--bg-3); border-radius: var(--r-md); padding-left: 12px; padding-right: 12px; }
+.level-row .lbl { font-weight: 600; }
+.level-row .tok { font-family: var(--font-mono); }
+.level-row .sav { font-family: var(--font-mono); color: var(--accent); }
+
+/* ----- Cache stability harness ----- */
+.verdict-box {
+  padding: 24px; border-radius: var(--r-md);
+  border: 2px solid var(--border-2);
+  text-align: center; margin: 16px 0;
+  transition: all 0.3s;
+}
+.verdict-box.stable { border-color: var(--accent); background: rgba(126,231,135,0.08); }
+.verdict-box.invalidated { border-color: var(--red); background: rgba(248,81,73,0.08); }
+.verdict-icon { font-size: 32px; margin-bottom: 8px; }
+.verdict-title { font-size: 18px; font-weight: 700; margin-bottom: 6px; }
+.verdict-box.stable .verdict-title { color: var(--accent); }
+.verdict-box.invalidated .verdict-title { color: var(--red); }
+.verdict-msg { color: var(--text-2); font-size: 14px; max-width: 480px; margin: 0 auto; }
+
+/* ----- Quick wins ----- */
+.win-row {
+  display: grid; grid-template-columns: 32px 1fr 140px 100px 80px;
+  gap: 12px; align-items: center;
+  padding: 14px; border-bottom: 1px solid var(--border);
+}
+.win-row:first-child { border-top: 1px solid var(--border); }
+.win-row .num { font-family: var(--font-mono); color: var(--text-3); font-size: 13px; }
+.win-row .action { font-weight: 600; font-size: 14px; }
+.win-row .effect, .win-row .time { font-size: 12px; color: var(--text-2); }
+.win-check {
+  width: 22px; height: 22px; border-radius: 50%;
+  border: 2px solid var(--border-2);
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; transition: all 0.2s;
+}
+.win-check.checked {
+  background: var(--accent); border-color: var(--accent); color: #0d1117;
+}
+.progress-bar {
+  height: 8px; background: var(--bg-3); border-radius: 4px;
+  overflow: hidden; margin-bottom: 24px;
+}
+.progress-fill {
+  height: 100%; background: linear-gradient(90deg, var(--accent), var(--blue));
+  transition: width 0.4s ease;
+}
+
+/* ----- Repo catalog ----- */
+.repo-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px;
+}
+.repo-card {
+  background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: 14px;
+  cursor: pointer; transition: all 0.15s;
+}
+.repo-card:hover { border-color: var(--border-2); }
+.repo-card.expanded { border-color: var(--blue); }
+.repo-card h4 { margin: 0 0 6px; font-size: 14px; font-weight: 600; }
+.repo-card h4 a { color: var(--text); text-decoration: none; }
+.repo-card h4 a:hover { color: var(--blue); }
+.repo-card .meta { display: flex; gap: 8px; font-size: 11px; color: var(--text-2); margin-bottom: 8px; }
+.repo-card .desc { font-size: 12px; color: var(--text-2); line-height: 1.5; }
+.repo-card .why { font-size: 12px; color: var(--text); margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); display: none; }
+.repo-card.expanded .why { display: block; }
+
+/* ----- Playbook ----- */
+.play-layout { display: grid; grid-template-columns: 240px 1fr; gap: 24px; }
+@media (max-width: 900px) { .play-layout { grid-template-columns: 1fr; } }
+.play-toc { position: sticky; top: calc(var(--nav-h) + 16px); align-self: start; max-height: calc(100vh - var(--nav-h) - 32px); overflow-y: auto; }
+.play-toc a {
+  display: block; padding: 6px 10px;
+  border-radius: var(--r-sm); color: var(--text-2);
+  font-size: 13px; cursor: pointer;
+}
+.play-toc a:hover { background: var(--bg-2); color: var(--text); }
+.play-toc a.active { color: var(--accent); font-weight: 600; }
+.play-content { max-width: 760px; }
+.play-content h2 { font-size: 22px; font-weight: 700; margin: 32px 0 12px; letter-spacing: -0.01em; }
+.play-content h3 { font-size: 16px; font-weight: 600; margin: 20px 0 8px; }
+.play-content p { color: var(--text); line-height: 1.65; }
+.play-content ul { padding-left: 20px; }
+.play-content li { margin: 6px 0; color: var(--text-2); }
+.play-content code { font-size: 0.88em; }
+.play-content pre {
+  background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: 14px;
+  overflow-x: auto; font-family: var(--font-mono);
+  font-size: 13px; line-height: 1.55;
+}
+.play-content pre code { background: none; padding: 0; color: var(--text); }
+.play-content table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 13px; }
+.play-content th, .play-content td {
+  padding: 8px 12px; text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.play-content th { color: var(--text); font-weight: 600; }
+.play-content td { color: var(--text-2); }
+
+/* ----- Workshop ----- */
+.week-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+.week-col h3 {
+  font-size: 14px; font-weight: 700; color: var(--accent);
+  text-transform: uppercase; letter-spacing: 0.05em;
+  margin: 0 0 12px; padding-bottom: 8px; border-bottom: 2px solid var(--accent);
+}
+.step-card {
+  background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: 12px; margin-bottom: 8px;
+  cursor: pointer; transition: all 0.15s;
+}
+.step-card:hover { border-color: var(--border-2); }
+.step-card.done { opacity: 0.6; }
+.step-card.done .step-title { text-decoration: line-through; }
+.step-title { font-size: 13px; font-weight: 600; }
+.step-meta { font-size: 11px; color: var(--text-3); margin-top: 4px; }
+
+/* ----- Tables ----- */
+.table {
+  width: 100%; border-collapse: separate; border-spacing: 0;
+  font-size: 13px;
+}
+.table th, .table td {
+  padding: 10px 12px; text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.table th {
+  color: var(--text); font-weight: 600;
+  cursor: pointer; user-select: none;
+  position: sticky; top: 0; background: var(--bg-2);
+}
+.table th:hover { color: var(--blue); }
+.table tr:hover { background: var(--bg-2); }
+.table .num { font-family: var(--font-mono); text-align: right; }
+.table tr.expanded { background: var(--bg-2); }
+.table tr.detail-row { display: none; }
+.table tr.detail-row.show { display: table-row; }
+.table tr.detail-row td { padding: 16px 12px; background: var(--bg-3); }
+
+/* ----- Search box ----- */
+.search-wrap { position: relative; margin-bottom: 16px; }
+.search-wrap input { padding-left: 36px; }
+.search-wrap::before {
+  content: '⌕'; position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+  font-size: 18px; color: var(--text-3);
+}
+
+/* ----- Toast ----- */
+.toast {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(40px);
+  background: var(--bg-3); border: 1px solid var(--border-2);
+  padding: 10px 18px; border-radius: var(--r-pill);
+  font-size: 13px; color: var(--text);
+  opacity: 0; pointer-events: none; transition: all 0.3s;
+  z-index: 1000;
+}
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* ----- Footer ----- */
+.footer {
+  border-top: 1px solid var(--border);
+  padding: 32px 20px; text-align: center;
+  color: var(--text-3); font-size: 13px;
+  max-width: var(--max-w); margin: 0 auto;
+}
+
+/* ----- Responsive ----- */
+@media (max-width: 768px) {
+  .nav-links { display: none; }
+  .win-row { grid-template-columns: 32px 1fr 80px; }
+  .win-row .effect, .win-row .time { display: none; }
+}
+
+/* Utilities */
+.muted { color: var(--text-2); }
+.mono { font-family: var(--font-mono); }
+.right { text-align: right; }
+.center { text-align: center; }
+.mt-0 { margin-top: 0; }
+.mb-0 { margin-bottom: 0; }
+.mb-2 { margin-bottom: 16px; }
+.mb-4 { margin-bottom: 32px; }
+.flex { display: flex; }
+.gap-2 { gap: 8px; }
+.gap-4 { gap: 16px; }
+.flex-wrap { flex-wrap: wrap; }
+.items-center { align-items: center; }
+.justify-between { justify-content: space-between; }
+.w-full { width: 100%; }
+</style>
+</head>
+<body>
+
+<!-- ==================== TOP NAV ==================== -->
+<nav class="topnav">
+  <a href="#home" class="brand">
+    <span class="brand-mark"></span>
+    Token Optimizer
+  </a>
+  <div class="nav-links" id="navLinks">
+    <a class="nav-link" data-view="home">Home</a>
+    <a class="nav-link" data-view="anatomy">Anatomy</a>
+    <a class="nav-link" data-view="calculator">Calculator</a>
+    <a class="nav-link" data-view="techniques">Techniques</a>
+    <a class="nav-link" data-view="languages">Languages</a>
+    <a class="nav-link" data-view="compression">Compression</a>
+    <a class="nav-link" data-view="cache">Cache</a>
+    <a class="nav-link" data-view="mixing">Model Mixing</a>
+    <a class="nav-link" data-view="models">Models</a>
+    <a class="nav-link" data-view="wins">Quick Wins</a>
+    <a class="nav-link" data-view="repos">Repos</a>
+    <a class="nav-link" data-view="playbook">Playbook</a>
+    <a class="nav-link" data-view="workshop">Workshop</a>
+  </div>
+  <div class="nav-actions">
+    <a class="icon-btn" href="https://github.com/olivomarco/github-copilot-token-optimization" target="_blank" rel="noopener" title="Inspired-by repo">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+    </a>
+    <button class="icon-btn" id="themeToggle" title="Toggle theme">◐</button>
+  </div>
+</nav>
+
+<!-- ==================== HOME ==================== -->
+<section class="view active" data-view="home">
+  <div class="hero">
+    <h1>Every token is a line item.<br>Make each one earn its place.</h1>
+    <p>An interactive tool for LLM token optimization. Cost calculator, technique explorer, compression ladder, model-mixing calculator, cache-stability harness, and 50+ open-source repos — synthesizing the best of three public playbooks.</p>
+    <div class="hero-cta">
+      <a class="btn primary" href="#calculator">Open the calculator →</a>
+      <a class="btn" href="#techniques">Browse 35+ techniques</a>
+      <a class="btn" href="#workshop">4-week adoption plan</a>
+    </div>
+  </div>
+
+  <div class="stat-grid">
+    <div class="stat-card">
+      <div class="stat-value num" data-target="44" data-suffix="%">0%</div>
+      <div class="stat-label">Token reduction at full adoption</div>
+      <div class="stat-note">37–44%, no measured productivity loss</div>
+    </div>
+    <div class="stat-card blue">
+      <div class="stat-value num" data-target="1.79" data-suffix="×">0×</div>
+      <div class="stat-label">Effective entitlement multiplier</div>
+      <div class="stat-note">Same license, 1.6–1.8× useful work</div>
+    </div>
+    <div class="stat-card purple">
+      <div class="stat-value num" data-target="8" data-suffix="×">0×</div>
+      <div class="stat-label">Output vs input cost ratio</div>
+      <div class="stat-note">Output is the expensive lane — 4–8×</div>
+    </div>
+    <div class="stat-card amber">
+      <div class="stat-value num" data-target="90" data-suffix="%">0%</div>
+      <div class="stat-label">Cheaper for cached tokens</div>
+      <div class="stat-note">Stable prefix reuses at ~10% of input</div>
+    </div>
+  </div>
+
+  <h2 class="section-title">The six pillars of token discipline</h2>
+  <p class="section-sub">Adopt all six and you land near the 37–44% total reduction. Adopt the first three and you capture 25–30%.</p>
+  <div class="grid grid-3">
+    <div class="card"><h3>01 · Context discipline</h3><p>Send only what matters. <strong>10–14% contribution.</strong> Use the escalation ladder: #selection → #file:Lx-Ly → #file → #codebase.</p></div>
+    <div class="card"><h3>02 · Intelligent model routing</h3><p>Match capability to task. <strong>10–14% contribution.</strong> Plan with the big model, build with the small one.</p></div>
+    <div class="card"><h3>03 · Instruction engineering</h3><p>Pay once for what you'd otherwise pay every turn. <strong>7–10% contribution.</strong> Three layers; cache the stable prefix.</p></div>
+    <div class="card"><h3>04 · Reasoning depth control</h3><p>Don't pay for thinking the task doesn't need. <strong>5–8% contribution.</strong> Default to Low/Medium.</p></div>
+    <div class="card"><h3>05 · Agent &amp; tool governance</h3><p>Enable, don't accumulate. <strong>3–5% contribution.</strong> Per-workspace MCP scoping.</p></div>
+    <div class="card"><h3>06 · Session lifecycle</h3><p>Reset, don't compound. <strong>5–8% contribution.</strong> One task = one session.</p></div>
+  </div>
+
+  <h2 class="section-title">The three token types</h2>
+  <p class="section-sub">Token cost is not one number. Confusing them is the most common budgeting mistake.</p>
+  <div class="grid grid-3">
+    <div class="card">
+      <span class="pill blue">Input</span>
+      <h3 style="margin-top:12px">Standard rate</h3>
+      <p>Billed every turn — files, prompt, history, tool schemas, system prompt. Lever: scope · compress · cache.</p>
+    </div>
+    <div class="card">
+      <span class="pill green">Cached</span>
+      <h3 style="margin-top:12px">~10% of input</h3>
+      <p>Byte-identical prefix reused across calls earns a ~90% discount. Lever: keep the prefix stable.</p>
+    </div>
+    <div class="card">
+      <span class="pill pink">Output</span>
+      <h3 style="margin-top:12px">4–8× input</h3>
+      <p>Visible reply + invisible reasoning trace. The most expensive lane. Lever: constrain · right-size.</p>
+    </div>
+  </div>
+
+  <h2 class="section-title">Sources &amp; inspiration</h2>
+  <div class="grid grid-3">
+    <div class="card">
+      <h3>ashy-dune quick guide</h3>
+      <p>Microsoft Asia Developer GBB · 6-scene visual guide with interactive habit toggles. <a href="https://ashy-dune-0b4215a0f.7.azurestaticapps.net/" target="_blank">Visit →</a></p>
+    </div>
+    <div class="card">
+      <h3>sukurcf detailed playbook</h3>
+      <p>Hash-routed SPA with calculator, scenarios, playbook. 15 scenario cards, 11 levers, 20+ models. <a href="https://sukurcf.github.io/sessions/token-optimization-best-practises/detailed/index.html#/home" target="_blank">Visit →</a></p>
+    </div>
+    <div class="card">
+      <h3>olivomarco docs</h3>
+      <p>MkDocs Material + reveal.js workshop. 13 chapters + 136-slide workshop deck. Curated tool list. <a href="https://olivomarco.github.io/github-copilot-token-optimization/" target="_blank">Visit →</a></p>
+    </div>
+  </div>
+</section>
+
+<!-- OTHER VIEWS WILL BE INSERTED HERE -->
+<section class="view" data-view="anatomy">
+  <h2 class="section-title">Anatomy of a prompt packet</h2>
+  <p class="section-sub">When you send "Refactor this" you're sending the smallest piece. The model sees 7 layers, each billed every turn. Hover to inspect.</p>
+  <div class="grid grid-2">
+    <div>
+      <div class="anatomy-stack" id="anatomyStack"></div>
+    </div>
+    <div>
+      <h3 class="mt-0">The three token types</h3>
+      <div class="card mb-2">
+        <span class="pill blue">Input · standard rate</span>
+        <p>Every layer above except reasoning. Billed on every turn. Shrinking your own message saves almost nothing — leverage is in the other layers.</p>
+      </div>
+      <div class="card mb-2">
+        <span class="pill green">Cached · ~10% of input</span>
+        <p>Byte-identical prefix reused across calls. The 90% discount is real but fragile — any change to the front invalidates from that point forward.</p>
+      </div>
+      <div class="card">
+        <span class="pill pink">Output · 4–8× input</span>
+        <p>Visible reply + invisible reasoning trace. Often dwarfs the visible output. The most overlooked cost lane.</p>
+      </div>
+      <h3 style="margin-top:24px">Six cost drivers</h3>
+      <div id="costDrivers"></div>
+    </div>
+  </div>
+</section>
+
+<section class="view" data-view="calculator">
+  <h2 class="section-title">Token cost calculator</h2>
+  <p class="section-sub">Pick a model, set the parameters, see the per-task cost. Cached tokens cost ~10% of input. Reasoning multipliers compound on output.</p>
+  <div class="grid grid-2">
+    <div class="card">
+      <h3 class="mt-0">Inputs</h3>
+      <div class="field">
+        <label>Model <span class="val" id="calcModelTier"></span></label>
+        <select id="calcModel"></select>
+      </div>
+      <div class="field">
+        <label>Reasoning effort <span class="val" id="calcEffortMult"></span></label>
+        <div class="radio-group" id="calcEffort">
+          <div class="radio active" data-effort="low">Low ×1</div>
+          <div class="radio" data-effort="medium">Medium ×3</div>
+          <div class="radio" data-effort="high">High ×14</div>
+          <div class="radio" data-effort="max">Max ×60</div>
+        </div>
+      </div>
+      <div class="field">
+        <label>Input tokens <span class="val" id="calcInputVal">10,000</span></label>
+        <input type="range" id="calcInput" min="100" max="200000" step="100" value="10000">
+      </div>
+      <div class="field">
+        <label>Visible output tokens <span class="val" id="calcOutputVal">1,000</span></label>
+        <input type="range" id="calcOutput" min="10" max="50000" step="10" value="1000">
+      </div>
+      <div class="field">
+        <label>Cache hit rate <span class="val" id="calcCacheVal">0%</span></label>
+        <input type="range" id="calcCache" min="0" max="100" step="5" value="0">
+      </div>
+      <div class="field">
+        <label>Agent steps <span class="val" id="calcStepsVal">1</span></label>
+        <input type="range" id="calcSteps" min="1" max="100" step="1" value="1">
+      </div>
+      <div class="field">
+        <label>Options</label>
+        <div class="check-group">
+          <div class="check" id="calcAuto">Auto Mode (−10%)</div>
+        </div>
+      </div>
+      <div class="field">
+        <label>Custom pricing (override per 1M tokens)</label>
+        <div class="flex gap-2 flex-wrap">
+          <input type="text" id="calcCustomIn" placeholder="input $" size="8">
+          <input type="text" id="calcCustomCached" placeholder="cached $" size="8">
+          <input type="text" id="calcCustomOut" placeholder="output $" size="8">
+          <button class="btn" id="calcApplyCustom">Apply</button>
+        </div>
+      </div>
+    </div>
+    <div class="card cost-display">
+      <h3 class="mt-0">Cost breakdown</h3>
+      <div class="cost-line"><span class="lbl">Model</span><span class="val" id="outModel">—</span></div>
+      <div class="cost-line"><span class="lbl">Tier</span><span class="val" id="outTier">—</span></div>
+      <div class="cost-line"><span class="lbl">Input (non-cached)</span><span class="val" id="outInputCost">$0.0000</span></div>
+      <div class="cost-line"><span class="lbl">Cached input (90% off)</span><span class="val" id="outCachedCost">$0.0000</span></div>
+      <div class="cost-line"><span class="lbl">Output (×<span id="outMult">1</span> reasoning)</span><span class="val" id="outOutputCost">$0.0000</span></div>
+      <div class="cost-line"><span class="lbl">Per agent step</span><span class="val" id="outStepCost">$0.0000</span></div>
+      <div class="cost-line"><span class="lbl">Total task (<span id="outSteps">1</span> steps)</span><span class="val" id="outStepTotal">$0.0000</span></div>
+      <div class="cost-line total"><span class="lbl">Total cost</span><span class="val" id="outTotal">$0.0000</span></div>
+      <div style="margin-top:24px; font-size:13px; color:var(--text-2)">
+        <strong>Token accounting:</strong><br>
+        Input: <span class="num" id="outInputTok">0</span> tokens → $<span class="num" id="outInputRate">0</span>/M<br>
+        Cached: <span class="num" id="outCachedTok">0</span> tokens → $<span class="num" id="outCachedRate">0</span>/M<br>
+        Output: <span class="num" id="outOutputTok">0</span> tokens (×<span id="outMult2">1</span>) → $<span class="num" id="outOutputRate">0</span>/M<br>
+        <span id="outAutoNote" style="display:none; color:var(--accent);">Auto Mode −10% applied</span>
+      </div>
+    </div>
+  </div>
+</section>
+<section class="view" data-view="techniques">
+  <h2 class="section-title">Technique explorer</h2>
+  <p class="section-sub">35+ optimization techniques from the olivomarco ch09 matrix. Filter by category, sort by savings. Click to expand for examples.</p>
+  <div class="search-wrap">
+    <input type="text" id="techSearch" placeholder="Search techniques (e.g., 'compress', 'cache', 'output')">
+  </div>
+  <div class="chip-row" id="techCats"></div>
+  <div class="chip-row">
+    <span class="muted" style="font-size:12px; align-self:center; padding-right:8px">Min savings:</span>
+    <div class="chip" data-min-save="0">Any</div>
+    <div class="chip" data-min-save="20">20%+</div>
+    <div class="chip" data-min-save="40">40%+</div>
+    <div class="chip" data-min-save="60">60%+</div>
+  </div>
+  <div style="margin:12px 0; color:var(--text-3); font-size:13px">
+    Showing <span id="techCount">0</span> of <span id="techTotal">0</span> techniques
+  </div>
+  <div class="tech-grid" id="techGrid"></div>
+</section>
+
+<section class="view" data-view="languages">
+  <h2 class="section-title">Language tax visualizer</h2>
+  <p class="section-sub">Tokenizers are not language-neutral. English is almost always cheapest. Non-English prompts can cost 2–3× more tokens for the same content.</p>
+  <div class="card mb-4">
+    <div class="field">
+      <label>Tokenizer (provider)</label>
+      <select id="langTokenizer">
+        <option value="cl100k">OpenAI (cl100k_base — GPT-3.5/4)</option>
+        <option value="o200k">OpenAI (o200k_base — GPT-4o/5)</option>
+        <option value="anthropic">Anthropic Claude</option>
+        <option value="gemini">Google Gemini</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Sample text (edit to test your own)</label>
+      <textarea id="langText" rows="4" style="width:100%">The quick brown fox jumps over the lazy dog. This is a sample sentence used to compare tokenizer efficiency across languages.</textarea>
+    </div>
+    <button class="btn" id="langCompute">Compute</button>
+  </div>
+  <div class="card">
+    <h3 class="mt-0">Tokens for the same sentence across languages</h3>
+    <p class="muted" style="font-size:13px">English baseline. Bars scale relative to English token count.</p>
+    <div class="bar-chart" id="langChart"></div>
+  </div>
+  <div class="card mt-4">
+    <h3 class="mt-0">Rule of thumb: tokens per 1000 words</h3>
+    <table class="table">
+      <thead><tr><th>Language</th><th class="num">Tokens / 1K words</th><th class="num">vs English</th><th>Notes</th></tr></thead>
+      <tbody id="langTable"></tbody>
+    </table>
+  </div>
+  <div class="card mt-4">
+    <h3 class="mt-0">Takeaways</h3>
+    <ul>
+      <li>For reusable system prompts, <strong>write in English</strong> even if user-facing output is in another language. The model translates internally — you save 30–50% on instruction tokens.</li>
+      <li>Tokenizer efficiency varies by provider: <strong>Gemini and Qwen</strong> are most efficient for non-English; <strong>Anthropic and Kimi</strong> are most expensive (Komatsuzaki heatmap).</li>
+      <li>For prompts that will be reused many times, the savings compound — every call saves the delta.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="view" data-view="compression">
+  <h2 class="section-title">Prompt compression ladder</h2>
+  <p class="section-sub">Remove the words that don't carry information. 75% prompt-token reduction is mechanical and immediate.</p>
+  <div class="grid grid-2">
+    <div class="card">
+      <h3 class="mt-0">Input prompt</h3>
+      <div class="field">
+        <label>Preset examples</label>
+        <select id="compPreset">
+          <option value="custom">Custom</option>
+          <option value="refactor">Refactor (verbose)</option>
+          <option value="debug">Debug (verbose)</option>
+          <option value="implement">Implement (verbose)</option>
+          <option value="explain">Explain (verbose)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Paste your verbose prompt here</label>
+        <textarea id="compInput" rows="8" style="width:100%">Hey, could you please help me refactor this function? I think it might have some issues with how it handles authentication, and I'd love to make it more efficient if possible. Also, if you could add some comments explaining the changes, that would be really helpful. Thanks!</textarea>
+      </div>
+      <div class="field">
+        <label>Compression level</label>
+        <input type="range" id="compLevel" min="0" max="3" step="1" value="0">
+        <div class="flex gap-2 flex-wrap" style="margin-top:8px">
+          <span class="pill" data-level="0">Verbose</span>
+          <span class="pill" data-level="1">Lite</span>
+          <span class="pill" data-level="2">Full Caveman</span>
+          <span class="pill" data-level="3">Ultra</span>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <h3 class="mt-0">Compressed output</h3>
+      <div class="ladder-display" id="compOutput">—</div>
+      <div class="grid grid-4 mt-4" style="grid-template-columns: repeat(4, 1fr); gap:8px; text-align:center">
+        <div>
+          <div class="muted" style="font-size:11px">Original</div>
+          <div class="num" id="compTok0" style="font-size:20px; font-weight:700">—</div>
+        </div>
+        <div>
+          <div class="muted" style="font-size:11px">Compressed</div>
+          <div class="num" id="compTok1" style="font-size:20px; font-weight:700; color:var(--accent)">—</div>
+        </div>
+        <div>
+          <div class="muted" style="font-size:11px">Saved</div>
+          <div class="num" id="compSavings" style="font-size:20px; font-weight:700; color:var(--accent)">—</div>
+        </div>
+        <div>
+          <div class="muted" style="font-size:11px">Ratio</div>
+          <div class="num" id="compRatio" style="font-size:20px; font-weight:700">—</div>
+        </div>
+      </div>
+      <button class="btn mt-4" id="compCopy">Copy compressed prompt</button>
+    </div>
+  </div>
+  <h3 style="margin-top:32px">Compression rules (what gets removed at each level)</h3>
+  <div class="grid grid-4">
+    <div class="card">
+      <span class="pill">L0 · Verbose</span>
+      <p style="margin-top:8px; font-size:13px">Original prompt, no changes. Polite hedging, preamble, full sentences.</p>
+    </div>
+    <div class="card">
+      <span class="pill">L1 · Lite</span>
+      <p style="margin-top:8px; font-size:13px">Drop "Hey", "could you please", "I think", "I'd love to", "if possible". Keep prose structure.</p>
+    </div>
+    <div class="card">
+      <span class="pill">L2 · Full Caveman</span>
+      <p style="margin-top:8px; font-size:13px">Drop politeness + hedge + preamble. Convert to bullet imperatives. "Refactor function. Fix auth. Make efficient."</p>
+    </div>
+    <div class="card">
+      <span class="pill">L3 · Ultra</span>
+      <p style="margin-top:8px; font-size:13px">Full caveman + abbreviate common verbs ("identify" → "find", "implement" → "add", "suggest" → "list"). Risk: ambiguity.</p>
+    </div>
+  </div>
+</section>
+
+<section class="view" data-view="cache">
+  <h2 class="section-title">Cache-stability harness</h2>
+  <p class="section-sub">Cached tokens cost ~10% of input — but only when the prefix is byte-identical. Compose your session config and watch the verdict change as you tweak it.</p>
+  <div class="grid grid-2">
+    <div class="card">
+      <h3 class="mt-0">Session config</h3>
+      <div class="field">
+        <label>Model</label>
+        <select id="cacheModel"></select>
+      </div>
+      <div class="field">
+        <label>Reasoning effort</label>
+        <div class="radio-group" id="cacheEffort">
+          <div class="radio active" data-effort="low">Low</div>
+          <div class="radio" data-effort="medium">Medium</div>
+          <div class="radio" data-effort="high">High</div>
+          <div class="radio" data-effort="max">Max</div>
+        </div>
+      </div>
+      <div class="field">
+        <label>Loaded skills</label>
+        <div class="check-group" id="cacheSkills"></div>
+      </div>
+      <div class="field">
+        <label>Active MCP / tools</label>
+        <div class="check-group" id="cacheTools"></div>
+      </div>
+      <div class="field">
+        <label>Agent / profile</label>
+        <select id="cacheProfile">
+          <option value="default">Default</option>
+          <option value="code-reviewer">Code Reviewer</option>
+          <option value="refactorer">Refactorer</option>
+          <option value="docs-writer">Docs Writer</option>
+          <option value="security-auditor">Security Auditor</option>
+        </select>
+      </div>
+      <button class="btn" id="cacheBaseline">Set as baseline (turn 1)</button>
+      <button class="btn" id="cacheReset" style="margin-left:8px">Reset</button>
+    </div>
+    <div>
+      <div class="verdict-box stable" id="cacheVerdict">
+        <div class="verdict-icon" id="cacheIcon">✓</div>
+        <div class="verdict-title" id="cacheTitle">STABLE — cache hit</div>
+        <div class="verdict-msg" id="cacheMsg">Your session prefix is byte-identical to the baseline. Cached tokens will be billed at ~10% of input rate.</div>
+      </div>
+      <div class="card">
+        <h3 class="mt-0">What changed vs baseline</h3>
+        <div id="cacheDiff" style="font-size:13px; color:var(--text-2); min-height:80px">Set a baseline first (turn 1), then change any setting to see the cache verdict update.</div>
+      </div>
+      <div class="card mt-4">
+        <h3 class="mt-0">If invalidated: handoff recipe</h3>
+        <p style="font-size:13px">Start a fresh session. Paste a one-paragraph handoff summary:</p>
+        <pre style="background:var(--bg-3); padding:12px; border-radius:8px; font-size:12px; font-family:var(--font-mono); color:var(--text)">Prior session context:
+- Task: <one-sentence task description>
+- Files touched: <file1>, <file2>
+- Decisions made: <decision 1; decision 2>
+- Open questions: <question 1>
+- Next step: <what to do first>
+
+Then: model=<X>, effort=<Y>, skills=<Z>, tools=<T>, profile=<P></pre>
+        <button class="btn mt-2" onclick="copyText('Prior session context:\n- Task: \n- Files touched: \n- Decisions made: \n- Open questions: \n- Next step: \n\nThen: model=, effort=, skills=, tools=, profile=')">Copy template</button>
+      </div>
+    </div>
+  </div>
+</section>
+<section class="view" data-view="mixing">
+  <h2 class="section-title">Model-mixing calculator</h2>
+  <p class="section-sub">Plan with the big model, build with the small one. A 30-turn day on Opus costs 90 units; the same day mixed costs 18.6 — a 79% saving.</p>
+  <div class="card mb-4">
+    <h3 class="mt-0">Workflow composition</h3>
+    <div id="mixingRows"></div>
+    <button class="btn mt-2" id="mixingAdd">+ Add turn type</button>
+  </div>
+  <div class="grid grid-2">
+    <div class="card">
+      <h3 class="mt-0">Cost breakdown</h3>
+      <div id="mixingBreakdown"></div>
+    </div>
+    <div class="card">
+      <h3 class="mt-0">Savings vs single-model strategies</h3>
+      <div class="bar-chart" id="mixingComparison"></div>
+    </div>
+  </div>
+  <h3 style="margin-top:24px">Presets</h3>
+  <div class="flex gap-2 flex-wrap">
+    <button class="btn" data-mix-preset="daily">Daily-driver (30 turns)</button>
+    <button class="btn" data-mix-preset="sprint">Sprint (100 turns)</button>
+    <button class="btn" data-mix-preset="refactor">Big refactor (50 turns)</button>
+    <button class="btn" data-mix-preset="allop">All Opus (worst case)</button>
+    <button class="btn" data-mix-preset="allsonnet">All Sonnet (baseline)</button>
+  </div>
+  <div class="card mt-4">
+    <h3 class="mt-0">How the math works</h3>
+    <p>Cost units are normalized so Sonnet = 1.0. Relative ratios: Haiku = 0.15×, Sonnet = 1.0×, Opus = 5.0× (based on Anthropic API pricing $1/$5, $3/$15, $5/$25 per 1M tokens).</p>
+    <p>A turn mixes input + output. We assume 10K input tokens + 1K output tokens per turn. Cache hit rate is fixed at 50% for the comparison.</p>
+  </div>
+</section>
+
+<section class="view" data-view="models">
+  <h2 class="section-title">Models &amp; pricing reference</h2>
+  <p class="section-sub">Click a row to load it into the cost calculator. Sort by any column. <strong>Disclaimer:</strong> Copilot UBB exact per-model rates are unpublished — these are intuition-grade vendor API prices.</p>
+  <div class="search-wrap">
+    <input type="text" id="modelSearch" placeholder="Filter by name or provider">
+  </div>
+  <div class="chip-row">
+    <span class="muted" style="font-size:12px; align-self:center; padding-right:8px">Tier:</span>
+    <div class="chip active" data-tier="all">All</div>
+    <div class="chip" data-tier="lightweight">Lightweight</div>
+    <div class="chip" data-tier="versatile">Versatile</div>
+    <div class="chip" data-tier="powerful">Powerful</div>
+  </div>
+  <table class="table">
+    <thead>
+      <tr>
+        <th data-sort="name">Model ▾</th>
+        <th data-sort="provider">Provider</th>
+        <th data-sort="tier">Tier</th>
+        <th data-sort="input" class="num">Input $/M</th>
+        <th data-sort="cached" class="num">Cached $/M</th>
+        <th data-sort="output" class="num">Output $/M</th>
+        <th data-sort="ratio" class="num">Out/In</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody id="modelTable"></tbody>
+  </table>
+</section>
+
+<section class="view" data-view="wins">
+  <h2 class="section-title">Quick wins checklist</h2>
+  <p class="section-sub">15 actions you can take right now. Each is self-contained, with a copy-to-clipboard snippet. Progress saves to localStorage.</p>
+  <div class="progress-bar">
+    <div class="progress-fill" id="winsProgress" style="width:0%"></div>
+  </div>
+  <div style="text-align:center; color:var(--text-2); font-size:13px; margin-bottom:24px">
+    <span id="winsCount">0</span> of <span id="winsTotal">15</span> done · <span id="winsSavings">0%</span> estimated savings captured
+  </div>
+  <div id="winsList"></div>
+</section>
+
+<section class="view" data-view="repos">
+  <h2 class="section-title">Open-source ecosystem — 50+ repos</h2>
+  <p class="section-sub">Categorized catalogue of tokenizers, chunkers, prompt frameworks, inference engines, eval tools, and more. Click to expand.</p>
+  <div class="search-wrap">
+    <input type="text" id="repoSearch" placeholder="Search repos by name or description">
+  </div>
+  <div class="chip-row" id="repoCats"></div>
+  <div style="margin:12px 0; color:var(--text-3); font-size:13px">
+    Showing <span id="repoCount">0</span> of <span id="repoTotal">0</span> repos
+  </div>
+  <div class="repo-grid" id="repoGrid"></div>
+</section>
+
+<section class="view" data-view="playbook">
+  <h2 class="section-title">Playbook reference</h2>
+  <p class="section-sub">The 11 levers, 15 scenarios, and 6 pillars in long-form. Use the TOC to jump.</p>
+  <div class="play-layout">
+    <div class="play-toc" id="playToc"></div>
+    <div class="play-content" id="playContent"></div>
+  </div>
+</section>
+
+<section class="view" data-view="workshop">
+  <h2 class="section-title">4-week adoption plan</h2>
+  <p class="section-sub">A guided program. Check off each step; progress saves to localStorage.</p>
+  <div class="progress-bar">
+    <div class="progress-fill" id="wsProgress" style="width:0%"></div>
+  </div>
+  <div style="text-align:center; color:var(--text-2); font-size:13px; margin-bottom:32px">
+    <span id="wsCount">0</span> of <span id="wsTotal">20</span> steps complete
+  </div>
+  <div class="week-grid" id="wsWeeks"></div>
+</section>
+
+<div class="footer">
+  Built as an interactive companion to three public token-optimization playbooks.
+  Pricing data is intuition-grade (vendor API prices, not Copilot UBB rates — those are unpublished).
+  Patterns are durable across provider pricing changes.
+</div>
+
+<div class="toast" id="toast">Copied to clipboard</div>
+
+<script>
+/* ==========================================================================
+   Token Optimizer — JS
+   Vanilla ES6, no dependencies, no build step.
+   ========================================================================== */
+
+// ---------------- DATA ----------------
+
+const PRICING = [
+  // OpenAI
+  { name: "gpt-5.4-nano",    provider: "OpenAI",    tier: "lightweight", input: 0.20,  cached: 0.02,  output: 1.25 },
+  { name: "gpt-5-mini",     provider: "OpenAI",    tier: "lightweight", input: 0.25,  cached: 0.025, output: 2.00 },
+  { name: "gpt-5.4-mini",   provider: "OpenAI",    tier: "lightweight", input: 0.75,  cached: 0.075, output: 4.50 },
+  { name: "gpt-5.4",        provider: "OpenAI",    tier: "versatile",  input: 2.50,  cached: 0.25,  output: 15.00 },
+  { name: "gpt-5.4-long",   provider: "OpenAI",    tier: "versatile",  input: 5.00,  cached: 0.50,  output: 22.50 },
+  { name: "gpt-5.3-codex",  provider: "OpenAI",    tier: "powerful",   input: 1.75,  cached: 0.175, output: 14.00 },
+  { name: "gpt-5.5",        provider: "OpenAI",    tier: "powerful",   input: 5.00,  cached: 0.50,  output: 30.00 },
+  { name: "gpt-5.5-long",   provider: "OpenAI",    tier: "powerful",   input: 10.00, cached: 1.00,  output: 45.00 },
+  // Anthropic
+  { name: "claude-haiku-4.5",  provider: "Anthropic", tier: "lightweight", input: 1.00,  cached: 0.10,  output: 5.00 },
+  { name: "claude-sonnet-4.5", provider: "Anthropic", tier: "versatile",  input: 3.00,  cached: 0.30,  output: 15.00 },
+  { name: "claude-opus-4.5",   provider: "Anthropic", tier: "powerful",   input: 5.00,  cached: 0.50,  output: 25.00 },
+  { name: "claude-fable-5",    provider: "Anthropic", tier: "powerful",   input: 10.00, cached: 1.00,  output: 50.00 },
+  // Google
+  { name: "gemini-3-flash",     provider: "Google", tier: "lightweight", input: 0.50, cached: 0.05,  output: 3.00 },
+  { name: "gemini-3.5-flash",   provider: "Google", tier: "lightweight", input: 1.50, cached: 0.15,  output: 9.00 },
+  { name: "gemini-2.5-pro",     provider: "Google", tier: "versatile",  input: 1.25, cached: 0.125, output: 10.00 },
+  { name: "gemini-3.1-pro",     provider: "Google", tier: "versatile",  input: 2.00, cached: 0.20,  output: 12.00 },
+  { name: "gemini-3.1-pro-long",provider: "Google", tier: "powerful",   input: 4.00, cached: 0.40,  output: 18.00 },
+  // Microsoft + GitHub
+  { name: "mai-code-1-flash", provider: "Microsoft", tier: "lightweight", input: 0.75, cached: 0.075, output: 4.50 },
+  { name: "raptor-mini",      provider: "GitHub",   tier: "lightweight", input: 0.25, cached: 0.025, output: 2.00 },
+];
+PRICING.forEach(p => p.ratio = (p.output / p.input).toFixed(1));
+
+const EFFORT_MULT = { low: 1, medium: 3, high: 14, max: 60 };
+
+const ANATOMY_LAYERS = [
+  { name: "System prompt",       color: "var(--c-system)",    tokens: 350,   desc: "Provider's base instructions, safety policy, tooling preamble. Billed every turn. Fixed for a session, not cacheable by you." },
+  { name: "Custom instructions", color: "var(--c-instr)",    tokens: 1200,  desc: "Your repo's copilot-instructions.md, AGENTS.md, per-language .instructions.md files. Billed every turn — cacheable if prefix is byte-identical." },
+  { name: "Tools & MCP schemas", color: "var(--c-tools)",   tokens: 1800,  desc: "JSON schema for every enabled tool (Slack, Jira, DB, internal CLIs). Billed every turn, multiplied by the number of steps in the agent loop. The most overlooked tax." },
+  { name: "Conversation history", color: "var(--c-history)", tokens: 4500, desc: "Prior turns, tool results, retrieved files from earlier. Grows every turn. By turn 30, it is typically 2–5× the size of the current prompt." },
+  { name: "Retrieved context",   color: "var(--c-retrieved)", tokens: 2400, desc: "Files you @mention, RAG chunks, web search results. Billed on the turn it's retrieved, then re-billed every subsequent turn while it stays in the window." },
+  { name: "Your message",        color: "var(--c-user)",     tokens: 180,   desc: "The actual instruction you typed. THE SMALLEST PIECE. Shrinking this saves almost nothing on its own — leverage is in the other layers." },
+  { name: "Reasoning trace",      color: "var(--c-reasoning)",tokens: 2100, desc: "For reasoning models, the invisible chain-of-thought before the visible reply. Billed at the OUTPUT rate (4–8× input) and frequently dwarfs the visible output." },
+];
+
+const COST_DRIVERS = [
+  { name: "Context size",       impact: "30–50% of spend",   note: "Every file, RAG chunk, prior turn. #codebase vs #selection = 5–10× swing." },
+  { name: "Model selection",    impact: "5–8× spread",       note: "Lightweight vs Powerful tier = 5–8×. Default to versatile = the expensive mistake." },
+  { name: "Reasoning effort",    impact: "3–5× output",       note: "Low ×1 → Max ×60. Compounds on output, which is 4–8× input." },
+  { name: "Agent-mode loops",   impact: "10–40× multiplier",  note: "Each step re-sends the whole packet. 30 steps = 30× single-shot." },
+  { name: "MCP tool overhead",  impact: "Material past ~20", note: "Schema × steps × tools. 188 tools × 30 steps = 1.1M tokens of pure schema." },
+  { name: "Session length",     impact: "2–5× by turn 30",   note: "History compounds. Turn 30 costs 5× turn 1 for the same work." },
+];
+
+const TECHNIQUES = [
+  // Category A: Communication Style
+  { name: "Caveman phrasing",       cat: "Communication", inSav: 75, outSav: 0,  quality: "+", effort: "Low",     best: "All chat",     detail: "Drop politeness, hedging, preamble. Keep only verbs + nouns. 'Hey could you please refactor...' → 'Refactor function. Fix auth.'" },
+  { name: "Structured phrasing",    cat: "Communication", inSav: 36, outSav: 0,  quality: "+", effort: "Low",     best: "Contracts, schemas", detail: "Replace prose with bullets / YAML / code blocks. 'I need POST /api/users with validation...' → 5-line YAML block." },
+  { name: "Drop role/persona",      cat: "Communication", inSav: 80, outSav: 0,  quality: "=", effort: "Low",     best: "Coding tasks",   detail: "'You are a senior engineer with 15 years experience...' is wasted tokens. The model performs the same with or without it." },
+  // Category B: Prompt Engineering
+  { name: "Output cap at tail",     cat: "Output Control", inSav: 0,  outSav: 70, quality: "=", effort: "Low",     best: "Code generation", detail: "'Code only, no explanation.' at the end of the prompt. 1,800-token explain-then-implement → 500-token code-only." },
+  { name: "List-format constraint", cat: "Output Control", inSav: 0,  outSav: 90, quality: "-", effort: "Low",     best: "Lookups",        detail: "'List the affected files. One per line, no commentary.' Caps output at a flat list." },
+  { name: "Length cap (N bullets)", cat: "Output Control", inSav: 0,  outSav: 60, quality: "-", effort: "Low",     best: "Summaries",      detail: "'Maximum 3 bullet points.' Forces brevity; reduces nuance." },
+  { name: "Signature-only",         cat: "Output Control", inSav: 0,  outSav: 85, quality: "-", effort: "Low",     best: "Scaffolding",   detail: "'Reply with the function signature and a one-line docstring. No implementation.'" },
+  // Category C: Context Management
+  { name: "Escalation ladder",      cat: "Context",       inSav: 50, outSav: 0, quality: "+", effort: "Low",     best: "Code edits",    detail: "#selection → #file:Lx-Ly → #file → #folder → #codebase. Treat #codebase as a deliberate decision, not default." },
+  { name: "Path-scoped instructions", cat: "Context",     inSav: 70, outSav: 0, quality: "+", effort: "Medium", best: "Multi-domain repos", detail: "applyTo: 'src/api/**/*.ts' frontmatter. Loaded only when relevant files are in context. 60–90% instruction-token reduction." },
+  { name: "Chunk cap (top-k=5)",    cat: "Context",       inSav: 80, outSav: 0, quality: "+", effort: "Medium", best: "RAG pipelines", detail: "Cap retrieved chunks at 5–10 per query. More is noise that costs tokens." },
+  { name: "Session reset",         cat: "Session",        inSav: 50, outSav: 0, quality: "+", effort: "Low",     best: "Multi-task days", detail: "One task = one session. /clear between unrelated tasks. /compact at 70% window. Prevents 2–5× per-turn compounding." },
+  { name: "Sliding-window summarization", cat: "Context", inSav: 40, outSav: 0, quality: "=", effort: "High",   best: "Long sessions",  detail: "Replace old turns with a 'Prior context' summary block. Pays off when session >20 turns." },
+  // Category D: Agent-Specific
+  { name: "Subagent delegation",    cat: "Agent",         inSav: 90, outSav: 0, quality: "+", effort: "Medium", best: "Discovery, parallel review", detail: "Parent reads summary, not source. 20K tokens source → 1K summary = 10× input reduction on parent context." },
+  { name: "Agent step cap",         cat: "Agent",         inSav: 70, outSav: 70, quality: "+", effort: "Low",   best: "Tool-heavy tasks", detail: "Cap agent steps at 10–15. Past 30 the cost compounds without quality improving." },
+  { name: "MCP per-workspace scoping", cat: "MCP & Tools", inSav: 72, outSav: 0, quality: "+", effort: "Medium", best: "Multi-tool setups", detail: "Enable Slack only where Slack is used. 188 tools → 52 per workspace = ~13K tokens saved per task." },
+  { name: "Tool catalog audit",     cat: "MCP & Tools",   inSav: 50, outSav: 0, quality: "+", effort: "Low",    best: "Quarterly hygiene", detail: "Most teams have 2–5× more tools enabled than they use. Disable unused quarterly." },
+  // Category E: Memory/State
+  { name: "Cache-stable prefix",    cat: "Context",       inSav: 80, outSav: 0, quality: "=", effort: "Medium", best: "Repeated calls", detail: "Hold system prompt + instructions + tools byte-identical. Volatile content (your message, fresh RAG) at the END. 70–80% input-cost cut on cache hits." },
+  { name: "Instruction hierarchy",  cat: "Context",       inSav: 30, outSav: 0, quality: "=", effort: "Low",    best: "Production apps", detail: "System/developer role tokens cache across users. User role tokens don't. Move 'house style' to developer role." },
+  // Category F: Model Selection
+  { name: "Phased routing (plan high, execute low)", cat: "Model", inSav: 54, outSav: 0, quality: "+", effort: "Medium", best: "Multi-turn workflows", detail: "Plan with Opus (1–2 turns), build with Sonnet (18 turns), lookup with Haiku (10 turns). 30 turns: 50 units → 22.8 units." },
+  { name: "Auto Mode",              cat: "Model",         inSav: 10, outSav: 10, quality: "=", effort: "Low",   best: "Copilot users",  detail: "Copilot's automatic tier selector. Documented ~10% token-multiplier discount on top." },
+  { name: "Mixed-model day",        cat: "Model",         inSav: 38, outSav: 0, quality: "+", effort: "Medium", best: "Daily-driver dev", detail: "60% Haiku, 30% Sonnet, 10% Opus. 38% saving vs all-Sonnet; 79% vs all-Opus." },
+  // Category G: Output Control (additional)
+  { name: "Reasoning effort Low",   cat: "Output Control", inSav: 0, outSav: 80, quality: "+", effort: "Low",    best: "Mechanical edits", detail: "Default to Low. Reserve Medium for multi-step. High only for architecture with verification gates. Max: never." },
+  { name: "Decompose high-effort",  cat: "Output Control", inSav: 0, outSav: 60, quality: "+", effort: "Medium", best: "Big refactors", detail: "1 High-effort request → 3–5 Medium-effort steps with verify gates. 14× output → 9× output; better verifiability." },
+  // Category H: Session Management
+  { name: "Compact at 70%",         cat: "Session",       inSav: 30, outSav: 0, quality: "=", effort: "Low",    best: "Long sessions",  detail: "When context hits 70%, /compact. The compacted summary becomes part of the cache-stable prefix and caches going forward." },
+  { name: "Handoff summary on switch", cat: "Session",    inSav: 40, outSav: 0, quality: "+", effort: "Low",    best: "Multi-session tasks", detail: "Before /clear, write a 5-line handoff: task, files, decisions, open questions, next step." },
+  // Category I: Context File Management
+  { name: "AGENTS.md landmines only", cat: "Context Files", inSav: 23, outSav: 0, quality: "+", effort: "Low",   best: "Every repo",    detail: "Write landmines (rules that cannot be inferred), not encyclopedias. ETH-Zurich study: encyclopedia pattern = -2% correctness, +20–23% token cost." },
+  { name: "Delete LLM-generated /init", cat: "Context Files", inSav: 20, outSav: 0, quality: "+", effort: "Low", best: "Repo setup",   detail: "LLM-generated context files hurt agent correctness. Treat AGENTS.md like a bug tracker, not a wiki." },
+  { name: "Three-layer instructions", cat: "Context Files", inSav: 60, outSav: 0, quality: "+", effort: "Medium", best: "Multi-domain repos", detail: "Global (~500 tokens) + Repo (~1500) + Path-scoped (~300 per file). Each layer has different volatility; layering lets cacheable prefix stay stable." },
+  // Category J: MCP & Tool Management (additional)
+  { name: "Disable-by-default",     cat: "MCP & Tools",   inSav: 50, outSav: 0, quality: "+", effort: "Low",    best: "All setups",   detail: "Make enabling a tool a deliberate decision, not a default. On-demand enablement per task." },
+  { name: "Schema pruning",         cat: "MCP & Tools",   inSav: 30, outSav: 0, quality: "=", effort: "Medium", best: "Custom MCP",    detail: "Trim verbose descriptions from tool schemas. 200-token schema × 30 steps × 50 tools = 300K tokens." },
+  // Category K: Agent Mode Configuration
+  { name: "Match mode to task",     cat: "Agent Mode",    inSav: 90, outSav: 90, quality: "+", effort: "Low",  best: "All workflows", detail: "Ask (1×) for single-shot. Plan (2–5×) for review-before-execute. Agent (10–40×) for iterative feedback loops. Over-using Agent = 10× waste." },
+  { name: "Plan-first framework",  cat: "Agent Mode",    inSav: 40, outSav: 30, quality: "+", effort: "Medium", best: "Complex tasks", detail: "Three-tier: planning lane (strong model) → execution lane (fresh session, weak model) → verification (review)." },
+  { name: "Parallel review subagents", cat: "Agent Mode", inSav: 70, outSav: 0, quality: "+", effort: "High",  best: "PR review",    detail: "Fan out correctness / quality / security / architecture reviews to 4 subagents. 4× coverage, 0.3× parent context cost." },
+];
+
+const TECH_CATS = ["Communication", "Prompt Engineering", "Context", "Output Control", "Agent", "Session", "Model", "Context Files", "MCP & Tools", "Agent Mode"];
+
+const LANGUAGE_DATA = [
+  { lang: "English",   tokens: 1300, ratio: 1.00, note: "Baseline — English-heavy BPE vocabularies" },
+  { lang: "Spanish",    tokens: 1494, ratio: 1.15, note: "Latin script; mild overhead" },
+  { lang: "French",     tokens: 1494, ratio: 1.15, note: "Similar to Spanish" },
+  { lang: "German",     tokens: 1494, ratio: 1.15, note: "Compound words split poorly" },
+  { lang: "Chinese",    tokens: 1819, ratio: 1.40, note: "Logographic; depends on tokenizer" },
+  { lang: "Japanese",   tokens: 1950, ratio: 1.50, note: "Three writing systems; mixed" },
+  { lang: "Korean",     tokens: 2210, ratio: 1.70, note: "Hangul syllable blocks" },
+  { lang: "Russian",    tokens: 2080, ratio: 1.60, note: "Cyrillic; separate vocab" },
+  { lang: "Turkish",    tokens: 2730, ratio: 2.10, note: "Agglutinative — worst case" },
+];
+
+// Approximate per-language token multipliers for the same English sentence (relative to baseline)
+const LANG_SENTENCE_MULT = {
+  english: 1.00, spanish: 1.15, french: 1.15, german: 1.18, chinese: 1.45, japanese: 1.55, korean: 1.75, russian: 1.62, turkish: 2.10, portuguese: 1.13, italian: 1.16, hindi: 1.85, arabic: 1.55, hebrew: 1.70
+};
+
+const QUICK_WINS = [
+  { n: 1, action: "Default to Auto Mode",                              effect: "10% discount on Copilot",         time: "2 min",  sav: 10, snippet: "// In VS Code Copilot Chat settings:\n// Set defaultModel to 'auto'\n\"github.copilot.chat.advanced.defaultModel\": \"auto\"" },
+  { n: 2, action: "Default reasoning effort to Low or Medium",        effect: "3–14× output savings",              time: "1 min",  sav: 60, snippet: "// In Copilot Chat:\n// Set reasoning effort to 'low' for mechanical tasks\n// Reserve 'high' for architecture\n/effort low" },
+  { n: 3, action: "Adopt the escalation ladder as a team rule",        effect: "30–50% context savings",           time: "10 min", sav: 40, snippet: "# Escalation ladder (put in AGENTS.md):\n# selection → file:Lx-Ly → file → folder → codebase\n# Treat #codebase as a deliberate decision, not default." },
+  { n: 4, action: "Cap retrieved RAG chunks at 5–10 per query",         effect: "80–90% retrieval savings",         time: "5 min",  sav: 80, snippet: "# In your RAG config:\ntop_k: 5\n# More is almost always noise that costs tokens" },
+  { n: 5, action: "Add 'Code only, no explanation.' to code prompts",   effect: "40–80% output savings",            time: "1 min",  sav: 70, snippet: "# Add at the end of every code prompt:\n# 'Code only, no explanation.'\n# Or for signatures: 'Reply with the function signature and a one-line docstring. No implementation.'" },
+  { n: 6, action: "Audit enabled MCP tools; scope per-workspace",      effect: "Up to 72% tool catalog cut",       time: "30 min", sav: 72, snippet: "// In .vscode/mcp.json — scope per workspace:\n// Enable Slack only in PM workspace\n// Enable Jira only in PM workspace\n// Enable DB only in data workspace\n// Disable everything else by default" },
+  { n: 7, action: "Write AGENTS.md as landmines, not encyclopedia",     effect: "20–23% token cost removed",        time: "20 min", sav: 22, snippet: "# Landmines (cannot be inferred from code):\n- Use uv, not pip. (CI rejects pip installs.)\n- Migrations must run in order; `alembic upgrade head` forbidden in PRs.\n- Do not refactor auth — pending audit Q3.\n- Tests run in parallel; do not use module-level state." },
+  { n: 8, action: "Set per-user limit (ULB) at 150% of average",        effect: "Caps runaway scripts",              time: "10 min", sav: 30, snippet: "# In Copilot admin:\n# Per-user limit (ULB) = 150% of expected average\n# Cost-center budgets: 80% alert, 100% hard cap\n# Enterprise cap: 80% alert to finance" },
+  { n: 9, action: "Default model to versatile tier (Sonnet)",           effect: "5–8× vs defaulting to powerful",   time: "1 min",  sav: 80, snippet: "// In Copilot Chat settings:\n// Default to claude-sonnet-4.5 (versatile tier)\n// Reserve claude-opus-4.5 (powerful) for architecture\n\"github.copilot.chat.advanced.defaultModel\": \"claude-sonnet-4.5\"" },
+  { n: 10, action: "Use path-scoped .instructions.md files",            effect: "60–90% instruction savings",        time: "20 min", sav: 70, snippet: "---\napplyTo: \"src/api/**/*.ts\"\n---\n# API conventions\n- All endpoints return `Result<T, ApiError>`, never throw.\n- Validate with zod at the controller boundary.\n- Versioning: URL path (/v1, /v2), not header." },
+  { n: 11, action: "One task = one session. /clear between tasks",       effect: "30–50% long-workflow savings",      time: "Habit",  sav: 40, snippet: "# Session hygiene rule:\n# Task done → /clear\n# Switching tasks → /clear\n# Context at 70% → /compact\n# Context at 90% → /clear and start over" },
+  { n: 12, action: "Hold instruction prefix byte-identical for session", effect: "70–80% input-cost cut on cache hits", time: "Habit", sav: 80, snippet: "# Cache-stable prefix:\n# - System prompt: don't touch\n# - Custom instructions: don't edit mid-session\n# - Tool schemas: don't toggle mid-session\n# - Your message: goes at the END, not the front" },
+  { n: 13, action: "Plan with Opus (1–2 turns), build with Sonnet",     effect: "25–55% vs single-model",           time: "Habit",  sav: 50, snippet: "# Phased routing:\n# Turn 1–2: Opus (plan)\n# Turn 3–20: Sonnet (build)\n# Lookups: Haiku (cheap)" },
+  { n: 14, action: "Use subagents for discovery + parallel review",     effect: "~10× parent context reduction",     time: "15 min", sav: 90, snippet: "# Parent: 'Research the auth flow. Use a subagent to read\n# 20 auth files in isolation. Return 1,000-token summary.'\n# Subagent (isolated context): 'Read these 20 files.\n# Summarize in 1,000 tokens: flow, deps, landmines.'" },
+  { n: 15, action: "Set up Langfuse or Helicone observability",         effect: "Makes every other lever visible",    time: "1 hour", sav: 15, snippet: "# Quick start (Langfuse self-hosted):\n# docker compose up\n# Add to your app:\n# from langfuse import Langfuse\n# langfuse = Langfuse()\n# Then trace every LLM call with token usage + cost" },
+];
+
+const REPOS = [
+  // Tokenizers
+  { name: "openai/tiktoken",        stars: 19288, license: "MIT", cat: "Tokenizers", url: "https://github.com/openai/tiktoken", desc: "Reference BPE tokenizer for OpenAI models (cl100k_base, o200k_base). Foundation of most token-counting libraries." },
+  { name: "google/sentencepiece",   stars: 12091, license: "Apache-2.0", cat: "Tokenizers", url: "https://github.com/google/sentencepiece", desc: "Unsupervised BPE/Unigram tokenizer used by Llama, T5, Gemma." },
+  { name: "huggingface/tokenizers", stars: 11050, license: "Apache-2.0", cat: "Tokenizers", url: "https://github.com/huggingface/tokenizers", desc: "Fast Rust tokenizers (BPE/WordPiece/Unigram) with HFHub integration." },
+  { name: "dqbd/tiktoken",          stars: 1074,  license: "MIT", cat: "Tokenizers", url: "https://github.com/dqbd/tiktoken", desc: "JS/WASM port of tiktoken for browsers and Node." },
+  { name: "niieani/gpt-tokenizer", stars: 846,   license: "MIT", cat: "Tokenizers", url: "https://github.com/niieani/gpt-tokenizer", desc: "Pure-JS BPE encoder/decoder for GPT-2/3.5/4/o200k. No WASM." },
+  { name: "xenova/transformers.js", stars: 16304, license: "Apache-2.0", cat: "Tokenizers", url: "https://github.com/xenova/transformers.js", desc: "Runs HF tokenizers + models in-browser via ONNX." },
+  // Token counting
+  { name: "BerriAI/litellm",        stars: 59212, license: "MIT", cat: "Token counting", url: "https://github.com/BerriAI/litellm", desc: "Unified gateway to 100+ LLMs with token_count(), per-request cost tracking, budgets." },
+  { name: "AgentOps-AI/tokencost",  stars: 2008,  license: "MIT", cat: "Token counting", url: "https://github.com/AgentOps-AI/tokencost", desc: "Tiny library mapping every model's per-1K-token prices; 2-line cost calculation." },
+  { name: "hegelai/prompttools",    stars: 3055,  license: "Apache-2.0", cat: "Token counting", url: "https://github.com/hegelai/prompttools", desc: "Test prompts AND token usage/cost across providers in one matrix experiment." },
+  // RAG / chunking
+  { name: "langchain-ai/langchain", stars: 146714, license: "MIT", cat: "RAG / chunking", url: "https://github.com/langchain-ai/langchain", desc: "RecursiveCharacterTextSplitter, TokenTextSplitter, length_function=tiktoken. Default chunking/counting stack." },
+  { name: "run-llama/llama_index", stars: 52244, license: "MIT", cat: "RAG / chunking", url: "https://github.com/run-llama/llama_index", desc: "Token-aware chunkers (sentence, semantic, hierarchical); context-window abstractions." },
+  { name: "deepset-ai/haystack",   stars: 26561, license: "Apache-2.0", cat: "RAG / chunking", url: "https://github.com/deepset-ai/haystack", desc: "Production RAG orchestration with PreProcessor chunking and pipeline components." },
+  { name: "feyninc/chonkie",        stars: 4760,  license: "MIT", cat: "RAG / chunking", url: "https://github.com/feyninc/chonkie", desc: "Lightweight chunker (semantic / sentence / token / late-chunking); fast drop-in for LangChain." },
+  { name: "aurelio-labs/semantic-chunkers", stars: 259, license: "MIT", cat: "RAG / chunking", url: "https://github.com/aurelio-labs/semantic-chunkers", desc: "Clean semantic chunking implementations (UPRP, semantic)." },
+  { name: "benbrandt/text-splitter", stars: 631,  license: "MIT", cat: "RAG / chunking", url: "https://github.com/benbrandt/text-splitter", desc: "Rust-powered semantic chunking with custom length functions." },
+  { name: "chroma-core/chroma",     stars: 29336, license: "Apache-2.0", cat: "RAG / chunking", url: "https://github.com/chroma-core/chroma", desc: "Open-source vector database for RAG." },
+  // Prompt frameworks
+  { name: "promptfoo/promptfoo",    stars: 25302, license: "MIT", cat: "Prompt frameworks", url: "https://github.com/promptfoo/promptfoo", desc: "Test prompts, agents, RAG with deterministic + LLM-graded assertions across models." },
+  { name: "stanfordnlp/dspy",       stars: 38154, license: "MIT", cat: "Prompt frameworks", url: "https://github.com/stanfordnlp/dspy", desc: "Programming-not-prompting; BootstrapFewShot, MIPRO auto-optimize prompts to fewer / more effective tokens." },
+  { name: "microsoft/promptflow",   stars: 11245, license: "MIT", cat: "Prompt frameworks", url: "https://github.com/microsoft/promptflow", desc: "Microsoft's LLM app authoring/eval framework with prompt orchestration." },
+  { name: "microsoft/EvoPrompt",   stars: 52,    license: "MIT", cat: "Prompt frameworks", url: "https://github.com/microsoft/EvoPrompt", desc: "Evolution-based automatic prompt optimization (genetic + DE variants)." },
+  { name: "langfuse/langfuse",      stars: 34845, license: "MIT", cat: "Prompt frameworks", url: "https://github.com/langfuse/langfuse", desc: "Prompt management (versioning, A/B) + observability." },
+  // KV-cache / inference
+  { name: "vllm-project/vllm",     stars: 92221, license: "Apache-2.0", cat: "KV-cache / inference", url: "https://github.com/vllm-project/vllm", desc: "High-throughput serving; invented PagedAttention for KV-cache management + continuous batching." },
+  { name: "InternLM/lmdeploy",      stars: 8082,  license: "Apache-2.0", cat: "KV-cache / inference", url: "https://github.com/InternLM/lmdeploy", desc: "Compress + serve LLMs with W4A16, KV-cache quantization, TurboMind engine." },
+  { name: "huggingface/text-generation-inference", stars: 10885, license: "Apache-2.0", cat: "KV-cache / inference", url: "https://github.com/huggingface/text-generation-inference", desc: "HF's production TGI server with continuous batching + paged attention." },
+  { name: "NVIDIA/TensorRT-LLM",   stars: 14677, license: "Apache-2.0", cat: "KV-cache / inference", url: "https://github.com/NVIDIA/TensorRT-LLM", desc: "NVIDIA's heavily optimized inference engine (FP8/INT4) with KV-cache reuse." },
+  { name: "microsoft/DeepSpeed",   stars: 43145, license: "Apache-2.0", cat: "KV-cache / inference", url: "https://github.com/microsoft/DeepSpeed", desc: "DeepSpeed-Inference + FastGen: KV-cache management, fused kernels, dynamic batching." },
+  { name: "mit-han-lab/streaming-llm", stars: 7266, license: "MIT", cat: "KV-cache / inference", url: "https://github.com/mit-han-lab/streaming-llm", desc: "Attention sinks make KV-cache reusable across infinite context." },
+  { name: "mit-han-lab/llm-awq",   stars: 3636,  license: "MIT", cat: "KV-cache / inference", url: "https://github.com/mit-han-lab/llm-awq", desc: "AWQ INT4 activation-aware weight quantization; 3–4× memory/throughput." },
+  { name: "IST-DASLab/marlin",     stars: 1149,  license: "Apache-2.0", cat: "KV-cache / inference", url: "https://github.com/IST-DASLab/marlin", desc: "Near-ideal FP16×INT4 GEMM kernel; powers fast INT4 in vLLM/TGI." },
+  // Eval / observability
+  { name: "explodinggradients/ragas", stars: 15788, license: "Apache-2.0", cat: "Eval / observability", url: "https://github.com/explodinggradients/ragas", desc: "De-facto RAG evaluation: faithfulness, answer relevancy, context precision." },
+  { name: "truera/trulens",         stars: 3565,  license: "MIT", cat: "Eval / observability", url: "https://github.com/truera/trulens", desc: "Eval + tracking for LLM apps/agents; token usage, latency, quality in one place." },
+  { name: "helicone/helicone",      stars: 6166,  license: "Apache-2.0", cat: "Eval / observability", url: "https://github.com/helicone/helicone", desc: "Observability gateway: caching, rate limiting, cost dashboards, A/B." },
+  { name: "openlit/openlit",        stars: 2772,  license: "Apache-2.0", cat: "Eval / observability", url: "https://github.com/openlit/openlit", desc: "OpenTelemetry-native observability for LLMs + AI agents." },
+  // Speculative decoding
+  { name: "SafeAILab/EAGLE",        stars: 2537,  license: "Apache-2.0", cat: "Speculative decoding", url: "https://github.com/SafeAILab/EAGLE", desc: "EAGLE-1/2/3 speculative decoding; 2–4× speedup by predicting draft tokens from the feature layer." },
+  { name: "hao-ai-lab/LookaheadDecoding", stars: 1343, license: "Apache-2.0", cat: "Speculative decoding", url: "https://github.com/hao-ai-lab/LookaheadDecoding", desc: "Lookahead Decoding (ICML'24); parallel multi-token prediction via Jacobi iterations." },
+  { name: "hemingkx/Spec-Bench",    stars: 413,   license: "Apache-2.0", cat: "Speculative decoding", url: "https://github.com/hemingkx/Spec-Bench", desc: "Unified benchmark + eval harness for speculative decoding." },
+  // Cost / routing
+  { name: "Portkey-AI/gateway",     stars: 13040, license: "MIT", cat: "Cost / routing", url: "https://github.com/Portkey-AI/gateway", desc: "Production AI gateway routing to 1600+ models; retries, caching, guardrails." },
+  { name: "lm-sys/RouteLLM",        stars: 5510,  license: "Apache-2.0", cat: "Cost / routing", url: "https://github.com/lm-sys/RouteLLM", desc: "Routers that send easy queries to weak models, hard queries to strong." },
+  { name: "TabbyML/tabby",          stars: 33881, license: "Apache-2.0", cat: "Cost / routing", url: "https://github.com/TabbyML/tabby", desc: "Self-hosted coding assistant; avoids per-token API fees entirely." },
+  // Visualization
+  { name: "dqbd/tiktokenizer",      stars: 1695,  license: "MIT", cat: "Visualization", url: "https://github.com/dqbd/tiktokenizer", desc: "The tiktokenizer.vercel.app playground; visualize how text splits into tokens." },
+  // Long-context benchmarks
+  { name: "gkamradt/needle-in-a-haystack", stars: 2386, license: "MIT", cat: "Long-context benchmarks", url: "https://github.com/gkamradt/needle-in-a-haystack", desc: "Original needle-in-haystack retrieval test across context lengths." },
+  { name: "booydar/babilong",       stars: 257,   license: "Apache-2.0", cat: "Long-context benchmarks", url: "https://github.com/booydar/babilong", desc: "BABILong: needle-in-haystack on bAbI tasks; up to 10M tokens." },
+  { name: "THUDM/LongBench",        stars: 1238,  license: "MIT", cat: "Long-context benchmarks", url: "https://github.com/THUDM/LongBench", desc: "LongBench v1+v2 (ACL'24/'25); 50+ tasks / 6 languages at long context." },
+  { name: "OpenBMB/InfiniteBench",  stars: 393,   license: "MIT", cat: "Long-context benchmarks", url: "https://github.com/OpenBMB/InfiniteBench", desc: "∞Bench: long-context eval beyond 100K tokens." },
+  { name: "hsiehjackson/RULER",     stars: 1619,  license: "Apache-2.0", cat: "Long-context benchmarks", url: "https://github.com/hsiehjackson/RULER", desc: "RULER: 13 task categories to expose real vs claimed context sizes." },
+  { name: "OpenLMLab/LEval",       stars: 407,   license: "GPL-3.0", cat: "Long-context benchmarks", url: "https://github.com/OpenLMLab/LEval", desc: "L-Eval (ACL'24 Outstanding); 54 sub-datasets for long-context LLMs." },
+];
+
+const REPO_CATS = ["Tokenizers", "Token counting", "RAG / chunking", "Prompt frameworks", "KV-cache / inference", "Eval / observability", "Speculative decoding", "Cost / routing", "Visualization", "Long-context benchmarks"];
+
+// Continued in next chunk...
+
+/* ==========================================================================
+   APP LOGIC
+   ========================================================================== */
+
+const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+const fmt = (n, d=2) => Number(n).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+const fmtInt = (n) => Number(n).toLocaleString('en-US');
+
+function showToast(msg) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 1800);
+}
+function copyText(text) {
+  navigator.clipboard.writeText(text).then(() => showToast('Copied to clipboard'));
+}
+
+// Approximate token counter (4 chars/token for English; adjusted by language density)
+function approxTokens(text) {
+  if (!text) return 0;
+  return Math.max(1, Math.round(text.length / 4));
+}
+
+// ---------------- ROUTER ----------------
+function showView(name) {
+  $$('.view').forEach(v => v.classList.toggle('active', v.dataset.view === name));
+  $$('.nav-link').forEach(l => l.classList.toggle('active', l.dataset.view === name));
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+  if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
+}
+
+$$('.nav-link').forEach(link => {
+  link.addEventListener('click', (e) => {
+    e.preventDefault();
+    showView(link.dataset.view);
+  });
+});
+
+window.addEventListener('hashchange', () => {
+  const v = location.hash.slice(1);
+  if (v && $$('.view').some(el => el.dataset.view === v)) showView(v);
+});
+
+// ---------------- THEME ----------------
+const themeToggle = $('#themeToggle');
+const savedTheme = localStorage.getItem('to-theme') || 'dark';
+if (savedTheme === 'light') document.documentElement.setAttribute('data-theme', 'light');
+themeToggle.addEventListener('click', () => {
+  const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+  if (isLight) {
+    document.documentElement.removeAttribute('data-theme');
+    localStorage.setItem('to-theme', 'dark');
+  } else {
+    document.documentElement.setAttribute('data-theme', 'light');
+    localStorage.setItem('to-theme', 'light');
+  }
+});
+
+// ---------------- STAT COUNTERS ----------------
+function animateCounters() {
+  $$('.stat-value').forEach(el => {
+    const target = parseFloat(el.dataset.target);
+    const suffix = el.dataset.suffix || '';
+    const isFloat = target % 1 !== 0;
+    let cur = 0;
+    const step = target / 30;
+    const id = setInterval(() => {
+      cur += step;
+      if (cur >= target) { cur = target; clearInterval(id); }
+      el.textContent = (isFloat ? cur.toFixed(2) : Math.round(cur)) + suffix;
+    }, 25);
+  });
+}
+setTimeout(animateCounters, 200);
+
+// ---------------- ANATOMY ----------------
+function renderAnatomy() {
+  const total = ANATOMY_LAYERS.reduce((s, l) => s + l.tokens, 0);
+  $('#anatomyStack').innerHTML = ANATOMY_LAYERS.map(l => {
+    const pct = (l.tokens / total * 100).toFixed(1);
+    return `<div class="anatomy-layer" style="background:${l.color}; width:${Math.max(20, pct*2)}%">
+      <span>${l.name}</span>
+      <span class="pct">${fmtInt(l.tokens)} tok · ${pct}%</span>
+      <div class="anatomy-tooltip">${l.desc}</div>
+    </div>`;
+  }).join('');
+
+  $('#costDrivers').innerHTML = COST_DRIVERS.map(d => `
+    <div class="card mb-2">
+      <div class="flex justify-between items-center">
+        <strong>${d.name}</strong>
+        <span class="pill red">${d.impact}</span>
+      </div>
+      <p style="margin:6px 0 0; font-size:13px">${d.note}</p>
+    </div>
+  `).join('');
+}
+
+// ---------------- CALCULATOR ----------------
+let calcState = {
+  model: 'claude-sonnet-4.5',
+  effort: 'low',
+  input: 10000,
+  output: 1000,
+  cache: 0,
+  steps: 1,
+  autoMode: false,
+  custom: null,
+};
+
+function renderCalcModelSelect() {
+  $('#calcModel').innerHTML = PRICING.map(p =>
+    `<option value="${p.name}">${p.name} · ${p.provider} · ${p.tier}</option>`
+  ).join('');
+  $('#calcModel').value = calcState.model;
+  updateCalcModelTier();
+}
+
+function updateCalcModelTier() {
+  const p = PRICING.find(x => x.name === calcState.model) || PRICING[0];
+  $('#calcModelTier').textContent = p.tier;
+  $('#calcModelTier').className = 'pill ' + (p.tier === 'lightweight' ? 'green' : p.tier === 'versatile' ? 'blue' : 'pink');
+}
+
+function calcCost() {
+  const p = calcState.custom || PRICING.find(x => x.name === calcState.model) || PRICING[0];
+  const mult = EFFORT_MULT[calcState.effort];
+  const cachedTok = Math.round(calcState.input * calcState.cache / 100);
+  const nonCachedTok = calcState.input - cachedTok;
+  const outputWithReason = calcState.output * mult;
+
+  const inputCost  = (nonCachedTok / 1_000_000) * p.input;
+  const cachedCost = (cachedTok   / 1_000_000) * (p.cached || p.input * 0.1);
+  const outputCost = (outputWithReason / 1_000_000) * p.output;
+  let total = inputCost + cachedCost + outputCost;
+  if (calcState.autoMode) total *= 0.90;
+  const stepCost = inputCost + cachedCost + outputCost;
+  const taskTotal = stepCost * calcState.steps;
+
+  $('#outModel').textContent = p.name;
+  $('#outTier').textContent = p.tier;
+  $('#outInputCost').textContent = '$' + fmt(inputCost, 4);
+  $('#outCachedCost').textContent = '$' + fmt(cachedCost, 4);
+  $('#outOutputCost').textContent = '$' + fmt(outputCost, 4);
+  $('#outMult').textContent = mult;
+  $('#outMult2').textContent = mult;
+  $('#outStepCost').textContent = '$' + fmt(stepCost, 4);
+  $('#outSteps').textContent = calcState.steps;
+  $('#outStepTotal').textContent = '$' + fmt(taskTotal, 4);
+  $('#outTotal').textContent = '$' + fmt(total, 4);
+
+  $('#outInputTok').textContent = fmtInt(nonCachedTok);
+  $('#outInputRate').textContent = p.input;
+  $('#outCachedTok').textContent = fmtInt(cachedTok);
+  $('#outCachedRate').textContent = (p.cached || p.input * 0.1);
+  $('#outOutputTok').textContent = fmtInt(outputWithReason);
+  $('#outOutputRate').textContent = p.output;
+  $('#outAutoNote').style.display = calcState.autoMode ? 'block' : 'none';
+
+  // Update tier badge
+  updateCalcModelTier();
+  // Update effort display
+  $('#calcEffortMult').textContent = '×' + mult;
+  // Update slider value labels
+  $('#calcInputVal').textContent = fmtInt(calcState.input);
+  $('#calcOutputVal').textContent = fmtInt(calcState.output);
+  $('#calcCacheVal').textContent = calcState.cache + '%';
+  $('#calcStepsVal').textContent = calcState.steps;
+}
+
+function initCalculator() {
+  renderCalcModelSelect();
+  $('#calcModel').addEventListener('change', e => {
+    calcState.model = e.target.value;
+    calcState.custom = null;
+    calcCost();
+  });
+  $$('#calcEffort .radio').forEach(r => {
+    r.addEventListener('click', () => {
+      $$('#calcEffort .radio').forEach(x => x.classList.remove('active'));
+      r.classList.add('active');
+      calcState.effort = r.dataset.effort;
+      calcCost();
+    });
+  });
+  $('#calcInput').addEventListener('input', e => { calcState.input = +e.target.value; calcCost(); });
+  $('#calcOutput').addEventListener('input', e => { calcState.output = +e.target.value; calcCost(); });
+  $('#calcCache').addEventListener('input', e => { calcState.cache = +e.target.value; calcCost(); });
+  $('#calcSteps').addEventListener('input', e => { calcState.steps = +e.target.value; calcCost(); });
+  $('#calcAuto').addEventListener('click', () => {
+    calcState.autoMode = !calcState.autoMode;
+    $('#calcAuto').classList.toggle('active', calcState.autoMode);
+    calcCost();
+  });
+  $('#calcApplyCustom').addEventListener('click', () => {
+    const i = parseFloat($('#calcCustomIn').value);
+    const c = parseFloat($('#calcCustomCached').value);
+    const o = parseFloat($('#calcCustomOut').value);
+    if (isNaN(i) || isNaN(o)) { showToast('Enter valid input and output prices'); return; }
+    calcState.custom = { name: 'Custom', provider: '—', tier: 'custom', input: i, cached: isNaN(c) ? i*0.1 : c, output: o };
+    calcCost();
+  });
+  calcCost();
+}
+
+// ---------------- TECHNIQUES ----------------
+let techState = { cat: 'All', search: '', minSave: 0 };
+
+function renderTechCats() {
+  $('#techCats').innerHTML = ['All', ...TECH_CATS].map(c =>
+    `<div class="chip ${c === 'All' ? 'active' : ''}" data-cat="${c}">${c}</div>`
+  ).join('');
+  $$('#techCats .chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      $$('#techCats .chip').forEach(c => c.classList.remove('active'));
+      chip.classList.add('active');
+      techState.cat = chip.dataset.cat;
+      renderTechniques();
+    });
+  });
+}
+
+function renderTechniques() {
+  const filtered = TECHNIQUES.filter(t => {
+    if (techState.cat !== 'All' && t.cat !== techState.cat) return false;
+    if (techState.search && !t.name.toLowerCase().includes(techState.search.toLowerCase()) && !t.detail.toLowerCase().includes(techState.search.toLowerCase())) return false;
+    if (Math.max(t.inSav, t.outSav) < techState.minSave) return false;
+    return true;
+  });
+  $('#techCount').textContent = filtered.length;
+  $('#techTotal').textContent = TECHNIQUES.length;
+  $('#techGrid').innerHTML = filtered.map((t, i) => `
+    <div class="tech-card" data-idx="${TECHNIQUES.indexOf(t)}">
+      <h4>${t.name}</h4>
+      <div style="font-size:11px; color:var(--text-3); margin-bottom:6px">${t.cat}</div>
+      <div class="tech-meta">
+        ${t.inSav > 0 ? `<span class="pill green">In −${t.inSav}%</span>` : ''}
+        ${t.outSav > 0 ? `<span class="pill pink">Out −${t.outSav}%</span>` : ''}
+        <span class="pill">Q: ${t.quality}</span>
+        <span class="pill">${t.effort} effort</span>
+      </div>
+      <div style="font-size:12px; color:var(--text-2); margin-top:6px">Best for: ${t.best}</div>
+      <div class="tech-detail">${t.detail}</div>
+    </div>
+  `).join('');
+  $$('.tech-card').forEach(c => {
+    c.addEventListener('click', () => c.classList.toggle('expanded'));
+  });
+}
+
+function initTechniques() {
+  renderTechCats();
+  $('#techSearch').addEventListener('input', e => {
+    techState.search = e.target.value;
+    renderTechniques();
+  });
+  $$('[data-min-save]').forEach(chip => {
+    chip.addEventListener('click', () => {
+      $$('[data-min-save]').forEach(c => c.classList.remove('active'));
+      chip.classList.add('active');
+      techState.minSave = +chip.dataset.minSave;
+      renderTechniques();
+    });
+  });
+  $('[data-min-save="0"]').classList.add('active');
+  renderTechniques();
+}
+
+// ---------------- LANGUAGES ----------------
+function renderLanguages() {
+  $('#langTable').innerHTML = LANGUAGE_DATA.map(l => `
+    <tr>
+      <td>${l.lang}</td>
+      <td class="num">${fmtInt(l.tokens)}</td>
+      <td class="num">${l.ratio.toFixed(2)}×</td>
+      <td>${l.note}</td>
+    </tr>
+  `).join('');
+}
+
+function computeLanguages() {
+  const text = $('#langText').value;
+  const baseTokens = approxTokens(text);
+  const langs = ['english', 'spanish', 'french', 'german', 'chinese', 'japanese', 'korean', 'russian', 'turkish', 'portuguese', 'italian', 'hindi', 'arabic', 'hebrew'];
+  const maxTok = Math.max(...langs.map(l => baseTokens * LANG_SENTENCE_MULT[l]));
+  $('#langChart').innerHTML = langs.map(l => {
+    const tok = Math.round(baseTokens * LANG_SENTENCE_MULT[l]);
+    const pct = (tok / maxTok * 100).toFixed(1);
+    const label = l.charAt(0).toUpperCase() + l.slice(1);
+    const ratio = LANG_SENTENCE_MULT[l];
+    const barColor = ratio === 1 ? 'var(--accent)' : ratio < 1.3 ? 'var(--blue)' : ratio < 1.7 ? 'var(--amber)' : 'var(--red)';
+    return `<div class="bar-row">
+      <div class="bar-label">${label}</div>
+      <div class="bar-track"><div class="bar-fill" style="width:${pct}%; background:${barColor}">${ratio === 1 ? 'baseline' : '+' + Math.round((ratio-1)*100) + '%'}</div></div>
+      <div class="bar-value">${fmtInt(tok)}</div>
+    </div>`;
+  }).join('');
+}
+
+// ---------------- COMPRESSION ----------------
+const COMPRESSION_PRESETS = {
+  custom: '',
+  refactor: "Hey, could you please help me refactor this function? I think it might have some issues with how it handles authentication, and I'd love to make it more efficient if possible. Also, if you could add some comments explaining the changes, that would be really helpful. Thanks!",
+  debug: "Hi there! I'm running into a weird bug with this code and I was wondering if you could take a look. The function seems to work most of the time but sometimes it throws an error and I can't quite figure out why. Could you maybe help me debug it and figure out what's going on? I'd really appreciate any insights you might have.",
+  implement: "I need to implement a new feature for our application. We want to add a user registration endpoint that accepts a username, email, and password. It should validate all the fields, hash the password, check if the user already exists, and then save the new user to the database. Could you please help me write this? I'd like it to be production-ready with proper error handling.",
+  explain: "Hey, I'm new to this codebase and I was hoping you could help me understand what this function does. It's not super clear to me from the code itself, so if you could walk me through it step by step, that would be amazing. Also, if there are any obvious improvements that could be made, I'd love to hear about those too. Thanks in advance!",
+};
+
+function compress(text, level) {
+  if (level === 0) return text;
+  let t = text;
+  // L1: Lite — drop politeness + hedge
+  if (level >= 1) {
+    t = t.replace(/\b(hey|hi there|hi|hello)[,!\s]+/gi, '');
+    t = t.replace(/\b(could you please|could you maybe|could you|would you|can you please|can you maybe|can you)\b/gi, '');
+    t = t.replace(/\b(i think|i believe|i guess|i feel like|i was wondering)\b/gi, '');
+    t = t.replace(/\b(i'd love to|i'd really appreciate|i'd like|i want to|i need to|i was hoping to)\b/gi, '');
+    t = t.replace(/\b(if possible|if you could|if you don't mind|please)\b/gi, '');
+    t = t.replace(/\b(thanks|thank you|thanks in advance|cheers)[!\s]*$/gi, '');
+    t = t.replace(/\b(maybe|perhaps|kind of|sort of|a bit|a little|quite)\b/gi, '');
+    t = t.replace(/\b(really|very|super|extremely|quite)\b/gi, '');
+    t = t.replace(/\s+/g, ' ').trim();
+  }
+  // L2: Full Caveman — drop preamble, convert to bullets/imperatives
+  if (level >= 2) {
+    t = t.replace(/\b(also|i also|additionally|furthermore|moreover|in addition)\b/gi, '');
+    t = t.replace(/\b(that would be|this would be|it would be)\b[^.]*\./gi, '');
+    t = t.replace(/\b(i'd like|i want|i need)\b/gi, '');
+    // Convert sentences to imperative bullet form
+    t = t.replace(/\.\s+/g, '.\n- ');
+    if (!t.startsWith('- ')) t = '- ' + t;
+    t = t.replace(/\s+/g, ' ').trim();
+  }
+  // L3: Ultra — abbreviate common verbs
+  if (level >= 3) {
+    t = t.replace(/\bimplement\b/ig, 'add');
+    t = t.replace(/\bidentify\b/ig, 'find');
+    t = t.replace(/\bsuggest\b/ig, 'list');
+    t = t.replace(/\brefactor\b/ig, 'fix');
+    t = t.replace(/\boptimize\b/ig, 'speed');
+    t = t.replace(/\bunderstand\b/ig, 'explain');
+    t = t.replace(/\binvestigate\b/ig, 'check');
+    t = t.replace(/\bwalk me through\b/ig, 'list');
+    t = t.replace(/\bstep by step\b/ig, 'briefly');
+  }
+  return t.trim();
+}
+
+function updateCompression() {
+  const text = $('#compInput').value;
+  const level = +$('#compLevel').value;
+  const compressed = compress(text, level);
+  const tok0 = approxTokens(text);
+  const tok1 = approxTokens(compressed);
+  const saved = tok0 > 0 ? Math.round((1 - tok1/tok0) * 100) : 0;
+  const ratio = tok0 > 0 ? (tok0/tok1).toFixed(1) : '—';
+  $('#compOutput').textContent = compressed || '—';
+  $('#compTok0').textContent = fmtInt(tok0);
+  $('#compTok1').textContent = fmtInt(tok1);
+  $('#compSavings').textContent = saved > 0 ? '−' + saved + '%' : '0%';
+  $('#compRatio').textContent = ratio + '×';
+  // Update level pills
+  $$('[data-level]').forEach(p => {
+    p.classList.toggle('active', +p.dataset.level === level);
+    if (+p.dataset.level === level) {
+      p.style.background = 'var(--accent)';
+      p.style.color = '#0d1117';
+      p.style.borderColor = 'var(--accent)';
+    } else {
+      p.style.background = '';
+      p.style.color = '';
+      p.style.borderColor = '';
+    }
+  });
+}
+
+function initCompression() {
+  $('#compPreset').addEventListener('change', e => {
+    const v = e.target.value;
+    if (v !== 'custom' && COMPRESSION_PRESETS[v]) {
+      $('#compInput').value = COMPRESSION_PRESETS[v];
+      updateCompression();
+    }
+  });
+  $('#compInput').addEventListener('input', updateCompression);
+  $('#compLevel').addEventListener('input', e => {
+    updateCompression();
+  });
+  $('#compCopy').addEventListener('click', () => {
+    copyText($('#compOutput').textContent);
+  });
+  updateCompression();
+}
+
+// ---------------- CACHE STABILITY ----------------
+let cacheState = {
+  model: 'claude-sonnet-4.5',
+  effort: 'low',
+  skills: new Set(),
+  tools: new Set(),
+  profile: 'default',
+  baseline: null,
+};
+const CACHE_SKILLS = ['api-conventions', 'test-patterns', 'db-migrations', 'security-rules', 'docs-style'];
+const CACHE_TOOLS = ['slack', 'jira', 'github', 'db-read', 'db-write', 'filesystem', 'web-search', 'mcp-custom-1', 'mcp-custom-2', 'internal-cli'];
+
+function renderCacheControls() {
+  $('#cacheModel').innerHTML = PRICING.map(p => `<option value="${p.name}">${p.name}</option>`).join('');
+  $('#cacheModel').value = cacheState.model;
+
+  $('#cacheSkills').innerHTML = CACHE_SKILLS.map(s =>
+    `<div class="check" data-skill="${s}">${s}</div>`
+  ).join('');
+  $('#cacheTools').innerHTML = CACHE_TOOLS.map(t =>
+    `<div class="check" data-tool="${t}">${t}</div>`
+  ).join('');
+
+  $$('#cacheSkills .check').forEach(c => c.addEventListener('click', () => {
+    const s = c.dataset.skill;
+    if (cacheState.skills.has(s)) cacheState.skills.delete(s); else cacheState.skills.add(s);
+    c.classList.toggle('active');
+    updateCacheVerdict();
+  }));
+  $$('#cacheTools .check').forEach(c => c.addEventListener('click', () => {
+    const t = c.dataset.tool;
+    if (cacheState.tools.has(t)) cacheState.tools.delete(t); else cacheState.tools.add(t);
+    c.classList.toggle('active');
+    updateCacheVerdict();
+  }));
+  $$('#cacheEffort .radio').forEach(r => r.addEventListener('click', () => {
+    $$('#cacheEffort .radio').forEach(x => x.classList.remove('active'));
+    r.classList.add('active');
+    cacheState.effort = r.dataset.effort;
+    updateCacheVerdict();
+  }));
+  $('#cacheModel').addEventListener('change', e => { cacheState.model = e.target.value; updateCacheVerdict(); });
+  $('#cacheProfile').addEventListener('change', e => { cacheState.profile = e.target.value; updateCacheVerdict(); });
+  $('#cacheBaseline').addEventListener('click', setBaseline);
+  $('#cacheReset').addEventListener('click', resetCache);
+}
+
+function setBaseline() {
+  cacheState.baseline = {
+    model: cacheState.model,
+    effort: cacheState.effort,
+    skills: new Set(cacheState.skills),
+    tools: new Set(cacheState.tools),
+    profile: cacheState.profile,
+  };
+  updateCacheVerdict();
+  showToast('Baseline set — now change any setting');
+}
+
+function resetCache() {
+  cacheState.baseline = null;
+  cacheState.skills.clear();
+  cacheState.tools.clear();
+  $$('#cacheSkills .check, #cacheTools .check').forEach(c => c.classList.remove('active'));
+  updateCacheVerdict();
+}
+
+function updateCacheVerdict() {
+  const verdict = $('#cacheVerdict');
+  const title = $('#cacheTitle');
+  const msg = $('#cacheMsg');
+  const icon = $('#cacheIcon');
+  const diff = $('#cacheDiff');
+
+  if (!cacheState.baseline) {
+    verdict.className = 'verdict-box stable';
+    icon.textContent = '✓';
+    title.textContent = 'Ready to set baseline';
+    msg.textContent = 'Set this config as your baseline (turn 1). Then change any setting — the verdict will update to show whether the cache prefix is preserved.';
+    diff.innerHTML = '<span class="muted">No baseline set yet. Click "Set as baseline" to lock in the current config.</span>';
+    return;
+  }
+
+  const b = cacheState.baseline;
+  const changes = [];
+  if (b.model !== cacheState.model) changes.push(`Model: <strong>${b.model}</strong> → <strong>${cacheState.model}</strong>`);
+  if (b.effort !== cacheState.effort) changes.push(`Reasoning effort: <strong>${b.effort}</strong> → <strong>${cacheState.effort}</strong>`);
+  const addedSkills = [...cacheState.skills].filter(s => !b.skills.has(s));
+  const removedSkills = [...b.skills].filter(s => !cacheState.skills.has(s));
+  if (addedSkills.length || removedSkills.length) {
+    changes.push(`Skills: ${removedSkills.length ? 'removed [' + removedSkills.join(', ') + ']' : ''} ${addedSkills.length ? 'added [' + addedSkills.join(', ') + ']' : ''}`);
+  }
+  const addedTools = [...cacheState.tools].filter(t => !b.tools.has(t));
+  const removedTools = [...b.tools].filter(t => !cacheState.tools.has(t));
+  if (addedTools.length || removedTools.length) {
+    changes.push(`Tools: ${removedTools.length ? 'removed [' + removedTools.join(', ') + ']' : ''} ${addedTools.length ? 'added [' + addedTools.join(', ') + ']' : ''}`);
+  }
+  if (b.profile !== cacheState.profile) changes.push(`Profile: <strong>${b.profile}</strong> → <strong>${cacheState.profile}</strong>`);
+
+  if (changes.length === 0) {
+    verdict.className = 'verdict-box stable';
+    icon.textContent = '✓';
+    title.textContent = 'STABLE — cache hit';
+    msg.textContent = 'Your session prefix is byte-identical to the baseline. Cached tokens will be billed at ~10% of input rate. Keep this config stable for the whole session.';
+    diff.innerHTML = '<span style="color:var(--accent)">No changes — cache prefix preserved.</span>';
+  } else {
+    verdict.className = 'verdict-box invalidated';
+    icon.textContent = '✗';
+    title.textContent = 'CACHE INVALIDATED';
+    msg.textContent = 'A change to the prefix has invalidated the cache from the point of change. The 90% discount is lost. Start a fresh session with a handoff summary (see recipe).';
+    diff.innerHTML = changes.map(c => `<div>• ${c}</div>`).join('');
+  }
+}
+
+// ---------------- MODEL MIXING ----------------
+let mixingRows = [
+  { turns: 2,  model: 'claude-opus-4.5',   label: 'Plan' },
+  { turns: 18, model: 'claude-sonnet-4.5', label: 'Build' },
+  { turns: 10, model: 'claude-haiku-4.5',  label: 'Lookup' },
+];
+const MIX_MODEL_COST = {
+  'claude-haiku-4.5': 0.15,  // normalized vs Sonnet=1.0
+  'claude-sonnet-4.5': 1.0,
+  'claude-opus-4.5': 5.0,
+  'gpt-5.4-nano': 0.10,
+  'gpt-5-mini': 0.17,
+  'gpt-5.4': 1.67,
+  'gpt-5.5': 6.0,
+};
+
+function renderMixingRows() {
+  $('#mixingRows').innerHTML = mixingRows.map((r, i) => `
+    <div class="flex gap-2 flex-wrap items-center" style="margin-bottom:8px; padding:10px; background:var(--bg-3); border-radius:8px">
+      <input type="number" min="0" max="500" value="${r.turns}" data-idx="${i}" data-field="turns" style="width:80px">
+      <select data-idx="${i}" data-field="model" style="flex:1; min-width:200px">
+        ${Object.keys(MIX_MODEL_COST).map(m => `<option value="${m}" ${m === r.model ? 'selected' : ''}>${m}</option>`).join('')}
+      </select>
+      <input type="text" placeholder="Label" value="${r.label}" data-idx="${i}" data-field="label" style="flex:1; min-width:120px">
+      <button class="btn" data-idx="${i}" data-action="remove" style="padding:6px 12px">×</button>
+    </div>
+  `).join('');
+  $$('#mixingRows [data-field]').forEach(el => {
+    el.addEventListener('input', e => {
+      const idx = +e.target.dataset.idx;
+      const field = e.target.dataset.field;
+      mixingRows[idx][field] = field === 'turns' ? +e.target.value : e.target.value;
+      computeMixing();
+    });
+  });
+  $$('#mixingRows [data-action="remove"]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      const idx = +e.target.dataset.idx;
+      mixingRows.splice(idx, 1);
+      renderMixingRows();
+      computeMixing();
+    });
+  });
+}
+
+function computeMixing() {
+  const total = mixingRows.reduce((s, r) => s + r.turns, 0);
+  const cost = mixingRows.reduce((s, r) => s + r.turns * MIX_MODEL_COST[r.model], 0);
+  const breakdown = mixingRows.map(r => ({
+    label: r.label,
+    model: r.model,
+    turns: r.turns,
+    cost: r.turns * MIX_MODEL_COST[r.model],
+  }));
+
+  $('#mixingBreakdown').innerHTML = `
+    <div class="cost-line"><span class="lbl">Total turns</span><span class="val">${total}</span></div>
+    ${breakdown.map(b => `<div class="cost-line"><span class="lbl">${b.label} · ${b.model} × ${b.turns}</span><span class="val">${fmt(b.cost, 2)} units</span></div>`).join('')}
+    <div class="cost-line total"><span class="lbl">Total</span><span class="val">${fmt(cost, 2)} units</span></div>
+  `;
+
+  // Compare against all-Opus and all-Sonnet
+  const allOpus = total * 5.0;
+  const allSonnet = total * 1.0;
+  const allHaiku = total * 0.15;
+  const maxV = Math.max(allOpus, allSonnet, cost);
+
+  const data = [
+    { label: 'All Opus (worst)', val: allOpus, color: 'var(--pink)' },
+    { label: 'All Sonnet', val: allSonnet, color: 'var(--blue)' },
+    { label: 'Your mix', val: cost, color: 'var(--accent)' },
+    { label: 'All Haiku (cheapest)', val: allHaiku, color: 'var(--amber)' },
+  ];
+  $('#mixingComparison').innerHTML = data.map(d => {
+    const pct = (d.val / maxV * 100).toFixed(1);
+    const sav = allOpus > 0 ? Math.round((1 - d.val/allOpus) * 100) : 0;
+    return `<div class="bar-row">
+      <div class="bar-label">${d.label}</div>
+      <div class="bar-track"><div class="bar-fill" style="width:${pct}%; background:${d.color}">${fmt(d.val,1)} units</div></div>
+      <div class="bar-value">${sav > 0 ? '−' + sav + '%' : 'baseline'}</div>
+    </div>`;
+  }).join('');
+}
+
+function initMixing() {
+  renderMixingRows();
+  $('#mixingAdd').addEventListener('click', () => {
+    mixingRows.push({ turns: 5, model: 'claude-sonnet-4.5', label: 'Other' });
+    renderMixingRows();
+    computeMixing();
+  });
+  $$('[data-mix-preset]').forEach(btn => btn.addEventListener('click', e => {
+    const p = e.target.dataset.mixPreset;
+    if (p === 'daily') mixingRows = [
+      { turns: 2, model: 'claude-opus-4.5', label: 'Plan' },
+      { turns: 18, model: 'claude-sonnet-4.5', label: 'Build' },
+      { turns: 10, model: 'claude-haiku-4.5', label: 'Lookup' },
+    ];
+    if (p === 'sprint') mixingRows = [
+      { turns: 10, model: 'claude-opus-4.5', label: 'Architecture' },
+      { turns: 60, model: 'claude-sonnet-4.5', label: 'Build' },
+      { turns: 30, model: 'claude-haiku-4.5', label: 'Lookup' },
+    ];
+    if (p === 'refactor') mixingRows = [
+      { turns: 5, model: 'claude-opus-4.5', label: 'Plan' },
+      { turns: 35, model: 'claude-sonnet-4.5', label: 'Execute' },
+      { turns: 10, model: 'claude-haiku-4.5', label: 'Lookups' },
+    ];
+    if (p === 'allop') mixingRows = [{ turns: 30, model: 'claude-opus-4.5', label: 'All Opus' }];
+    if (p === 'allsonnet') mixingRows = [{ turns: 30, model: 'claude-sonnet-4.5', label: 'All Sonnet' }];
+    renderMixingRows();
+    computeMixing();
+  }));
+  computeMixing();
+}
+
+// ---------------- MODELS TABLE ----------------
+let modelState = { sort: 'name', dir: 1, tier: 'all', search: '' };
+
+function renderModels() {
+  let rows = PRICING.slice();
+  if (modelState.tier !== 'all') rows = rows.filter(r => r.tier === modelState.tier);
+  if (modelState.search) {
+    const q = modelState.search.toLowerCase();
+    rows = rows.filter(r => r.name.toLowerCase().includes(q) || r.provider.toLowerCase().includes(q));
+  }
+  rows.sort((a, b) => {
+    const av = a[modelState.sort], bv = b[modelState.sort];
+    if (typeof av === 'number') return (av - bv) * modelState.dir;
+    return String(av).localeCompare(String(bv)) * modelState.dir;
+  });
+  $('#modelTable').innerHTML = rows.map(r => {
+    const tierClass = r.tier === 'lightweight' ? 'green' : r.tier === 'versatile' ? 'blue' : 'pink';
+    return `<tr data-model="${r.name}">
+      <td><strong>${r.name}</strong></td>
+      <td>${r.provider}</td>
+      <td><span class="pill ${tierClass}">${r.tier}</span></td>
+      <td class="num">$${r.input}</td>
+      <td class="num">$${r.cached}</td>
+      <td class="num">$${r.output}</td>
+      <td class="num">${r.ratio}×</td>
+      <td><button class="btn" style="padding:4px 10px; font-size:12px">Use →</button></td>
+    </tr>`;
+  }).join('');
+  $$('#modelTable tr').forEach(tr => tr.addEventListener('click', () => {
+    const m = tr.dataset.model;
+    calcState.model = m;
+    calcState.custom = null;
+    $('#calcModel').value = m;
+    calcCost();
+    showView('calculator');
+    showToast(`Loaded ${m} into calculator`);
+  }));
+}
+
+function initModels() {
+  renderModels();
+  $('#modelSearch').addEventListener('input', e => { modelState.search = e.target.value; renderModels(); });
+  $$('[data-tier]').forEach(c => c.addEventListener('click', () => {
+    $$('[data-tier]').forEach(x => x.classList.remove('active'));
+    c.classList.add('active');
+    modelState.tier = c.dataset.tier;
+    renderModels();
+  }));
+  $$('.table th[data-sort]').forEach(th => th.addEventListener('click', () => {
+    const s = th.dataset.sort;
+    if (modelState.sort === s) modelState.dir *= -1; else { modelState.sort = s; modelState.dir = 1; }
+    renderModels();
+  }));
+}
+
+// ---------------- QUICK WINS ----------------
+let winsState = JSON.parse(localStorage.getItem('to-wins') || '{}');
+
+function renderWins() {
+  $('#winsTotal').textContent = QUICK_WINS.length;
+  const done = Object.values(winsState).filter(Boolean).length;
+  $('#winsCount').textContent = done;
+  $('#winsProgress').style.width = (done / QUICK_WINS.length * 100) + '%';
+  const totalSav = QUICK_WINS.reduce((s, w) => s + (winsState[w.n] ? w.sav : 0), 0);
+  const maxSav = QUICK_WINS.reduce((s, w) => s + w.sav, 0);
+  $('#winsSavings').textContent = Math.round(totalSav / maxSav * 100) + '%';
+
+  $('#winsList').innerHTML = QUICK_WINS.map(w => `
+    <div class="win-row">
+      <div class="win-check ${winsState[w.n] ? 'checked' : ''}" data-n="${w.n}">${winsState[w.n] ? '✓' : ''}</div>
+      <div>
+        <div class="action">${w.action}</div>
+      </div>
+      <div class="effect">${w.effect}</div>
+      <div class="time">${w.time}</div>
+      <button class="btn" data-copy="${w.n}" style="padding:4px 10px; font-size:12px">Copy</button>
+    </div>
+  `).join('');
+  $$('.win-check').forEach(c => c.addEventListener('click', () => {
+    const n = +c.dataset.n;
+    winsState[n] = !winsState[n];
+    localStorage.setItem('to-wins', JSON.stringify(winsState));
+    renderWins();
+  }));
+  $$('[data-copy]').forEach(b => b.addEventListener('click', e => {
+    const n = +e.target.dataset.copy;
+    const w = QUICK_WINS.find(x => x.n === n);
+    copyText(w.snippet);
+  }));
+}
+
+// ---------------- REPOS ----------------
+let repoState = { cat: 'All', search: '' };
+
+function renderRepoCats() {
+  $('#repoCats').innerHTML = ['All', ...REPO_CATS].map(c =>
+    `<div class="chip ${c === 'All' ? 'active' : ''}" data-cat="${c}">${c}</div>`
+  ).join('');
+  $$('#repoCats .chip').forEach(c => c.addEventListener('click', () => {
+    $$('#repoCats .chip').forEach(x => x.classList.remove('active'));
+    c.classList.add('active');
+    repoState.cat = c.dataset.cat;
+    renderRepos();
+  }));
+}
+
+function renderRepos() {
+  let rows = REPOS.slice();
+  if (repoState.cat !== 'All') rows = rows.filter(r => r.cat === repoState.cat);
+  if (repoState.search) {
+    const q = repoState.search.toLowerCase();
+    rows = rows.filter(r => r.name.toLowerCase().includes(q) || r.desc.toLowerCase().includes(q));
+  }
+  $('#repoCount').textContent = rows.length;
+  $('#repoTotal').textContent = REPOS.length;
+  $('#repoGrid').innerHTML = rows.map(r => `
+    <div class="repo-card" data-url="${r.url}">
+      <h4><a href="${r.url}" target="_blank" rel="noopener">${r.name}</a></h4>
+      <div class="meta">
+        <span>★ ${fmtInt(r.stars)}</span>
+        <span>${r.license}</span>
+        <span class="pill" style="padding:1px 6px; font-size:10px">${r.cat}</span>
+      </div>
+      <div class="desc">${r.desc}</div>
+    </div>
+  `).join('');
+  $$('.repo-card').forEach(c => c.addEventListener('click', () => c.classList.toggle('expanded')));
+}
+
+function initRepos() {
+  renderRepoCats();
+  $('#repoSearch').addEventListener('input', e => { repoState.search = e.target.value; renderRepos(); });
+  renderRepos();
+}
+
+// ---------------- PLAYBOOK ----------------
+const PLAYBOOK_SECTIONS = [
+  { id: 'pillars', title: 'Six pillars of token discipline', body: `
+    <h2>Six pillars of token discipline</h2>
+    <p>The six pillars are the practices that, adopted together, deliver the 37–44% token reduction and 1.6–1.8× entitlement multiplier.</p>
+    <table><thead><tr><th>#</th><th>Pillar</th><th>Principle</th><th>Contribution</th></tr></thead><tbody>
+      <tr><td>01</td><td><strong>Context discipline</strong></td><td>Send only what matters</td><td>10–14%</td></tr>
+      <tr><td>02</td><td><strong>Intelligent model routing</strong></td><td>Match capability to task</td><td>10–14%</td></tr>
+      <tr><td>03</td><td><strong>Instruction engineering</strong></td><td>Pay once for what you'd otherwise pay every turn</td><td>7–10%</td></tr>
+      <tr><td>04</td><td><strong>Reasoning depth control</strong></td><td>Don't pay for thinking the task doesn't need</td><td>5–8%</td></tr>
+      <tr><td>05</td><td><strong>Agent & tool governance</strong></td><td>Enable, don't accumulate</td><td>3–5%</td></tr>
+      <tr><td>06</td><td><strong>Session lifecycle</strong></td><td>Reset, don't compound</td><td>5–8%</td></tr>
+    </tbody></table>
+    <p>The contributions are roughly additive — adopt all six and you land near the 37–44% total reduction; adopt the first three and you typically capture 25–30%.</p>
+  `},
+  { id: 'lever-1', title: 'Lever 1: Prompt compression', body: `
+    <h2>Lever 1 — Prompt compression</h2>
+    <p><strong>Summary:</strong> Remove the words that don't carry information. The simplest and highest-ROI lever.</p>
+    <p><strong>Stats:</strong> 75% prompt-token reduction on conversational prompts; 30–50% on already-terse prompts.</p>
+    <h3>Three levels of compression</h3>
+    <ul>
+      <li><strong>Surface compression</strong> — drop politeness, hedging, preamble. Mechanical; immediate 30–50% saving.</li>
+      <li><strong>Structural compression</strong> — convert prose to bullets / code blocks / mini-YAML. 15–25% additional saving.</li>
+      <li><strong>Semantic compression</strong> — drop redundant instructions, fold overlapping constraints. 10–20% further saving; requires careful review.</li>
+    </ul>
+    <p>The anti-pattern is over-compression: instructions so terse that the model has to infer intent. Compress up to the point where ambiguity would creep in, then stop.</p>
+    <h3>Example</h3>
+    <pre><code>Before (40 tokens):
+"Hey, could you please help me refactor this function? I think it might have some issues with how it handles authentication, and I'd love to make it more efficient if possible."
+
+After (10 tokens):
+Refactor function. Fix auth handling. Make efficient.</code></pre>
+  `},
+  { id: 'lever-2', title: 'Lever 2: Choose the right language', body: `
+    <h2>Lever 2 — Choose the right language</h2>
+    <p><strong>Summary:</strong> English is almost always the cheapest tokenizer. Write system prompts in English even if user-facing output is in another language.</p>
+    <p><strong>Stats:</strong> Up to 2× cost in worst-case tokenizers (e.g., agglutinative languages on Anthropic); 30–50% saving on reusable system prompts.</p>
+    <p>The Komatsuzaki heatmap (6 models × 9 languages) shows English cheapest in most cases; Gemini and Qwen most efficient for non-English; Anthropic and Kimi most expensive. For a global team, the right answer is usually: system prompt in English, user-facing interaction in the user's language. The model translates internally at no extra cost beyond the input-token difference.</p>
+    <p>Use the <a href="#languages">Language Tax Visualizer</a> for the full breakdown.</p>
+  `},
+  { id: 'lever-3', title: 'Lever 3: Manage your context', body: `
+    <h2>Lever 3 — Manage your context</h2>
+    <p><strong>Summary:</strong> Split instructions into three layers; cache the stable prefix; cap retrieved chunks.</p>
+    <p><strong>Stats:</strong> 30–50% context-token reduction; 70–80% input-cost cut on cache hits.</p>
+    <h3>Three layers of rules</h3>
+    <ul>
+      <li><strong>Global</strong> (~20 rules, ~500 tokens, stable across months) — lives in <code>~/.github/copilot-instructions.md</code>.</li>
+      <li><strong>Repo</strong> (~50 rules, ~1,500 tokens, stable across weeks) — lives in <code>&lt;repo&gt;/.github/copilot-instructions.md</code>.</li>
+      <li><strong>Path-scoped</strong> (~10 rules per file, ~300 tokens, loaded only when relevant) — uses <code>applyTo</code> frontmatter.</li>
+    </ul>
+    <h3>Path-scoped instructions example</h3>
+    <pre><code>---
+applyTo: "src/api/**/*.ts"
+---
+# API conventions
+- All endpoints return Result&lt;T, ApiError&gt;, never throw.
+- Validate with zod at the controller boundary; never inline.
+- Versioning: URL path (/v1, /v2), not header.</code></pre>
+    <h3>Escalation ladder</h3>
+    <p>VS Code context mentions have an escalation ladder: <code>#selection → #file:Lx-Ly → #file → #folder → #codebase</code>. Treat <code>#codebase</code> as a deliberate decision, not a default.</p>
+  `},
+  { id: 'lever-4', title: 'Lever 4: Output control', body: `
+    <h2>Lever 4 — Output control</h2>
+    <p><strong>Summary:</strong> One short rule, paid once — short replies forever.</p>
+    <p><strong>Stats:</strong> 40–80% output-cost cut; output is billed 4–8× input, so the impact on total cost is significant.</p>
+    <p>Output caps are the highest-leverage sentence in any prompt. Put them at the <strong>end</strong> of the message:</p>
+    <table><thead><tr><th>Cap pattern</th><th>Tokens saved</th><th>Trade-off</th></tr></thead><tbody>
+      <tr><td>"Code only, no explanation."</td><td>~70%</td><td>No educational value</td></tr>
+      <tr><td>"Reply with the function signature and a one-line docstring."</td><td>~85%</td><td>No implementation</td></tr>
+      <tr><td>"List the affected files. One file per line."</td><td>~95%</td><td>No code at all</td></tr>
+      <tr><td>"Maximum 3 bullet points."</td><td>~60%</td><td>Reduced nuance</td></tr>
+    </tbody></table>
+  `},
+  { id: 'lever-5', title: 'Lever 5: Choose the right mode', body: `
+    <h2>Lever 5 — Choose the right mode</h2>
+    <p><strong>Summary:</strong> Ask, Plan, Agent — match the mode, then divide and conquer.</p>
+    <p><strong>Stats:</strong> 5–25× swing between modes; agent mode is 10–40× the cost of Ask.</p>
+    <h3>Mode budget at a glance</h3>
+    <ul>
+      <li><strong>Ask</strong>: 1× the prompt packet; for single-shot answers.</li>
+      <li><strong>Plan</strong>: 2–5× Ask; for multi-step work where you want to review before execution.</li>
+      <li><strong>Agent</strong>: 10–40× Ask; for genuinely iterative tasks with feedback loops.</li>
+    </ul>
+    <p>The most expensive mistake is jumping to Agent for a task that should be Ask. The rule: if you cannot state the acceptance criteria in one sentence, use Ask or Plan first.</p>
+  `},
+  { id: 'lever-6', title: 'Lever 6: Custom agents, skills, sub-agents', body: `
+    <h2>Lever 6 — Custom agents, skills, sub-agents</h2>
+    <p><strong>Summary:</strong> Pick the right container for the work.</p>
+    <p><strong>Stats:</strong> ~10× input-token reduction for subagent delegation; 30–50% for skill-based lazy loading.</p>
+    <h3>Three containers, three cost profiles</h3>
+    <ul>
+      <li><strong>Custom agents</strong> — pre-configured instructions, tools, and modes for a recurring task. Pay the setup once; reuse forever.</li>
+      <li><strong>Skills</strong> — lazy-loaded context. A skill is a markdown file with <code>applyTo</code>-style frontmatter; it's loaded only when invoked. Useful for domain-specific patterns.</li>
+      <li><strong>Sub-agents</strong> — a second context window. The subagent does work in isolation and returns a summary. Useful for discovery, parallel review, and research.</li>
+    </ul>
+    <p>Sub-agents are the compression boundary: parent agent reasons over a 1K summary, not the 20K of source. The 10× saving comes from the ratio of source to summary.</p>
+  `},
+  { id: 'lever-7', title: 'Lever 7: Choose the right model', body: `
+    <h2>Lever 7 — Choose the right model</h2>
+    <p><strong>Summary:</strong> Mix models. Plan with the big one, build with the small one.</p>
+    <p><strong>Stats:</strong> 25–55% saving vs. single-model strategy; 5–8× price spread between tiers.</p>
+    <h3>Rough model-selection guide</h3>
+    <ul>
+      <li><strong>Lightweight</strong> (Haiku, nano, Flash): lookups, simple edits, classification, boilerplate, short replies. 60% of a coding workflow.</li>
+      <li><strong>Versatile</strong> (Sonnet, GPT-5.4, Pro): daily-driver coding, multi-step reasoning, agentic loops. 30%.</li>
+      <li><strong>Powerful</strong> (Opus, GPT-5.5, Pro Long): architecture, complex refactors, novel design, hard debugging. 10%.</li>
+    </ul>
+    <p>Use the <a href="#mixing">Model-Mixing Calculator</a> for the math.</p>
+  `},
+  { id: 'lever-8', title: 'Lever 8: Manage your AGENTS file', body: `
+    <h2>Lever 8 — Manage your AGENTS file</h2>
+    <p><strong>Summary:</strong> Landmines, not encyclopedias.</p>
+    <p><strong>Stats:</strong> 20–23% token cost removed by deleting derivable content; correctness preserved.</p>
+    <p>Keep the landmines — delete the noise. The landmine pattern is short, high-signal, and prevents failure classes the model would otherwise hit. The encyclopedia pattern is long, low-signal, and costs tokens every turn without changing behavior.</p>
+    <p>A simple test: would a competent engineer reading the repo's code infer this rule in 30 seconds? If yes, it's noise. If no, it's a landmine.</p>
+    <h3>Landmine example</h3>
+    <pre><code># Landmines
+- Use uv, not pip. (CI rejects pip installs.)
+- Migrations must run in order; alembic upgrade head is forbidden in PRs.
+- Do not refactor auth — pending audit Q3. Touching auth/ blocks the PR.
+- Tests run in parallel; do not use module-level state.</code></pre>
+  `},
+  { id: 'lever-9', title: 'Lever 9: Clean up your tools', body: `
+    <h2>Lever 9 — Clean up your tools</h2>
+    <p><strong>Summary:</strong> Every tool's schema rides along on every step.</p>
+    <p><strong>Stats:</strong> −72% tool catalog in a real audit; ~13K tokens saved per task.</p>
+    <h3>Four simple ways to control the agent loop</h3>
+    <ul>
+      <li><strong>Per-workspace scoping</strong> — enable tools only where they're used.</li>
+      <li><strong>Schema cost grows with steps</strong> — every step multiplies the schema tax. Cap steps for tool-heavy tasks.</li>
+      <li><strong>Audit the catalog</strong> — most teams have 2–5× more tools enabled than they use. Audit quarterly.</li>
+      <li><strong>Disable by default; enable on demand</strong> — make enabling a deliberate decision, not a default.</li>
+    </ul>
+    <p>A real audit: 188 tools globally → 52 tools per-workspace → ~13K tokens saved per agent task, before any other optimisation.</p>
+  `},
+  { id: 'lever-10', title: 'Lever 10: Usage limits & overages', body: `
+    <h2>Lever 10 — Usage limits & overages</h2>
+    <p><strong>Summary:</strong> Cap the bill before the bill caps you.</p>
+    <p><strong>Stats:</strong> 30%+ uncontrolled overage → 10–15% predictable overage.</p>
+    <p>The three-layer budget:</p>
+    <ul>
+      <li><strong>Per-user (ULB)</strong>: 150% of expected average.</li>
+      <li><strong>Cost-center</strong>: 80% alert, 100% hard cap.</li>
+      <li><strong>Enterprise</strong>: 80% alert, hard ceiling.</li>
+    </ul>
+    <p>Adopted as Day-0 setup, this is the lever that makes every other lever observable.</p>
+  `},
+  { id: 'lever-11', title: 'Lever 11: Power-user guidance', body: `
+    <h2>Lever 11 — Power-user guidance</h2>
+    <p><strong>Summary:</strong> Advanced optimization patterns for teams running the fundamentals.</p>
+    <p><strong>Stats:</strong> Compounding 5–10% additional savings on top of the baseline 37–44%.</p>
+    <p>For teams who have adopted the first ten levers and want to go further:</p>
+    <ul>
+      <li><strong>Parallel review subagents</strong> — fan out correctness / quality / security / architecture reviews to four subagents. 4× review coverage, 0.3× parent context cost.</li>
+      <li><strong>Cache-aware prompt assembly</strong> — order your prompt packet so the cache-stable prefix is byte-identical across calls, and the volatile content is at the end.</li>
+      <li><strong>Compaction over reset</strong> — when the context window hits 70%, compact rather than clear; the compacted summary becomes part of the cache-stable prefix and caches going forward.</li>
+      <li><strong>Speculative decoding</strong> — for self-hosted inference, EAGLE-3 / Lookahead Decoding can deliver 2–4× throughput without changing the model.</li>
+      <li><strong>Quantized serving</strong> — for self-hosted inference, AWQ INT4 + Marlin kernels give 3–4× memory and throughput wins with minimal accuracy loss.</li>
+    </ul>
+  `},
+];
+
+function renderPlaybook() {
+  $('#playToc').innerHTML = PLAYBOOK_SECTIONS.map((s, i) =>
+    `<a data-play-id="${s.id}" class="${i === 0 ? 'active' : ''}">${s.title}</a>`
+  ).join('');
+  $$('#playToc a').forEach(a => a.addEventListener('click', () => {
+    $$('#playToc a').forEach(x => x.classList.remove('active'));
+    a.classList.add('active');
+    const sec = PLAYBOOK_SECTIONS.find(s => s.id === a.dataset.playId);
+    $('#playContent').innerHTML = sec.body;
+    $('#playContent').scrollTop = 0;
+  }));
+  $('#playContent').innerHTML = PLAYBOOK_SECTIONS[0].body;
+}
+
+// ---------------- WORKSHOP ----------------
+const WORKSHOP = [
+  { week: 1, title: 'Week 1 · Foundations', steps: [
+    { id: 'w1-1', title: 'Default model to versatile tier (Sonnet)', meta: '5–8× savings · 1 min' },
+    { id: 'w1-2', title: 'Default reasoning effort to Low', meta: '3–14× output · 1 min' },
+    { id: 'w1-3', title: 'Enable Auto Mode', meta: '10% discount · 2 min' },
+    { id: 'w1-4', title: 'Set per-user limit (ULB) at 150%', meta: 'Caps runaway · 10 min' },
+    { id: 'w1-5', title: 'Set up Langfuse or Helicone observability', meta: 'Visibility · 1 hour' },
+  ]},
+  { week: 2, title: 'Week 2 · Context & prompts', steps: [
+    { id: 'w2-1', title: 'Adopt the escalation ladder', meta: '30–50% context · 10 min' },
+    { id: 'w2-2', title: 'Cap retrieved RAG chunks at 5–10', meta: '80–90% retrieval · 5 min' },
+    { id: 'w2-3', title: 'Add output caps to every code prompt', meta: '40–80% output · 1 min' },
+    { id: 'w2-4', title: 'Write AGENTS.md as landmines', meta: '20–23% cost · 20 min' },
+    { id: 'w2-5', title: 'Use path-scoped .instructions.md files', meta: '60–90% instructions · 20 min' },
+  ]},
+  { week: 3, title: 'Week 3 · Models & routing', steps: [
+    { id: 'w3-1', title: 'Plan with Opus, build with Sonnet', meta: '25–55% savings · Habit' },
+    { id: 'w3-2', title: 'Use subagents for discovery + review', meta: '~10× parent context · 15 min' },
+    { id: 'w3-3', title: 'Audit enabled MCP tools; scope per-workspace', meta: 'Up to 72% tool cut · 30 min' },
+    { id: 'w3-4', title: 'Hold instruction prefix stable for session', meta: '70–80% on cache hits · Habit' },
+    { id: 'w3-5', title: 'Capture a golden set of 50–200 prompts', meta: 'Regression testing · 1 hour' },
+  ]},
+  { week: 4, title: 'Week 4 · Governance', steps: [
+    { id: 'w4-1', title: 'One task = one session. /clear between tasks', meta: '30–50% long workflows · Habit' },
+    { id: 'w4-2', title: 'Compact at 70% context window', meta: '30% savings · Habit' },
+    { id: 'w4-3', title: 'Set up promptfoo or ragas eval harness', meta: 'Quality regression · 2 hours' },
+    { id: 'w4-4', title: 'Audit AGENTS.md / copilot-instructions.md', meta: 'Delete anything derivable · 30 min' },
+    { id: 'w4-5', title: 'Review per-developer spend; investigate outliers', meta: '2×+ outlier check · 1 hour' },
+  ]},
+];
+
+let wsState = JSON.parse(localStorage.getItem('to-ws') || '{}');
+
+function renderWorkshop() {
+  const totalSteps = WORKSHOP.reduce((s, w) => s + w.steps.length, 0);
+  $('#wsTotal').textContent = totalSteps;
+  const done = Object.values(wsState).filter(Boolean).length;
+  $('#wsCount').textContent = done;
+  $('#wsProgress').style.width = (done / totalSteps * 100) + '%';
+  $('#wsWeeks').innerHTML = WORKSHOP.map(w => `
+    <div class="week-col">
+      <h3>${w.title}</h3>
+      ${w.steps.map(s => `
+        <div class="step-card ${wsState[s.id] ? 'done' : ''}" data-id="${s.id}">
+          <div class="step-title">${s.title}</div>
+          <div class="step-meta">${s.meta}</div>
+        </div>
+      `).join('')}
+    </div>
+  `).join('');
+  $$('.step-card').forEach(c => c.addEventListener('click', () => {
+    const id = c.dataset.id;
+    wsState[id] = !wsState[id];
+    localStorage.setItem('to-ws', JSON.stringify(wsState));
+    renderWorkshop();
+  }));
+}
+
+// ---------------- INIT ----------------
+function init() {
+  renderAnatomy();
+  initCalculator();
+  initTechniques();
+  renderLanguages();
+  initCompression();
+  renderCacheControls();
+  updateCacheVerdict();
+  initMixing();
+  initModels();
+  renderWins();
+  initRepos();
+  renderPlaybook();
+  renderWorkshop();
+
+  // Initial hash routing
+  const v = location.hash.slice(1);
+  if (v && $$('.view').some(el => el.dataset.view === v)) showView(v);
+
+  // Wire language compute button
+  $('#langCompute').addEventListener('click', computeLanguages);
+  computeLanguages();
+}
+
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>

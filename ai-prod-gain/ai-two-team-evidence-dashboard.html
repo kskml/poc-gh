@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Productivity &amp; Cost-Reduction Calculator — Two-Team Evidence Edition</title>
+<style>
+  :root{
+    --bg:#f6f7fb; --card:#ffffff; --ink:#1a2035; --muted:#5b6478; --line:#e3e7f0;
+    --accent:#4f46e5; --accent2:#7c3aed; --good:#0e9f6e; --bad:#e02424; --warn:#d97706;
+    --chip:#eef0fb; --radius:14px; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Inter",sans-serif;background:var(--bg);color:var(--ink);line-height:1.55}
+  .wrap{max-width:1120px;margin:0 auto;padding:24px 20px 80px}
+  header.hero{background:linear-gradient(135deg,#312e81 0%,#4f46e5 60%,#7c3aed 100%);color:#fff;border-radius:var(--radius);padding:32px 30px;margin-bottom:18px}
+  header.hero h1{font-size:1.6rem;letter-spacing:-.02em;margin-bottom:6px}
+  header.hero p{opacity:.92;font-size:.94rem;max-width:880px;overflow-wrap:anywhere}
+  .hero .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+  .hero .chips span{background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.25);padding:3px 10px;border-radius:999px;font-size:.75rem}
+  section{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:26px;margin-bottom:22px}
+  h2{font-size:1.15rem;letter-spacing:-.01em;margin-bottom:4px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  h2 .no{background:var(--accent);color:#fff;width:24px;height:24px;border-radius:7px;display:inline-flex;align-items:center;justify-content:center;font-size:.8rem;flex:none}
+  h3{font-size:.95rem;margin:16px 0 8px}
+  .sub{color:var(--muted);font-size:.86rem;margin-bottom:18px;overflow-wrap:anywhere}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:12px;margin-bottom:22px}
+  .kpi{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
+  .kpi .v{font-size:1.35rem;font-weight:750;letter-spacing:-.02em;font-family:var(--mono);white-space:nowrap}
+  .kpi .v.red{color:var(--bad)} .kpi .v.green{color:var(--good)} .kpi .v.amber{color:var(--warn)} .kpi .v.indigo{color:var(--accent)}
+  .kpi .l{font-size:.66rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-top:2px}
+  .kpi .d{font-size:.7rem;color:var(--muted);margin-top:4px}
+  table{width:100%;border-collapse:collapse;font-size:.8rem}
+  th{text-align:left;font-size:.66rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);border-bottom:2px solid var(--line);padding:7px 8px}
+  td{border-bottom:1px solid var(--line);padding:7px 8px;vertical-align:top}
+  th.r,td.r{text-align:right;white-space:nowrap;font-family:var(--mono)}
+  td b{font-family:var(--mono)}
+  td.lbl{font-weight:600}
+  td .w{display:block;font-size:.68rem;color:var(--muted);font-weight:400;white-space:normal}
+  .table-scroll{overflow-x:auto} .table-scroll table{min-width:600px}
+  tr.grp td{background:#eef0fb;color:#312e81;font-size:.68rem;font-weight:800;text-transform:uppercase;letter-spacing:.06em;padding:6px 8px}
+  tr.hl td{background:#fafbff}
+  .pill{display:inline-block;font-size:.66rem;font-weight:700;border-radius:999px;padding:2px 9px;white-space:nowrap}
+  .pill.g{background:#ecfdf5;color:#065f46}.pill.y{background:#fffbeb;color:#92400e}.pill.r{background:#fef2f2;color:#991b1b}.pill.b{background:#eef2ff;color:#3730a3}.pill.n{background:#f1f5f9;color:#475569}
+  .fref{display:inline-block;font-family:var(--mono);font-size:.6rem;font-weight:700;color:#6366f1;background:#eef2ff;border-radius:5px;padding:0 5px;margin-left:6px;vertical-align:1px;white-space:nowrap}
+  .verdict{border-radius:10px;padding:14px 16px;font-size:.86rem;border:1px solid;line-height:1.6;margin-top:14px}
+  .verdict.ok{background:#ecfdf5;border-color:#a7f3d0}
+  .verdict.warn{background:#fffbeb;border-color:#fde68a}
+  .verdict.bad{background:#fef2f2;border-color:#fecaca}
+  .verdict.ind{background:#eef2ff;border-color:#c7d2fe}
+  .verdict b{display:block;margin-bottom:3px;font-size:.92rem}
+  .formula{background:#0f172a;color:#dbe4ff;border-radius:10px;padding:14px 16px;font-family:var(--mono);font-size:.76rem;overflow-x:auto;margin:10px 0;line-height:1.8}
+  .formula .c{color:#7dd3fc}
+  .note{font-size:.76rem;color:var(--muted);margin-top:10px;overflow-wrap:anywhere;line-height:1.6}
+  .phasepill{display:inline-flex;align-items:center;gap:6px;font-size:.66rem;font-weight:800;text-transform:uppercase;letter-spacing:.06em;border-radius:999px;padding:3px 11px}
+  .phasepill.p1{background:#eef2ff;color:#3730a3;border:1px solid #c7d2fe}
+  .phasepill.p2{background:#f5f3ff;color:#5b21b6;border:1px solid #ddd6fe}
+  /* collapsible reference sections */
+  details.coll{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);margin-bottom:22px}
+  details.coll>summary{cursor:pointer;list-style:none;padding:22px 26px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;user-select:none}
+  details.coll>summary::-webkit-details-marker{display:none}
+  details.coll>summary h2{margin:0}
+  details.coll>summary .chev{margin-left:auto;color:var(--muted);font-size:.8rem;font-weight:800;transition:transform .18s ease;flex:none}
+  details.coll[open]>summary{border-bottom:1px solid var(--line)}
+  details.coll[open]>summary .chev{transform:rotate(180deg)}
+  details.coll .cbody{padding:20px 26px 26px}
+  /* inputs */
+  .fgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(320px,100%),1fr));gap:14px;margin-bottom:6px}
+  .fgrp{background:#fafbff;border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+  .fgrp h4{font-size:.8rem;margin-bottom:10px;color:#312e81;text-transform:uppercase;letter-spacing:.04em}
+  .inrow{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:5px 0;border-bottom:1px dashed #eef1f7}
+  .inrow:last-child{border-bottom:none}
+  .inrow label{font-size:.78rem;color:var(--ink);flex:1;min-width:0}
+  .inrow label small{display:block;color:var(--muted);font-size:.66rem}
+  .inrow input[type=number],.inrow input[type=text]{width:96px;padding:5px 8px;border:1px solid #c9d0e0;border-radius:8px;font-family:var(--mono);font-size:.82rem;background:#fff;color:var(--ink);text-align:right}
+  .inrow input[type=text]{text-align:left;width:130px}
+  .inrow input:focus{outline:2px solid var(--accent);outline-offset:1px;border-color:var(--accent)}
+  .resetrow{display:flex;justify-content:flex-end;margin-top:10px}
+  .btn{border:1.5px solid var(--line);background:#fff;border-radius:999px;padding:7px 16px;font-size:.8rem;font-weight:700;cursor:pointer;color:var(--muted)}
+  .btn:hover{border-color:var(--accent);color:var(--accent)}
+  .inwarn{display:none;margin-top:10px;background:#fef2f2;border:1px solid #fecaca;color:#991b1b;border-radius:9px;padding:9px 13px;font-size:.78rem}
+  /* simulator */
+  .evchips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+  .evchips .ec{border:1.5px solid var(--line);background:#fff;border-radius:999px;padding:5px 13px;font-size:.74rem;font-weight:600;color:var(--muted)}
+  .evchips .ec b{color:var(--accent)}
+  .simbox{background:linear-gradient(180deg,#fbfbff,#f4f5fd);border:1px solid var(--line);border-radius:12px;padding:20px;margin-bottom:16px}
+  .simhead{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:8px}
+  .simhead .lbl{font-size:.86rem;font-weight:700}
+  .mval{font-size:2.4rem;font-weight:800;font-family:var(--mono);color:var(--accent);letter-spacing:-.03em}
+  .mval small{font-size:1.05rem;font-weight:700;color:var(--muted)}
+  input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:8px;border-radius:999px;background:linear-gradient(90deg,#c7d2fe,#4f46e5 55%,#7c3aed);outline:none;margin:14px 0 6px}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:26px;height:26px;border-radius:50%;background:#fff;border:3px solid var(--accent);box-shadow:0 1px 6px rgba(79,70,229,.35);cursor:pointer}
+  input[type=range]::-moz-range-thumb{width:20px;height:20px;border-radius:50%;background:#fff;border:3px solid var(--accent);box-shadow:0 1px 6px rgba(79,70,229,.35);cursor:pointer}
+  input[type=range]:focus-visible{outline:2px solid var(--accent);outline-offset:4px}
+  .tickrow{display:flex;justify-content:space-between;font-size:.66rem;color:var(--muted);font-family:var(--mono);margin:0 12px 12px}
+  .qrow{display:flex;gap:8px;flex-wrap:wrap}
+  .qbtn{border:1.5px solid var(--line);background:#fff;border-radius:999px;padding:6px 14px;font-size:.8rem;font-weight:700;cursor:pointer;color:var(--muted)}
+  .qbtn small{display:block;font-size:.62rem;font-weight:500;color:var(--muted)}
+  .qbtn.on{border-color:var(--accent);background:var(--chip);color:var(--accent)}
+  .twocol{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(340px,100%),1fr));gap:16px}
+  th.cur,td.cur{background:#f5f3ff}
+  .srcrow{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(230px,100%),1fr));gap:10px;margin-top:10px}
+  .srcrow .s{border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:.74rem;color:var(--muted);line-height:1.55}
+  .srcrow .s b{display:block;color:var(--ink);font-size:.8rem;margin-bottom:2px}
+  .srcrow .s .st{font-family:var(--mono);color:#312e81;font-weight:700}
+  .factrow{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(250px,100%),1fr));gap:10px;margin-top:10px}
+  .factrow .f{border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:10px;padding:10px 12px;font-size:.76rem;color:var(--muted);line-height:1.6}
+  .factrow .f b{display:block;color:var(--ink);font-size:.8rem;margin-bottom:2px}
+  .factrow .f .n{display:inline-flex;width:20px;height:20px;border-radius:6px;background:#eef2ff;color:#4f46e5;font-family:var(--mono);font-size:.68rem;font-weight:800;align-items:center;justify-content:center;margin-right:6px;vertical-align:-4px}
+  ul.assump{padding-left:20px;font-size:.8rem;color:var(--ink);line-height:1.7}
+  ul.assump li{margin-bottom:6px}
+  ul.assump code{font-family:var(--mono);font-size:.76rem;background:#eef2ff;color:#3730a3;border-radius:5px;padding:0 5px}
+  .live{font-size:.8rem;color:var(--muted);background:#fff;border:1px dashed var(--line);border-radius:9px;padding:10px 14px;margin-top:14px}
+  .live b{color:var(--ink)}
+  footer{color:var(--muted);font-size:.74rem;text-align:center;margin-top:8px;line-height:1.7}
+  footer b{color:var(--ink)}
+  @media (max-width:720px){
+    header.hero{padding:24px 20px}
+    header.hero h1{font-size:1.3rem}
+    section{padding:18px 14px}
+    details.coll>summary{padding:16px 14px}
+    details.coll .cbody{padding:16px 14px}
+    .mval{font-size:2rem}
+    .inrow input[type=number]{width:84px}
+  }
+  @media print{ .simbox{border:1px solid #ccc;background:#fff} section,details.coll{break-inside:avoid} }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <h1>AI Productivity &amp; Cost-Reduction Calculator</h1>
+  <p>A business-ready, fully transparent calculator for two teams adopting AI. <b>Phase 1</b> turns your observed sprint evidence into measured productivity and cost impact. <b>Phase 2</b> projects the gains when AI is applied as a <b>structured, process-redesigned pipeline</b>, using an industry-standard multiplier — defaulted to the Accenture × GitHub enterprise RCT (<b>+8.69%</b> PRs per developer). Every number links to a numbered formula, and every input is editable.</p>
+  <div class="chips">
+    <span>Phase 1 · observed evidence</span>
+    <span>Phase 2 · pipeline projection</span>
+    <span>Team 1 + Team 2 + Combined</span>
+    <span>Story points · FTE capacity released · € cost reduction</span>
+    <span>Formulas F1–F16 on the page</span>
+  </div>
+</header>
+
+<div class="kpis" id="kpiStrip">
+  <div class="kpi"><div class="v green" id="k1">+5.0%</div><div class="l">Team 1 · observed gain / FTE</div><div class="d" id="k1d">9.77 → 10.25 story pts/FTE/sprint</div></div>
+  <div class="kpi"><div class="v red" id="k2">−2.1%</div><div class="l">Team 2 · observed gain / FTE</div><div class="d" id="k2d">7.03 → 6.89 story pts/FTE/sprint</div></div>
+  <div class="kpi"><div class="v indigo" id="k3">+8.33%</div><div class="l">Cost break-even gain</div><div class="d" id="k3d">AI seat €100 ÷ labor €1,200</div></div>
+  <div class="kpi"><div class="v indigo" id="k4">+9.4%</div><div class="l">Combined gain · Phase 2</div><div class="d" id="k4d">FTE-weighted · multiplier 8.69%</div></div>
+  <div class="kpi"><div class="v green" id="k5">+1.31 FTE</div><div class="l">Capacity released · Phase 2</div><div class="d" id="k5d">FTE-equivalent · per month</div></div>
+  <div class="kpi"><div class="v green" id="k6">+€157</div><div class="l">Cost reduction · Phase 2</div><div class="d" id="k6d">+0.8% of €18,600 · net of tool</div></div>
+</div>
+
+<section id="s0">
+  <h2><span class="no">0</span>Inputs — Edit Any Number, Everything Recalculates</h2>
+  <p class="sub">Defaults are the observed two-team evidence and the standard cost model. Change team sizes, story points or costs — all tables, both phases, the combined summary and the scenario grid update instantly.</p>
+  <div class="fgrid">
+    <div class="fgrp">
+      <h4>Team 1 — observed sprint data</h4>
+      <div class="inrow"><label>Team name</label><input type="text" id="i_t1n" value="Team 1" aria-label="Team 1 name"></div>
+      <div class="inrow"><label>FTE · before AI<small>headcount in the baseline sprint</small></label><input type="number" id="i_t1f0" value="6.0" min="0.1" step="0.5" aria-label="Team 1 FTE before AI"></div>
+      <div class="inrow"><label>Story points · before AI<small>delivered in the baseline sprint</small></label><input type="number" id="i_t1p0" value="58.6" min="0.1" step="0.1" aria-label="Team 1 story points before AI"></div>
+      <div class="inrow"><label>FTE · with AI<small>headcount in the observed with-AI sprint</small></label><input type="number" id="i_t1f1" value="5.5" min="0.1" step="0.5" aria-label="Team 1 FTE with AI"></div>
+      <div class="inrow"><label>Story points · with AI<small>delivered in the with-AI sprint</small></label><input type="number" id="i_t1p1" value="56.4" min="0.1" step="0.1" aria-label="Team 1 story points with AI"></div>
+    </div>
+    <div class="fgrp">
+      <h4>Team 2 — observed sprint data</h4>
+      <div class="inrow"><label>Team name</label><input type="text" id="i_t2n" value="Team 2" aria-label="Team 2 name"></div>
+      <div class="inrow"><label>FTE · before AI</label><input type="number" id="i_t2f0" value="9.5" min="0.1" step="0.5" aria-label="Team 2 FTE before AI"></div>
+      <div class="inrow"><label>Story points · before AI</label><input type="number" id="i_t2p0" value="66.8" min="0.1" step="0.1" aria-label="Team 2 story points before AI"></div>
+      <div class="inrow"><label>FTE · with AI</label><input type="number" id="i_t2f1" value="11.5" min="0.1" step="0.5" aria-label="Team 2 FTE with AI"></div>
+      <div class="inrow"><label>Story points · with AI</label><input type="number" id="i_t2p1" value="79.2" min="0.1" step="0.1" aria-label="Team 2 story points with AI"></div>
+    </div>
+    <div class="fgrp">
+      <h4>Cost model <span class="fref">A1–A3</span></h4>
+      <div class="inrow"><label>Sprints per month<small>operating unit of the cost model</small></label><input type="number" id="i_spr" value="2" min="1" step="1" aria-label="Sprints per month"></div>
+      <div class="inrow"><label>Labor cost per FTE / month<small>fully loaded, €</small></label><input type="number" id="i_labor" value="1200" min="1" step="50" aria-label="Labor cost per FTE per month in euro"></div>
+      <div class="inrow"><label>AI seat cost per FTE / month<small>licence + usage, €</small></label><input type="number" id="i_ai" value="100" min="0" step="10" aria-label="AI seat cost per FTE per month in euro"></div>
+    </div>
+  </div>
+  <div class="inwarn" id="inWarn" role="alert"></div>
+  <div class="resetrow"><button class="btn" id="resetBtn" type="button">Reset to evidence defaults</button></div>
+  <p class="note">All monetary figures display in euro (€); the arithmetic is currency-agnostic. The Phase 2 industry multiplier is set in <a href="#s3" style="color:var(--accent)">Section 3</a>; formula IDs <span class="fref">F1</span>…<span class="fref">F16</span> are defined in <a href="#s6" style="color:var(--accent)">Section 6</a> (collapsible).</p>
+</section>
+
+<section id="s1">
+  <h2><span class="no">1</span>Baseline Evidence — What the Two Teams Actually Showed <span class="phasepill p1">Phase 1 inputs</span></h2>
+  <p class="sub">Each team is observed in a without-AI sprint and a with-AI sprint. Headcount moved between states (Team 1 −0.5 FTE, Team 2 +2.0 FTE), so all comparisons are normalized <b>per FTE</b> — the only fair metric when payroll size changes.</p>
+  <h3>Sprint-level evidence</h3>
+  <div class="table-scroll"><table>
+    <thead><tr><th>Team</th><th>State</th><th class="r">FTE</th><th class="r">Story points / sprint</th><th class="r">Story points / FTE / sprint <span class="fref">F1</span></th><th>Reading</th></tr></thead>
+    <tbody id="tbodySprint"></tbody>
+  </table></div>
+  <h3>Monthly view — the operating unit of the cost model</h3>
+  <div class="table-scroll"><table>
+    <thead><tr><th>Team &amp; state</th><th class="r">FTE</th><th class="r">Story points / month <span class="fref">F2</span></th><th class="r">Story pts / FTE / month <span class="fref">F4</span></th><th class="r">Cost / month <span class="fref">F3</span></th><th class="r">€ / story point <span class="fref">F5</span></th></tr></thead>
+    <tbody id="tbodyMonthly"></tbody>
+  </table></div>
+  <p class="note" id="noteActual"></p>
+  <div class="verdict ind" id="verdict1"></div>
+</section>
+
+<section id="s2">
+  <h2><span class="no">2</span>Phase 1 — Evidence-Based Results <span class="phasepill p1">Phase 1 · measured</span></h2>
+  <p class="sub">What the observed data says, with no projection. The framing throughout: <b>deliver the same baseline monthly output at the observed per-FTE efficiency</b>. If the team is more efficient per FTE, fewer FTE-months are needed — that capacity and its euro value are "released". The AI seat spend for the FTE-months actually needed is charged against it, so <b>monthly cost reduction is already net of tool cost</b>.</p>
+  <div class="table-scroll"><table>
+    <thead><tr><th>Metric</th><th class="r" id="h1t1">Team 1</th><th class="r" id="h1t2">Team 2</th><th class="r">Combined</th></tr></thead>
+    <tbody id="tbodyP1"></tbody>
+  </table></div>
+  <div class="formula" id="fP1">
+    Phase 1 chain: g = (story&nbsp;pts/FTE<sub>with&nbsp;AI</sub>) ÷ (story&nbsp;pts/FTE<sub>baseline</sub>) − 1 &nbsp;<span class="c">[F6]</span><br>
+    FTE needed = FTE ÷ (1+g) &nbsp;<span class="c">[F8]</span> &nbsp;·&nbsp; capacity released = FTE − FTE needed &nbsp;<span class="c">[F9]</span> &nbsp;·&nbsp; capacity value = released × labor &nbsp;<span class="c">[F10]</span> &nbsp;·&nbsp; AI spend = FTE needed × seat &nbsp;<span class="c">[F11]</span><br>
+    cost reduction = baseline cost − FTE needed × (labor + seat) &nbsp;<span class="c">[F12]</span> = capacity value − AI spend &nbsp;·&nbsp; break-even gain = (labor + seat) ÷ labor − 1 = <span class="c" id="fBE">+8.33%</span> &nbsp;<span class="c">[F13]</span>
+  </div>
+  <div class="verdict" id="verdict2"></div>
+  <p class="note" id="noteP1"></p>
+</section>
+
+<section id="s3">
+  <h2><span class="no">3</span>Phase 2 — Structured Pipeline Projection <span class="phasepill p2">Phase 2 · projected</span></h2>
+  <p class="sub">Phase 2 assumes AI is no longer a chat window bolted onto old habits, but a <b>disciplined pipeline</b>: work is routed to where AI helps most (greenfield code, tests, docs, review), AI review and test generation become pipeline stages, prompts and playbooks are standardized, and per-FTE unit metrics are tracked. The industry multiplier is applied <b>additively on top of each team's observed baseline</b> — adjusted gain = observed + multiplier.</p>
+  <div class="evchips">
+    <span class="ec"><b>Accenture × GitHub RCT:</b> +8.69% PRs/dev — default</span>
+    <span class="ec"><b>Bain:</b> 10–15% measured, up to 30%</span>
+    <span class="ec"><b>Gartner:</b> 25–30% projected band</span>
+    <span class="ec"><b>Capgemini:</b> 7–18% org-level</span>
+    <span class="ec"><b>Microsoft field:</b> up to +22% PRs</span>
+    <span class="ec"><b>DX 121k devs:</b> ~10% plateau without process change</span>
+  </div>
+  <div class="simbox">
+    <div class="simhead">
+      <div>
+        <div class="lbl">Industry multiplier — applied to both teams</div>
+        <div class="note" style="margin-top:2px" id="simHint">Default +8.69% = Accenture × GitHub RCT, the measured floor for a structured rollout. Tool parity needs: Team 1 ≥ 3.3% · Team 2 ≥ 10.4%</div>
+      </div>
+      <div class="mval"><span id="mVal">8.69</span><small>%</small></div>
+    </div>
+    <label for="mult" style="position:absolute;left:-9999px">Industry multiplier, percent</label>
+    <input type="range" id="mult" min="0" max="30" step="0.01" value="8.69" aria-label="Industry multiplier, percent">
+    <div class="tickrow"><span>0%</span><span>10%</span><span>20%</span><span>30%</span></div>
+    <div class="qrow">
+      <button class="qbtn on" data-m="8.69" type="button">8.69%<small>Accenture × GitHub RCT · default</small></button>
+      <button class="qbtn" data-m="10" type="button">10%<small>Bain floor</small></button>
+      <button class="qbtn" data-m="15" type="button">15%<small>Conservative</small></button>
+      <button class="qbtn" data-m="20" type="button">20%<small>Band midpoint</small></button>
+      <button class="qbtn" data-m="25" type="button">25%<small>Gartner floor</small></button>
+      <button class="qbtn" data-m="30" type="button">30%<small>Bain ceiling</small></button>
+    </div>
+  </div>
+  <div class="table-scroll"><table>
+    <thead><tr><th>Metric</th><th class="r" id="h2t1">Team 1</th><th class="r" id="h2t2">Team 2</th><th class="r">Combined</th></tr></thead>
+    <tbody id="tbodyP2"></tbody>
+  </table></div>
+  <div class="formula" id="fP2">
+    Phase 2 chain: g<sub>adj</sub> = g + multiplier &nbsp;<span class="c">[F7 additive]</span><br>
+    same chain as Phase 1 at g<sub>adj</sub> &nbsp;<span class="c">[F8–F12]</span> &nbsp;·&nbsp; tool-parity multiplier = break-even − g &nbsp;<span class="c">[F14]</span>
+  </div>
+  <div class="verdict" id="verdict3" aria-live="polite"></div>
+  <p class="note" id="noteP2"></p>
+</section>
+
+<section id="s4">
+  <h2><span class="no">4</span>Combined Summary — The One-Page Business View</h2>
+  <p class="sub">Every headline metric from both phases, per team and combined. Print this page (or screenshot this table) for the steering deck. Combined euros are the exact sum of the two teams; combined percentages are FTE-weighted; combined €/story point is output-weighted <span class="fref">F15 · F16</span>.</p>
+  <div class="table-scroll"><table>
+    <thead><tr><th>Metric</th><th class="r" id="h3t1">Team 1</th><th class="r" id="h3t2">Team 2</th><th class="r">Combined</th></tr></thead>
+    <tbody id="tbodySummary"></tbody>
+  </table></div>
+  <div class="live" id="liveLine" aria-live="polite"></div>
+</section>
+
+<section id="s5">
+  <h2><span class="no">5</span>Sensitivity — Every Multiplier in the Evidence Band</h2>
+  <p class="sub">The industry multiplier is the one planning assumption that moves the answer most, so every canonical stop of the band is computed. Left: monthly cost reduction (already net of the AI tool spend). Right: FTE capacity released. The row matching the current slider is highlighted.</p>
+  <div class="twocol">
+    <div>
+      <h3>Monthly cost reduction (net of tool) <span class="fref">F12</span></h3>
+      <div class="table-scroll"><table>
+        <thead><tr><th class="r">Multiplier</th><th class="r" id="g1t1">Team 1</th><th class="r" id="g1t2">Team 2</th><th class="r">Combined</th></tr></thead>
+        <tbody id="tbodyScenA"></tbody>
+      </table></div>
+    </div>
+    <div>
+      <h3>FTE capacity released <span class="fref">F9</span></h3>
+      <div class="table-scroll"><table>
+        <thead><tr><th class="r">Multiplier</th><th class="r" id="g2t1">Team 1</th><th class="r" id="g2t2">Team 2</th><th class="r">Combined</th></tr></thead>
+        <tbody id="tbodyScenB"></tbody>
+      </table></div>
+    </div>
+  </div>
+  <p class="note" id="noteScen"></p>
+</section>
+<details class="coll" id="s6">
+  <summary><h2><span class="no">6</span>Formula Reference — Nothing Hidden</h2><span class="chev" aria-hidden="true">▾</span></summary>
+  <div class="cbody">
+    <p class="sub">Every displayed number comes from one of these formulas. Symbols: <b>FTE<sub>B</sub></b> baseline headcount · <b>SP</b> sprint story points · <b>s</b> sprints/month · <b>L</b> labor €/FTE/month · <b>A</b> AI seat €/FTE-month · <b>m</b> industry multiplier · <b>g</b> the gain in question (observed g or adjusted g<sub>adj</sub>).</p>
+    <div class="formula">
+      <b>F1</b>&nbsp; story pts/FTE/sprint &nbsp;= SP ÷ FTE<br>
+      <b>F2</b>&nbsp; monthly output O &nbsp;= SP<sub>baseline</sub> × s<br>
+      <b>F3</b>&nbsp; monthly cost C &nbsp;= FTE<sub>B</sub> × L<br>
+      <b>F4</b>&nbsp; productivity Prod &nbsp;= O ÷ FTE<sub>B</sub> &nbsp;(story pts/FTE/month)<br>
+      <b>F5</b>&nbsp; cost per story point CP &nbsp;= C ÷ O<br>
+      <b>F6</b>&nbsp; observed gain g &nbsp;= (SP<sub>w</sub>÷FTE<sub>w</sub>) ÷ (SP<sub>B</sub>÷FTE<sub>B</sub>) − 1 &nbsp;<span class="c">Phase 1</span><br>
+      <b>F7</b>&nbsp; adjusted gain g<sub>adj</sub> &nbsp;= g + m &nbsp;<span class="c">additive — Phase 2</span><br>
+      <b>F8</b>&nbsp; FTE-months needed &nbsp;= FTE<sub>B</sub> ÷ (1+g)<br>
+      <b>F9</b>&nbsp; capacity released &nbsp;= FTE<sub>B</sub> − FTE needed &nbsp;= FTE<sub>B</sub> × g ÷ (1+g)<br>
+      <b>F10</b>&nbsp; capacity value &nbsp;= capacity released × L<br>
+      <b>F11</b>&nbsp; AI tool spend &nbsp;= FTE-months needed × A<br>
+      <b>F12</b>&nbsp; monthly cost reduction S &nbsp;= C − FTE needed × (L+A) &nbsp;= capacity value − AI spend<br>
+      <b>F13</b>&nbsp; break-even gain g<sub>be</sub> &nbsp;= (L+A) ÷ L − 1<br>
+      <b>F14</b>&nbsp; tool-parity multiplier &nbsp;= g<sub>be</sub> − g &nbsp;<span class="c">multiplier at which S = 0</span><br>
+      <b>F15</b>&nbsp; combined % gain &nbsp;= Σ(FTE<sub>i</sub> × g<sub>i</sub>) ÷ ΣFTE<sub>i</sub> &nbsp;<span class="c">FTE-weighted</span><br>
+      <b>F16</b>&nbsp; combined €/story point &nbsp;= Σ(O<sub>i</sub> × CP<sub>i</sub>) ÷ ΣO<sub>i</sub> &nbsp;<span class="c">output-weighted</span>
+    </div>
+    <p class="note">Worked example (Team 1, defaults): O = 58.6 × 2 = 117.2 story points · C = 6 × €1,200 = €7,200 · g = (56.4÷5.5) ÷ (58.6÷6) − 1 = <b>+4.99%</b> · FTE needed = 6 ÷ 1.0499 = 5.71 · capacity released = 0.29 FTE, value = 0.29 × €1,200 = <b>€343</b> · AI spend = 5.71 × €100 = <b>€571</b> · S = 7,200 − 5.71 × €1,300 = <b>−€229</b> (a cost increase). Phase 2 at m = +8.69%: g<sub>adj</sub> = +13.69% → FTE needed = 5.28 → S = 7,200 − 5.28 × €1,300 = <b>+€339</b>.</p>
+  </div>
+</details>
+
+<details class="coll" id="s7">
+  <summary><h2><span class="no">7</span>Assumptions</h2><span class="chev" aria-hidden="true">▾</span></summary>
+  <div class="cbody">
+    <h3>Key assumptions <span class="fref">A1–A10</span></h3>
+    <ul class="assump" id="assumpList">
+      <li><b>A1 · Cadence:</b> <code id="a1">2 sprints/month</code> per team, stable sprint composition; no vacation or holiday effects modelled.</li>
+      <li><b>A2 · Labor:</b> <code id="a2">€1,200 per FTE per month</code>, fully loaded, same in both states.</li>
+      <li><b>A3 · AI tool:</b> <code id="a3">€100 per FTE-month</code> for every active FTE-month; loaded AI-enabled FTE-month = <code id="a3b">€1,300</code>.</li>
+      <li><b>A4 · Same-output framing:</b> scenarios deliver the <i>baseline monthly output</i> at adjusted efficiency; freed capacity is redeployed, not a headcount cut.</li>
+      <li><b>A5 · Additive multiplier:</b> adjusted gain = observed + multiplier. Compounding would add only ~0.5–1.0 pt at these values; additive is the conservative choice.</li>
+      <li><b>A6 · Rounding &amp; combined rows:</b> per-team euros rounded, combined = exact sum of rounded parts; combined % = FTE-weighted; combined €/story point = output-weighted.</li>
+      <li><b>A7 · Confounding:</b> the with-AI sprint bundles AI with concurrent staffing changes (Team 1 −0.5, Team 2 +2.0 FTE); per-FTE normalization controls for size but cannot separate the effects.</li>
+      <li><b>A8 · Evidence depth:</b> one sprint per team per state — treat observed results as directions, not rates, until a rolling multi-sprint baseline confirms them.</li>
+      <li><b>A9 · Multipliers are benchmarks:</b> Accenture × GitHub, Bain, Gartner and Capgemini figures are external planning evidence, not measurements of these two teams; the observed rows are the only measured data here.</li>
+      <li><b>A10 · Currency:</b> figures display in euro (€); the arithmetic is currency-agnostic.</li>
+    </ul>
+    <p class="note"><b>Limitations.</b> Story points are an output proxy, not a value measure; one sprint per state is thin evidence; the staffing changes confound the with-AI observation; industry multipliers are external benchmarks; and the model is linear per month — it does not simulate ramp-up, quality rework, or scope mix. Use the observed rows for "what happened", the Phase 2 rows for "what a disciplined program should beat", and re-baseline every sprint.</p>
+  </div>
+</details>
+
+<details class="coll" id="s8">
+  <summary><h2><span class="no">8</span>Evidence &amp; What Moves the Needle</h2><span class="chev" aria-hidden="true">▾</span></summary>
+  <div class="cbody">
+    <h3>Industry evidence behind the multipliers</h3>
+    <div class="srcrow">
+      <div class="s"><b>Accenture × GitHub RCT 2024</b><span class="st">+8.69% PRs — default</span> Enterprise RCT: +8.69% PRs per developer, +15% merge rate, +84% build success — the measured floor for a structured rollout, and this tool's default multiplier.</div>
+      <div class="s"><b>Bain Technology Report 2025</b><span class="st">10–15%, up to 30%</span> Teams using AI assistants see 10–15% boosts; savings rarely convert to net capacity without process change.</div>
+      <div class="s"><b>Gartner (2024–25)</b><span class="st">25–30% projected</span> 90% of enterprise engineers will use AI assistants by 2028 (from &lt;14% in early 2024); disciplined programs project 25–30%.</div>
+      <div class="s"><b>Capgemini Research Institute 2024</b><span class="st">7–18% org-level</span> ~1,000 organizations report 7–18% engineering-function productivity improvement with GenAI.</div>
+      <div class="s"><b>Microsoft field experiment 2024</b><span class="st">up to +22% PRs</span> Reanalyzed by MIT GenAI; up to +22% PRs at highest AI usage — observational, upper-middle band.</div>
+      <div class="s"><b>GitHub Copilot RCT 2023 (Peng et al.)</b><span class="st">55.8% faster</span> n=95 RCT on a greenfield task — the task-level ceiling that pipelines should route work toward.</div>
+      <div class="s"><b>METR RCT 2025</b><span class="st">−19% (caution)</span> 16 experienced devs on mature repos were 19% slower with AI while believing they were 20% faster — the ad-hoc trap Phase 2 fixes.</div>
+      <div class="s"><b>DORA 2024 (&gt;39,000 pros)</b><span class="st">amplifier</span> Per 25% adoption: individual productivity +2.1%, but delivery throughput −1.5% without process redesign; docs quality +7.5%, review speed +3.1%.</div>
+      <div class="s"><b>DX 121,000-dev survey 2026</b><span class="st">~10% plateau</span> ~4 h/week saved; gains plateau at ~10% absent process change — the multiplier must be engineered, not assumed.</div>
+      <div class="s"><b>Duolingo × GitHub 2024</b><span class="st">67% faster review</span> Code-review turnaround 3h → 1h; +25% speed for devs new to a codebase vs +10% for veterans.</div>
+      <div class="s"><b>Meta TestGen-LLM 2024</b><span class="st">73% accepted</span> AI-generated unit tests accepted by engineers in production — test generation as a pipeline stage is proven.</div>
+      <div class="s"><b>McKinsey 2023–24</b><span class="st">task bands</span> Documentation 45–50%, code generation 35–45%, refactoring 20–30% time savings; less on high-complexity work.</div>
+    </div>
+    <h3>What improves productivity &amp; cost reduction most in a disciplined pipeline</h3>
+    <p class="note">Ranked by how much they move the two outcomes. These are the levers that turn the Phase 1 result into the Phase 2 multiplier.</p>
+    <div class="factrow">
+      <div class="f"><b><span class="n">1</span>Route work to where AI is strongest</b>Segment tasks: greenfield code (35–55%), unit tests, documentation (45–50%), review prep. DORA's reliance table shows exactly where teams already lean on AI — route deliberately, not by habit.</div>
+      <div class="f"><b><span class="n">2</span>Make AI review a pipeline gate</b>Duolingo cut review turnaround 3h → 1h; DeputyDev measured −23% review time per PR. Review is the highest-leverage shared stage — automate it first.</div>
+      <div class="f"><b><span class="n">3</span>Generate tests as a CI stage</b>Meta's TestGen-LLM saw 73% of AI tests accepted; GitHub's study found 53.2% higher odds of passing all unit tests. Tests convert AI speed into shippable speed and cut the 45% "debugging AI code" tax.</div>
+      <div class="f"><b><span class="n">4</span>Standardize prompts &amp; playbooks</b>Ziegler et al. (CACM): acceptance rate is the strongest predictor of realized productivity. Templates and prompt libraries raise acceptance and cut variance across developers.</div>
+      <div class="f"><b><span class="n">5</span>Onboard deliberately; respect the expert trap</b>Newcomers gain most (+25% at Duolingo); experts on mature code can go backwards (METR −19%). Assign AI-heavy flow to unfamiliar/greenfield work; keep experts on review and routing.</div>
+      <div class="f"><b><span class="n">6</span>Redesign the process, not just the tool</b>DORA 2024: more AI adoption without delivery redesign slightly <i>reduced</i> throughput (−1.5%). The multiplier comes from changing the pipeline, not from buying seats.</div>
+      <div class="f"><b><span class="n">7</span>Measure unit economics monthly</b>Track story points/FTE and € per story point per sprint (this tool's F4/F5). METR's perception gap (felt +20%, measured −19%) only surfaces with unit metrics.</div>
+      <div class="f"><b><span class="n">8</span>Beat the measured floor deliberately</b>The +8.69% Accenture × GitHub RCT figure is this tool's default multiplier; treat it as the floor to beat. Route work, gate reviews, generate tests, standardize prompts — and re-baseline every sprint.</div>
+    </div>
+  </div>
+</details>
+
+<noscript><div style="border:1px solid #e02424;background:#fef2f2;color:#991b1b;border-radius:10px;padding:12px 16px;font-size:.85rem;margin-bottom:18px">This calculator is interactive and needs JavaScript. The full default number set, every formula and the complete methodology are documented in the companion report <b>AI_Two_Team_Evidence_Report.md</b>.</div></noscript>
+
+<footer>
+  AI Productivity &amp; Cost-Reduction Calculator · two-team evidence edition · cost model <b>€1,200 labor + €100 AI seat per FTE-month</b> · 2 sprints/month · default multiplier <b>+8.69%</b> (Accenture × GitHub RCT)<br>
+  Companion report: <b>AI_Two_Team_Evidence_Report.md</b> — observed evidence, cost model and multiplier scenarios · User guide: <b>AI_Two_Team_Calculator_Guide.md</b> — every field, formula, verdict and lever in business language<br>
+  Related tools: ai-fte-productivity-calculator.html · ai-effort-reduction-estimator.html · ai-productivity-explained.html
+</footer>
+<script>
+(function(){
+"use strict";
+
+/* ---------- defaults ---------- */
+var DEF={spr:2,labor:1200,ai:100,mult:8.69,
+         t1n:"Team 1",t1f0:6.0,t1p0:58.6,t1f1:5.5,t1p1:56.4,
+         t2n:"Team 2",t2f0:9.5,t2p0:66.8,t2f1:11.5,t2p1:79.2};
+var NUMS=["i_spr","i_labor","i_ai"];
+var TEAMS=[["i_t1n","i_t1f0","i_t1p0","i_t1f1","i_t1p1"],["i_t2n","i_t2f0","i_t2p0","i_t2f1","i_t2p1"]];
+var STOPMS=[8.69,10,15,20,25,30];
+
+/* ---------- helpers ---------- */
+function $(id){return document.getElementById(id)}
+function num(id){var v=parseFloat($(id).value);return isFinite(v)?v:NaN}
+function txt(id){return $(id).value}
+function R(x){return x>=0?Math.floor(x+0.5):-Math.floor(-x+0.5)}
+function R2(x){return Math.round(x*100)/100}
+function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}
+function fmt0(x){return Math.abs(x).toLocaleString("en-US",{maximumFractionDigits:0})}
+function d(x,n){return x.toLocaleString("en-US",{minimumFractionDigits:n,maximumFractionDigits:n})}
+function eur(x){return "\u20AC"+fmt0(x)}
+function seur(x){return (x>=0?"+\u20AC":"\u2212\u20AC")+fmt0(x)}
+function pct(x,n){n=(n==null)?1:n;var v=x*100;var a=Math.abs(v).toFixed(n);return (v>0?"+":(v<0?"\u2212":""))+a+"%"}
+function sfte(x){return (x>=0?"+":"\u2212")+Math.abs(x).toFixed(2)}
+function fmtM(m){return Math.abs(m-Math.round(m))<0.005?String(Math.round(m)):m.toFixed(2)}
+function pill(v,txt){return '<span class="pill '+(v>0?"g":(v<0?"r":"n"))+'">'+txt+"</span>"}
+function row(label,ref,c1,c2,c3){return '<tr><td class="lbl">'+label+(ref?'<span class="fref">'+ref+"</span>":"")+"</td>"+'<td class="r">'+c1+'</td><td class="r">'+c2+'</td><td class="r">'+c3+"</td></tr>"}
+function grp(label){return '<tr class="grp"><td colspan="4">'+label+"</td></tr>"}
+function w(sub){return '<span class="w">'+sub+"</span>"}
+
+/* ---------- computation ---------- */
+function computeTeam(t,cfg,mPct){
+  var g=(t.p1/t.f1)/(t.p0/t.f0)-1;
+  var O=t.p0*cfg.spr,F=t.f0,C=F*cfg.labor;
+  var prodB=O/F,cpB=C/O,be=(cfg.labor+cfg.ai)/cfg.labor-1;
+  function ph(gain){
+    var fteNeed=F/(1+gain);
+    return {gain:gain,fteNeed:fteNeed,fteRel:F-fteNeed,
+      capVal:(F-fteNeed)*cfg.labor,aiSpend:fteNeed*cfg.ai,
+      save:C-fteNeed*(cfg.labor+cfg.ai),prod:prodB*(1+gain),
+      cp:(cfg.labor+cfg.ai)/(prodB*(1+gain))};
+  }
+  var p1=ph(g),gAdj=g+mPct/100,p2=ph(gAdj);
+  return {name:t.name,f0:t.f0,p0:t.p0,f1:t.f1,p1s:t.p1,g:g,O:O,F:F,C:C,
+    prodB:prodB,cpB:cpB,be:be,mParity:be-g,p1:p1,p2:p2,
+    spfB:t.p0/t.f0,spfA:t.p1/t.f1,
+    costActual:t.f1*(cfg.labor+cfg.ai),OActual:t.p1*cfg.spr};
+}
+function computeCombined(a,b,cfg){
+  var F=a.F+b.F,O=a.O+b.O,C=a.C+b.C;
+  var r={F:F,O:O,C:C,
+    g:(a.F*a.g+b.F*b.g)/F,gAdj:(a.F*a.p2.gain+b.F*b.p2.gain)/F,
+    prodB:O/F,cpB:C/O,
+    spfB:(a.p0+b.p0)/F,spfA:(a.F*a.spfA+b.F*b.spfA)/F,
+    prodA:(a.F*a.p1.prod+b.F*b.p1.prod)/F,
+    prodAdj:(a.F*a.p2.prod+b.F*b.p2.prod)/F,
+    cpA:(a.O*a.p1.cp+b.O*b.p1.cp)/O,
+    cpAdj:(a.O*a.p2.cp+b.O*b.p2.cp)/O,
+    fteRel1:R2(a.p1.fteRel)+R2(b.p1.fteRel),
+    capVal1:R(a.p1.capVal)+R(b.p1.capVal),
+    aiSpend1:R(a.p1.aiSpend)+R(b.p1.aiSpend),
+    save1:R(a.p1.save)+R(b.p1.save),
+    fteRel2:R2(a.p2.fteRel)+R2(b.p2.fteRel),
+    capVal2:R(a.p2.capVal)+R(b.p2.capVal),
+    aiSpend2:R(a.p2.aiSpend)+R(b.p2.aiSpend),
+    save2:R(a.p2.save)+R(b.p2.save)};
+  r.save1pct=r.save1/C;r.save2pct=r.save2/C;
+  var LA=cfg.labor+cfg.ai;                     /* exact combined parity multiplier (F14) */
+  function S(m){return (a.C-a.F*LA/(1+a.g+m))+(b.C-b.F*LA/(1+b.g+m))}
+  if(S(0)>=0){r.mParity=0}
+  else{var lo=0,hi=200;for(var i=0;i<80;i++){var mid=(lo+hi)/2;if(S(mid)<0){lo=mid}else{hi=mid}}r.mParity=hi}
+  return r;
+}
+
+/* ---------- section 1: baseline evidence ---------- */
+function renderSprint(a,b){
+  var h="";
+  [a,b].forEach(function(t){
+    h+='<tr><td><b>'+esc(t.name)+'</b></td><td>Before AI (baseline)</td><td class="r">'+d(t.f0,1)+'</td><td class="r">'+d(t.p0,1)+'</td><td class="r">'+d(t.spfB,2)+'</td><td>Reference level</td></tr>';
+    h+='<tr class="hl"><td>'+esc(t.name)+'</td><td>With AI (observed)</td><td class="r">'+d(t.f1,1)+'</td><td class="r">'+d(t.p1s,1)+'</td><td class="r">'+d(t.spfA,2)+'</td><td>'+pct(t.f1/t.f0-1)+' people, '+pct(t.p1s/t.p0-1)+' output \u2192 '+pill(t.g,pct(t.g))+' per FTE</td></tr>';
+  });
+  var pF=a.f1+b.f1,pP=a.p1s+b.p1s,pg=pP/pF/((a.p0+b.p0)/(a.f0+b.f0))-1;
+  h+='<tr><td><b>Combined (pooled)</b></td><td>Before AI (baseline)</td><td class="r">'+d(a.f0+b.f0,1)+'</td><td class="r">'+d(a.p0+b.p0,1)+'</td><td class="r">'+d((a.p0+b.p0)/(a.f0+b.f0),2)+'</td><td>Reference level</td></tr>';
+  h+='<tr class="hl"><td>Combined (pooled)</td><td>With AI (observed)</td><td class="r">'+d(pF,1)+'</td><td class="r">'+d(pP,1)+'</td><td class="r">'+d(pP/pF,2)+'</td><td>'+pill(pg,pct(pg,1))+' pooled per FTE \u2014 mixes in '+esc(b.name)+"'s headcount growth; the FTE-weighted view is in Section 2</td></tr>";
+  $("tbodySprint").innerHTML=h;
+}
+function renderMonthly(a,b,cfg){
+  var h="";
+  [a,b].forEach(function(t){
+    h+='<tr><td><b>'+esc(t.name)+'</b> \u00B7 before AI</td><td class="r">'+d(t.f0,1)+'</td><td class="r">'+d(t.O,1)+'</td><td class="r">'+d(t.prodB,2)+'</td><td class="r">'+eur(t.C)+'</td><td class="r">'+eur(t.cpB)+'</td></tr>';
+    h+='<tr class="hl"><td>'+esc(t.name)+' \u00B7 with AI (actual)</td><td class="r">'+d(t.f1,1)+'</td><td class="r">'+d(t.OActual,1)+'</td><td class="r">'+d(t.OActual/t.f1,2)+'</td><td class="r">'+eur(t.costActual)+'</td><td class="r">'+eur(t.costActual/t.OActual)+'</td></tr>';
+  });
+  var F=a.F+b.F,O=a.O+b.O,C=a.C+b.C;
+  h+='<tr><td><b>Combined</b> \u00B7 before AI</td><td class="r">'+d(F,1)+'</td><td class="r">'+d(O,1)+'</td><td class="r">'+d(O/F,2)+'</td><td class="r">'+eur(C)+'</td><td class="r">'+eur(C/O)+'</td></tr>';
+  var cF=a.f1+b.f1,cO=a.OActual+b.OActual,cC=a.costActual+b.costActual;
+  h+='<tr class="hl"><td>Combined \u00B7 with AI (actual)</td><td class="r">'+d(cF,1)+'</td><td class="r">'+d(cO,1)+'</td><td class="r">'+d(cO/cF,2)+'</td><td class="r">'+eur(cC)+'</td><td class="r">'+eur(cC/cO)+'</td></tr>';
+  $("tbodyMonthly").innerHTML=h;
+  var d1=a.costActual-a.C,d2=b.costActual-b.C,dc=d1+d2;
+  $("noteActual").innerHTML="Actual observed monthly spend moved with headcount, not efficiency: "+esc(a.name)+" "+seur(d1)+" ("+pct(d1/a.C)+"), "+esc(b.name)+" "+seur(d2)+" ("+pct(d2/b.C)+"), combined "+seur(dc)+" ("+pct(dc/C)+"). Near-flat spend is not the same as value: even "+esc(a.name)+"'s cost per story point rose while its payroll fell. Every scenario table below therefore uses the <b>same-output framing</b> \u2014 deliver the baseline output at adjusted efficiency \u2014 which isolates the efficiency question from staffing decisions.";
+  $("verdict1").innerHTML="<b>What the evidence shows</b> "+esc(a.name)+" produced "+pct(a.g)+" more story points per FTE with "+pct(a.f1/a.f0-1)+" people; "+esc(b.name)+" bought "+pct(b.p1s/b.p0-1)+" output with "+pct(b.f1/b.f0-1)+" people and lost "+pct(-b.g,1).replace("\u2212","")+" per FTE. Neither team clears the "+pct(a.be,2)+" cost break-even \u2014 "+esc(a.name)+" is "+d((a.be-a.g)*100,1)+" pts of gain short, "+esc(b.name)+" "+d((b.be-b.g)*100,1)+" pts short. Ad-hoc seat usage alone is not yet paying for itself; that is exactly the gap the Phase 2 structured pipeline is designed to close.";
+}
+
+/* ---------- section 2: phase 1 results ---------- */
+function renderP1(a,b,c,cfg){
+  var be=a.be;
+  $("fBE").textContent=pct(be,2);
+  var h=grp("Baseline \u2014 before AI");
+  h+=row("FTE","","<b>"+d(a.F,1)+"</b>","<b>"+d(b.F,1)+"</b>","<b>"+d(c.F,1)+"</b>");
+  h+=row("Monthly output (story points)","F2",d(a.O,1),d(b.O,1),d(c.O,1));
+  h+=row("Monthly cost","F3",eur(a.C),eur(b.C),eur(c.C));
+  h+=row("Productivity (story points/FTE/month)","F4",d(a.prodB,2),d(b.prodB,2),d(c.prodB,2));
+  h+=row("Cost per story point","F5",eur(a.cpB),eur(b.cpB),eur(c.cpB));
+  h+=grp("Phase 1 \u2014 observed with AI (evidence)");
+  h+=row("Story points/FTE/sprint \u00B7 before \u2192 with","F1 \u00B7 F6",d(a.spfB,2)+" \u2192 "+d(a.spfA,2),d(b.spfB,2)+" \u2192 "+d(b.spfA,2),d(c.spfB,2)+" \u2192 "+d(c.spfA,2)+" "+w("FTE-weighted"));
+  h+=row("Productivity gain per FTE","F6",pill(a.g,pct(a.g)),pill(b.g,pct(b.g)),'<span class="pill b">'+pct(c.g)+"</span>");
+  h+=row("Capacity released (FTE)","F9",pill(a.p1.fteRel,sfte(a.p1.fteRel)),pill(b.p1.fteRel,sfte(b.p1.fteRel)),pill(c.fteRel1,sfte(c.fteRel1)));
+  h+=row("Capacity value","F10",seur(a.p1.capVal),seur(b.p1.capVal),seur(c.capVal1));
+  h+=row("AI tool spend","F11",eur(a.p1.aiSpend),eur(b.p1.aiSpend),eur(c.aiSpend1));
+  h+=row("Monthly cost reduction \u2014 net of tool","F12",pill(a.p1.save,seur(a.p1.save)),pill(b.p1.save,seur(b.p1.save)),pill(c.save1,seur(c.save1)+" "+w(pct(c.save1pct))));
+  h+=row("Cost per story point \u00B7 with AI","F5",eur(a.p1.cp)+" "+w(pct(a.p1.cp/a.cpB-1)),eur(b.p1.cp)+" "+w(pct(b.p1.cp/b.cpB-1)),eur(c.cpA)+" "+w(pct(c.cpA/c.cpB-1)));
+  h+=row("Distance to break-even "+pct(be,2),"F13",'<span class="pill r">\u2212'+d((be-a.g)*100,1)+" pts</span>",'<span class="pill r">\u2212'+d((be-b.g)*100,1)+" pts</span>",'<span class="pill r">\u2212'+d((be-c.g)*100,1)+" pts</span>");
+  h+=row("Tool-parity multiplier","F14",'<span class="pill n">\u2265'+d(a.mParity*100,1)+"%</span>",'<span class="pill n">\u2265'+d(b.mParity*100,1)+"%</span>",'<span class="pill n">\u2265'+d(c.mParity*100,1)+"%</span>");
+  h+=row("Status","","<span class='pill r'>Below break-even</span>","<span class='pill r'>Below break-even</span>","<span class='pill r'>Below break-even</span>");
+  $("tbodyP1").innerHTML=h;
+  $("verdict2").className="verdict warn";
+  $("verdict2").innerHTML="<b>Phase 1 verdict \u2014 measured, not projected</b> Delivering each team's baseline output at its observed per-FTE efficiency releases "+sfte(c.fteRel1)+" FTE across the group ("+esc(a.name)+" "+sfte(a.p1.fteRel)+", "+esc(b.name)+" "+sfte(b.p1.fteRel)+") \u2014 worth "+seur(c.capVal1)+" of capacity, against "+eur(c.aiSpend1)+" of seat spend: a net "+seur(c.save1)+" per month ("+pct(c.save1pct)+" of baseline spend). Ad-hoc AI usage has not yet reduced cost; "+esc(a.name)+" needs a further +"+d(a.mParity*100,1)+"% of per-FTE gain just to reach tool parity, "+esc(b.name)+" +"+d(b.mParity*100,1)+"%. Phase 1 charges only the AI seat spend \u2014 the observed state is whatever the teams did organically.";
+  $("noteP1").innerHTML="Negative \u201Ccost reduction\u201D = a cost increase. Seat spend is charged on the FTE-months actually needed to deliver the baseline output (FTE \u00F7 (1+g)), not the whole payroll. "+esc(a.name)+"'s actual monthly cost fell "+eur(a.C-a.costActual)+" because headcount also fell \u2014 spend and efficiency are different questions; this table answers the efficiency one. Freed capacity is capacity to redeploy (roadmap, quality, tech debt), not a salary saving.";
+}
+
+/* ---------- section 3: phase 2 projection ---------- */
+function statusPill(save){
+  if(save>=0)return '<span class="pill g">Covers the tool spend</span>';
+  return '<span class="pill r">Below tool parity</span>';
+}
+function renderP2(a,b,c,cfg,scens){
+  var m=cfg.m;
+  var h=grp("Adjusted pipeline \u2014 multiplier "+fmtM(m)+"% on top of observed gain");
+  h+=row("Adjusted gain (observed + multiplier)","F7",pill(a.p2.gain,pct(a.p2.gain)),pill(b.p2.gain,pct(b.p2.gain)),'<span class="pill b">'+pct(c.gAdj)+"</span>");
+  h+=row("Productivity (story points/FTE/month)","F4",d(a.p2.prod,2),d(b.p2.prod,2),d(c.prodAdj,2));
+  h+=row("Capacity released (FTE)","F9",pill(a.p2.fteRel,sfte(a.p2.fteRel)),pill(b.p2.fteRel,sfte(b.p2.fteRel)),pill(c.fteRel2,sfte(c.fteRel2)));
+  h+=row("Capacity value","F10",seur(a.p2.capVal),seur(b.p2.capVal),seur(c.capVal2));
+  h+=row("AI tool spend","F11",eur(a.p2.aiSpend),eur(b.p2.aiSpend),eur(c.aiSpend2));
+  h+=row("Monthly cost reduction \u2014 net of tool","F12",pill(a.p2.save,seur(a.p2.save)+" "+w(pct(a.p2.save/a.C))),pill(b.p2.save,seur(b.p2.save)+" "+w(pct(b.p2.save/b.C))),pill(c.save2,seur(c.save2)+" "+w(pct(c.save2pct))));
+  h+=row("Cost per story point \u2014 adjusted","F5",eur(a.p2.cp)+" "+w(pct(a.p2.cp/a.cpB-1)),eur(b.p2.cp)+" "+w(pct(b.p2.cp/b.cpB-1)),eur(c.cpAdj)+" "+w(pct(c.cpAdj/c.cpB-1)));
+  h+=row("Status","",statusPill(a.p2.save),statusPill(b.p2.save),statusPill(c.save2));
+  $("tbodyP2").innerHTML=h;
+  var v=$("verdict3"),cls,txt;
+  if(c.save2>=0&&R(a.p2.save)>=0&&R(b.p2.save)>=0){
+    cls="ok";
+    txt="<b>Phase 2 verdict at "+fmtM(m)+"% \u2014 covers the tool spend in both teams</b> The structured pipeline releases \u2248"+d(c.fteRel2,2)+" FTE of capacity per month and reduces combined cost by "+seur(c.save2)+" ("+pct(c.save2pct)+" of baseline) after AI seat spend \u2014 "+esc(a.name)+" "+seur(R(a.p2.save))+", "+esc(b.name)+" "+seur(R(b.p2.save))+".";
+  }else if(c.save2>=0){
+    cls="warn";
+    var belowT=R(a.p2.save)<0?a:b, aboveT=(belowT===a)?b:a;
+    txt="<b>Phase 2 verdict at "+fmtM(m)+"% \u2014 combined covers the tool spend, one team does not yet</b> The pipeline releases \u2248"+d(c.fteRel2,2)+" FTE/month and reduces combined cost by "+seur(c.save2)+" ("+pct(c.save2pct)+" of baseline). "+esc(aboveT.name)+" is above parity ("+seur(R(aboveT.p2.save))+"); "+esc(belowT.name)+" is still below its "+d(belowT.mParity*100,1)+"% parity bar ("+seur(R(belowT.p2.save))+"). Both teams clear parity from a multiplier of "+d(Math.max(a.mParity,b.mParity)*100,1)+"%.";
+  }else{
+    cls="bad";
+    txt="<b>Phase 2 verdict at "+fmtM(m)+"% \u2014 below tool parity</b> Even the structured pipeline does not cover seat spend at this multiplier: combined "+seur(c.save2)+"/month. The combined programme covers the tool spend from \u2248"+d(c.mParity*100,1)+"% (F14) \u2014 raise the multiplier, or the discipline behind it, before counting on these savings.";
+  }
+  v.className="verdict "+cls;v.innerHTML=txt;
+  $("noteP2").innerHTML="The multiplier is <b>additive</b> on the observed gain (compounding would add only \u22480.5\u20131 pt \u2014 A5). The default +8.69% is the Accenture \u00D7 GitHub enterprise RCT \u2014 the measured floor for a structured rollout. "+esc(b.name)+" needs a higher multiplier ("+d(b.mParity*100,1)+"% vs "+esc(a.name)+"'s "+d(a.mParity*100,1)+"%) because its baseline output per FTE is "+d(b.prodB/a.prodB*100,0)+"% of "+esc(a.name)+"'s \u2014 the same multiplier buys less capacity where the baseline is lower.";
+}
+
+/* ---------- section 4: combined summary ---------- */
+function renderSummary(a,b,c,cfg){
+  var h=grp("Baseline \u2014 before AI");
+  h+=row("Monthly cost","F3",eur(a.C),eur(b.C),eur(c.C));
+  h+=row("Monthly output (story points)","F2",d(a.O,1),d(b.O,1),d(c.O,1));
+  h+=row("Productivity (story points/FTE/month)","F4",d(a.prodB,2),d(b.prodB,2),d(c.prodB,2));
+  h+=row("Cost per story point","F5",eur(a.cpB),eur(b.cpB),eur(c.cpB));
+  h+=grp("Phase 1 \u2014 observed evidence");
+  h+=row("Productivity gain / FTE","F6",pill(a.g,pct(a.g)),pill(b.g,pct(b.g)),'<span class="pill b">'+pct(c.g)+"</span>");
+  h+=row("Capacity released (FTE)","F9",sfte(a.p1.fteRel),sfte(b.p1.fteRel),sfte(c.fteRel1));
+  h+=row("Cost reduction \u2014 net of tool","F12",pill(a.p1.save,seur(a.p1.save)),pill(b.p1.save,seur(b.p1.save)),pill(c.save1,seur(c.save1)));
+  h+=row("Status","","<span class='pill r'>Below break-even</span>","<span class='pill r'>Below break-even</span>","<span class='pill r'>Below break-even</span>");
+  h+=grp("Phase 2 \u2014 projected @ "+fmtM(cfg.m)+"%");
+  h+=row("Productivity gain / FTE","F7",pill(a.p2.gain,pct(a.p2.gain)),pill(b.p2.gain,pct(b.p2.gain)),'<span class="pill b">'+pct(c.gAdj)+"</span>");
+  h+=row("Capacity released (FTE)","F9",sfte(a.p2.fteRel),sfte(b.p2.fteRel),sfte(c.fteRel2));
+  h+=row("Cost reduction \u2014 net of tool","F12",pill(a.p2.save,seur(a.p2.save)),pill(b.p2.save,seur(b.p2.save)),pill(c.save2,seur(c.save2)));
+  h+=row("Status","",statusPill(a.p2.save),statusPill(b.p2.save),statusPill(c.save2));
+  $("tbodySummary").innerHTML=h;
+}
+
+/* ---------- section 5: scenario grid ---------- */
+function renderScen(scens,curM,c){
+  var ha="",hb="";
+  scens.forEach(function(s){
+    var k=Math.abs(s.m-curM)<0.005?" cur":"";
+    ha+='<tr><td class="r'+k+'">'+fmtM(s.m)+'%</td><td class="r'+k+'">'+pill(R(s.a.p2.save),seur(R(s.a.p2.save)))+'</td><td class="r'+k+'">'+pill(R(s.b.p2.save),seur(R(s.b.p2.save)))+'</td><td class="r'+k+'">'+pill(s.c.save2,seur(s.c.save2))+"</td></tr>";
+    hb+='<tr><td class="r'+k+'">'+fmtM(s.m)+'%</td><td class="r'+k+'">'+sfte(R2(s.a.p2.fteRel))+'</td><td class="r'+k+'">'+sfte(R2(s.b.p2.fteRel))+'</td><td class="r'+k+'">'+sfte(s.c.fteRel2)+"</td></tr>";
+  });
+  $("tbodyScenA").innerHTML=ha;$("tbodyScenB").innerHTML=hb;
+  var first=null;scens.forEach(function(s){if(first===null&&s.c.save2>=0&&R(s.a.p2.save)>=0&&R(s.b.p2.save)>=0)first=s.m});
+  var per5=R((scens[5].c.save2-scens[1].c.save2)/4);
+  $("noteScen").innerHTML="Each +5 pts of engineered multiplier (10% \u2192 30%) moves combined monthly cost reduction by \u2248"+seur(per5)+". The default +8.69% (Accenture \u00D7 GitHub RCT) yields "+seur(scens[0].c.save2)+"/month combined ("+esc(scens[0].a.name)+" "+seur(R(scens[0].a.p2.save))+", "+esc(scens[0].b.name)+" "+seur(R(scens[0].b.p2.save))+"). "+(first?("Both teams clear tool parity from the "+fmtM(first)+"% stop."):"No stop in this band clears tool parity for both teams.")+" At the 25% stop the combined saving is "+seur(scens[4].c.save2)+"/month.";
+}
+
+/* ---------- chrome: KPIs, headers, hints, assumptions ---------- */
+function setKPI(id,cls,val,sub){var e=$(id);e.className="v"+(cls?" "+cls:"");e.textContent=val;$(id+"d").textContent=sub}
+function updateChrome(a,b,c,cfg){
+  var m=cfg.m;
+  $("mVal").textContent=fmtM(m);
+  var btns=document.querySelectorAll(".qbtn");
+  for(var i=0;i<btns.length;i++){var q=btns[i];q.className="qbtn"+(Math.abs(parseFloat(q.getAttribute("data-m"))-m)<0.005?" on":"")}
+  ["h1t1","h2t1","h3t1","g1t1","g2t1"].forEach(function(id){$(id).textContent=esc(a.name)});
+  ["h1t2","h2t2","h3t2","g1t2","g2t2"].forEach(function(id){$(id).textContent=esc(b.name)});
+  setKPI("k1",a.g>=0?"green":"red",pct(a.g),d(a.spfB,2)+" \u2192 "+d(a.spfA,2)+" story pts/FTE/sprint");
+  setKPI("k2",b.g>=0?"green":"red",pct(b.g),d(b.spfB,2)+" \u2192 "+d(b.spfA,2)+" story pts/FTE/sprint");
+  setKPI("k3","indigo",pct(a.be,2),"AI seat "+eur(cfg.ai)+" \u00F7 labor "+eur(cfg.labor));
+  setKPI("k4","indigo",pct(c.gAdj),"FTE-weighted \u00B7 multiplier "+fmtM(m)+"%");
+  setKPI("k5",c.fteRel2>=0?"green":"red",sfte(c.fteRel2)+" FTE","FTE-equivalent \u00B7 per month");
+  setKPI("k6",c.save2>=0?"green":"red",seur(c.save2),pct(c.save2pct)+" of "+eur(c.C)+" \u00B7 net of tool");
+  $("simHint").innerHTML="Default +8.69% = Accenture \u00D7 GitHub RCT, the measured floor for a structured rollout. Quick presets below. Tool parity needs: "+esc(a.name)+" \u2265 "+d(a.mParity*100,1)+"% \u00B7 "+esc(b.name)+" \u2265 "+d(b.mParity*100,1)+"%";
+  $("a1").textContent=cfg.spr+" sprints/month";
+  $("a2").textContent=eur(cfg.labor)+" per FTE per month";
+  $("a3").textContent=eur(cfg.ai)+" per FTE-month";
+  $("a3b").textContent=eur(cfg.labor+cfg.ai);
+  $("liveLine").innerHTML="At a <b>"+fmtM(m)+"%</b> industry multiplier: <b>"+esc(a.name)+"</b> delivers its baseline "+d(a.O,1)+" story points/month for <b>"+seur(R(a.p2.save))+"</b> "+(R(a.p2.save)>=0?"less":"more")+"; <b>"+esc(b.name)+"</b> its "+d(b.O,1)+" for <b>"+seur(R(b.p2.save))+"</b>; combined <b>"+seur(c.save2)+"/month</b> ("+pct(c.save2pct)+" of "+eur(c.C)+"), releasing <b>"+sfte(c.fteRel2)+" FTE</b> of capacity. The programme covers the tool spend from a combined multiplier of \u2248<b>"+d(c.mParity*100,1)+"%</b> (F14).";
+}
+
+/* ---------- wire-up ---------- */
+function readCfg(){
+  function T(ids){return {name:(txt(ids[0])||("\u2014")),f0:num(ids[1]),p0:num(ids[2]),f1:num(ids[3]),p1:num(ids[4])}}
+  var cfg={spr:num("i_spr"),labor:num("i_labor"),ai:num("i_ai")};
+  cfg.t1=T(TEAMS[0]);cfg.t2=T(TEAMS[1]);cfg.m=parseFloat($("mult").value);
+  return cfg;
+}
+function valid(cfg){
+  return [cfg.t1,cfg.t2].every(function(t){return t.f0>0&&t.p0>0&&t.f1>0&&t.p1>0})
+    &&cfg.spr>0&&cfg.labor>0&&cfg.ai>=0;
+}
+function recalc(){
+  var cfg=readCfg();
+  if(!valid(cfg)){$("inWarn").style.display="block";$("inWarn").textContent="Enter positive values for FTE, story points, sprints per month and labor cost (AI seat may be zero). Results update as soon as the inputs are valid.";return}
+  $("inWarn").style.display="none";
+  var a=computeTeam(cfg.t1,cfg,cfg.m),b=computeTeam(cfg.t2,cfg,cfg.m),c=computeCombined(a,b,cfg);
+  var scens=STOPMS.map(function(mm){var aa=computeTeam(cfg.t1,cfg,mm),bb=computeTeam(cfg.t2,cfg,mm);return {m:mm,a:aa,b:bb,c:computeCombined(aa,bb,cfg)}});
+  renderSprint(a,b);renderMonthly(a,b,cfg);renderP1(a,b,c,cfg);
+  renderP2(a,b,c,cfg,scens);renderSummary(a,b,c,cfg);renderScen(scens,cfg.m,c);
+  updateChrome(a,b,c,cfg,scens);
+}
+function setV(id,v){$(id).value=String(v)}
+function init(){
+  NUMS.concat([TEAMS[0][0],TEAMS[0][1],TEAMS[0][2],TEAMS[0][3],TEAMS[0][4],TEAMS[1][0],TEAMS[1][1],TEAMS[1][2],TEAMS[1][3],TEAMS[1][4]]).forEach(function(id){$(id).addEventListener("input",recalc)});
+  $("mult").addEventListener("input",recalc);
+  var btns=document.querySelectorAll(".qbtn");
+  for(var i=0;i<btns.length;i++){btns[i].addEventListener("click",function(){setV("mult",this.getAttribute("data-m"));recalc()})}
+  var anchors=document.querySelectorAll('a[href^="#"]');
+  for(var j=0;j<anchors.length;j++){anchors[j].addEventListener("click",function(){var t=document.getElementById(this.getAttribute("href").slice(1));if(t&&t.tagName==="DETAILS"){t.open=true}})}
+  $("resetBtn").addEventListener("click",function(){
+    setV("i_spr",DEF.spr);setV("i_labor",DEF.labor);setV("i_ai",DEF.ai);
+    setV("i_t1n",DEF.t1n);setV("i_t1f0",DEF.t1f0);setV("i_t1p0",DEF.t1p0);setV("i_t1f1",DEF.t1f1);setV("i_t1p1",DEF.t1p1);
+    setV("i_t2n",DEF.t2n);setV("i_t2f0",DEF.t2f0);setV("i_t2p0",DEF.t2p0);setV("i_t2f1",DEF.t2f1);setV("i_t2p1",DEF.t2p1);
+    setV("mult",DEF.mult);recalc();
+  });
+  recalc();
+}
+if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",init)}else{init()}
+
+})();
+</script>
+
+</div>
+</body>
+</html>
